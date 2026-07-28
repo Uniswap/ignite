@@ -10,6 +10,7 @@ import type {
   WorkflowDocument,
 } from '@ignite/api';
 import { sanitizeDisplayText } from '@ignite/api';
+import { explorersFetched } from '../explorers/explorersSlice';
 import type {
   DraftCallStep,
   DraftDeployExtras,
@@ -940,6 +941,22 @@ const deployDraftSlice = createSlice({
     clearDraft() {
       return initialState;
     },
+  },
+  extraReducers: (builder) => {
+    // The draft keeps its own copy of the selection and is persisted across
+    // reloads, so a rotated chain-sourced id outlives the entry it named. It
+    // renders no checkbox to clear it and fails validation with
+    // EXPLORER_NOT_FOUND, which leaves review permanently unable to launch, so
+    // it is dropped as soon as the server states which entries exist.
+    builder.addCase(explorersFetched, (state, action) => {
+      const key = String(action.payload.chainId);
+      const selected = state.explorerSelection[key];
+      if (!selected) return;
+      const available = new Set(
+        action.payload.data.entries.map((entry) => entry.id)
+      );
+      state.explorerSelection[key] = selected.filter((id) => available.has(id));
+    });
   },
 });
 

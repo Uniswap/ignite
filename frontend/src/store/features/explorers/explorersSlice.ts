@@ -38,8 +38,14 @@ const explorersSlice = createSlice({
       action: PayloadAction<{ chainId: number; data: ListExplorersData }>
     ) {
       const key = String(action.payload.chainId);
-      state.byChain[key] = action.payload.data.entries;
-      state.selection[key] = action.payload.data.selection;
+      const { entries, selection } = action.payload.data;
+      state.byChain[key] = entries;
+      // A stored selection can name an entry the server no longer lists:
+      // chain-sourced ids are content hashed, so a chain-list refresh rotates
+      // them. Such an id renders no checkbox to clear it and fails validation
+      // with EXPLORER_NOT_FOUND, so it must not survive into a new draft.
+      const available = new Set(entries.map((entry) => entry.id));
+      state.selection[key] = selection.filter((id) => available.has(id));
     },
     explorersFetchFailed(state, action: PayloadAction<number>) {
       const key = String(action.payload);

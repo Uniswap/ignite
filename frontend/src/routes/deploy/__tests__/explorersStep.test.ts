@@ -111,4 +111,24 @@ describe('explorer wizard behavior', () => {
       )
     ).toContain(explorerEntriesInvalidated.type);
   });
+
+  // Chain-sourced ids are content hashed, so a chain-list refresh rotates them.
+  // A selected id the server no longer lists can never be unchecked (it renders
+  // no checkbox) and fails validation with EXPLORER_NOT_FOUND, which silently
+  // disables deployment, so it has to be dropped when entries load.
+  it('drops selected ids the server no longer lists', () => {
+    const loaded = explorersFetched({
+      chainId: 1,
+      data: { entries: [entry], selection: ['scan', 'rotated'] },
+    });
+
+    const draft = deployDraftReducer(
+      deployDraftReducer(undefined, setExplorerSelection({ '1': ['scan', 'rotated'] })),
+      loaded
+    );
+    expect(draft.explorerSelection['1']).toEqual(['scan']);
+
+    // Also pruned in the remembered selection, which seeds new drafts.
+    expect(explorersReducer(undefined, loaded).selection['1']).toEqual(['scan']);
+  });
 });
