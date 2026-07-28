@@ -38,8 +38,14 @@ const explorersSlice = createSlice({
       action: PayloadAction<{ chainId: number; data: ListExplorersData }>
     ) {
       const key = String(action.payload.chainId);
-      state.byChain[key] = action.payload.data.entries;
-      state.selection[key] = action.payload.data.selection;
+      const { entries, selection } = action.payload.data;
+      state.byChain[key] = entries;
+      // A stored selection can name an entry the server no longer lists:
+      // chain-sourced ids are content hashed, so a chain-list refresh rotates
+      // them. Such an id renders no checkbox to clear it and fails validation
+      // with EXPLORER_NOT_FOUND, so it must not survive into a new draft.
+      const available = new Set(entries.map((entry) => entry.id));
+      state.selection[key] = selection.filter((id) => available.has(id));
     },
     explorersFetchFailed(state, action: PayloadAction<number>) {
       const key = String(action.payload);
@@ -70,6 +76,13 @@ const explorersSlice = createSlice({
     ) {
       state.selection[String(action.payload.chainId)] = action.payload.entryIds;
     },
+    // Verifier discovery is cached per plugin, and a verifier reports
+    // needs-config by returning no explorers. Once its configuration changes
+    // the cached entries describe the old state, so they are dropped back to
+    // the never-requested sentinel and the fetch guards request them again.
+    explorerEntriesInvalidated(state) {
+      state.byChain = {};
+    },
   },
 });
 
@@ -81,6 +94,7 @@ export const {
   explorerRemoved,
   explorerSelectionReceived,
   explorerSelectionSet,
+  explorerEntriesInvalidated,
 } = explorersSlice.actions;
 export const explorersReducer = explorersSlice.reducer;
 export { initialState as explorersInitialState };
