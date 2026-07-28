@@ -70,6 +70,13 @@ const explorersSlice = createSlice({
     ) {
       state.selection[String(action.payload.chainId)] = action.payload.entryIds;
     },
+    // Verifier discovery is cached per plugin, and a verifier reports
+    // needs-config by returning no explorers. Once its configuration changes
+    // the cached entries describe the old state, so they are dropped back to
+    // the never-requested sentinel and the fetch guards request them again.
+    explorerEntriesInvalidated(state) {
+      state.byChain = {};
+    },
   },
 });
 
@@ -81,6 +88,7 @@ export const {
   explorerRemoved,
   explorerSelectionReceived,
   explorerSelectionSet,
+  explorerEntriesInvalidated,
 } = explorersSlice.actions;
 export const explorersReducer = explorersSlice.reducer;
 export { initialState as explorersInitialState };

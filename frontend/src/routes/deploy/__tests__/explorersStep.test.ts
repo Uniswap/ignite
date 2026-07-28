@@ -7,10 +7,13 @@ import {
   setExplorerSelection,
 } from '../../../store/features/deployments/deployDraftSlice';
 import {
+  explorerEntriesInvalidated,
   explorerReceived,
   explorerSelectionReceived,
+  explorersFetched,
   explorersReducer,
 } from '../../../store/features/explorers/explorersSlice';
+import { pluginsApi } from '../../../store/features/plugins/pluginsSlice';
 
 const entry: ExplorerEntry = {
   id: 'scan',
@@ -64,5 +67,48 @@ describe('explorer wizard behavior', () => {
       '1': ['scan'],
       '8453': ['base-scan'],
     });
+  });
+
+  // A verifier reports needs-config by returning no explorers, and that state
+  // is cached per plugin. Saving the API key clears the cache server-side, so
+  // the stale entry has to be dropped here too or the step keeps blocking with
+  // "needs configuration" until the process restarts.
+  it('drops cached entries when a plugin configuration changes', () => {
+    const unconfigured = { ...entry, verifierPluginId: 'etherscan', needsConfig: true };
+    let explorers = explorersReducer(
+      undefined,
+      explorersFetched({ chainId: 1, data: { entries: [unconfigured], selection: ['scan'] } })
+    );
+    expect(
+      explorerBlocker([1], { '1': ['scan'] }, explorers.byChain, () => 'Ethereum')
+    ).toBe('Ethereum: Etherscan needs configuration');
+
+    explorers = explorersReducer(explorers, explorerEntriesInvalidated());
+
+    // undefined is the never-requested sentinel the fetch guards key off, so
+    // the entries get requested again with the freshly configured state.
+    expect(explorers.byChain['1']).toBeUndefined();
+  });
+
+  it('invalidates explorer entries when a plugin secret is saved', () => {
+    const action = pluginsApi.setSecret('etherscan', {
+      key: 'apiKey',
+      value: 'secret',
+    }) as unknown as {
+      payload: { apiAction: { payload: { onSuccess: (data: unknown) => unknown } } };
+    };
+
+    const produced = action.payload.apiAction.payload.onSuccess({
+      fields: [],
+      values: {},
+      secretsPresent: ['apiKey'],
+      grantedSecrets: ['apiKey'],
+    });
+
+    expect(
+      (Array.isArray(produced) ? produced : [produced]).map(
+        (item) => (item as { type: string }).type
+      )
+    ).toContain(explorerEntriesInvalidated.type);
   });
 });

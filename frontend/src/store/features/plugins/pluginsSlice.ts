@@ -15,6 +15,7 @@ import type { ApiError } from '@ignite/api/client';
 import { apiClient, apiDispatchAction } from '../../api/client';
 import { triggerToast } from '../../middleware/toastListener';
 import { formatApiError } from '../../middleware/apiGate';
+import { explorerEntriesInvalidated } from '../explorers/explorersSlice';
 import { jobStarted } from '../jobs/jobsSlice';
 import { discoverActiveJobs } from '../jobs/discoverJobs';
 import { wsSend } from '../../middleware/websocket';
@@ -225,6 +226,15 @@ export interface GitInstallTarget {
     | { mode: 'branch'; branch: string }
     | { mode: 'commit' };
 }
+
+// Applied to config WRITES only. Any write can flip a verifier in or out of
+// needs-config, and explorer entries cache that state per plugin, so they are
+// invalidated alongside the refreshed config. Reads must not invalidate: the
+// config modal fetches on open, which would refetch explorers in a loop.
+const configWritten = (pluginId: string, config: GetPluginConfigData) => [
+  configReceived({ pluginId, config }),
+  explorerEntriesInvalidated(),
+];
 
 // API actions using the enhanced client (following the repositories/profiles pattern)
 export const pluginsApi = {
@@ -499,7 +509,7 @@ export const pluginsApi = {
     const apiAction = apiClient.dispatch.setPluginConfigValue({
       params: { pluginId },
       body,
-      onSuccess: (data) => configReceived({ pluginId, config: data }),
+      onSuccess: (data) => configWritten(pluginId, data),
     });
     return triggerToast({
       apiAction: apiAction as ReturnType<typeof apiDispatchAction>,
@@ -521,7 +531,7 @@ export const pluginsApi = {
     const apiAction = apiClient.dispatch.setPluginSecret({
       params: { pluginId },
       body,
-      onSuccess: (data) => configReceived({ pluginId, config: data }),
+      onSuccess: (data) => configWritten(pluginId, data),
     });
     return triggerToast({
       apiAction: apiAction as ReturnType<typeof apiDispatchAction>,
@@ -547,7 +557,7 @@ export const pluginsApi = {
     const apiAction = apiClient.dispatch.upsertPluginConfigListItem({
       params: { pluginId },
       body,
-      onSuccess: (data) => configReceived({ pluginId, config: data }),
+      onSuccess: (data) => configWritten(pluginId, data),
     });
     return triggerToast({
       apiAction: apiAction as ReturnType<typeof apiDispatchAction>,
@@ -567,7 +577,7 @@ export const pluginsApi = {
     const apiAction = apiClient.dispatch.deletePluginConfigListItem({
       params: { pluginId },
       query: { fieldKey, itemId },
-      onSuccess: (data) => configReceived({ pluginId, config: data }),
+      onSuccess: (data) => configWritten(pluginId, data),
     });
     return triggerToast({
       apiAction: apiAction as ReturnType<typeof apiDispatchAction>,
@@ -588,7 +598,7 @@ export const pluginsApi = {
     const apiAction = apiClient.dispatch.deletePluginConfigValue({
       params: { pluginId },
       query,
-      onSuccess: (data) => configReceived({ pluginId, config: data }),
+      onSuccess: (data) => configWritten(pluginId, data),
     });
     return triggerToast({
       apiAction: apiAction as ReturnType<typeof apiDispatchAction>,
