@@ -1,5 +1,11 @@
 import type { SignerCascade, SignerRef } from '@ignite/api';
 
+export interface SignerAddressOption {
+  chainId: number;
+  chainLabel: string;
+  address: string;
+}
+
 export function shortSignerAddress(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
@@ -35,6 +41,19 @@ export function stepSignerForChain(
     step?.global ??
     runSignerForChain(run, chainId)
   );
+}
+
+export function stepSignerAddressOptions(
+  run: SignerCascade,
+  step: SignerCascade | undefined,
+  chains: Array<{ chainId: number; label: string }>
+): SignerAddressOption[] {
+  return chains.flatMap(({ chainId, label }) => {
+    const signer = stepSignerForChain(run, step, chainId);
+    return signer
+      ? [{ chainId, chainLabel: label, address: signer.address }]
+      : [];
+  });
 }
 
 export function signerAddressSummary(

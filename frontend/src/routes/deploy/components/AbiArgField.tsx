@@ -1,6 +1,10 @@
 import { useEffect } from 'react';
 import Switch from '../../../components/Switch';
 import PointerValue, { type PointerOption } from './PointerValue';
+import {
+  shortSignerAddress,
+  type SignerAddressOption,
+} from '../signerDisplay';
 
 export interface AbiInput {
   name?: string;
@@ -16,7 +20,70 @@ interface AbiArgFieldProps {
   // an explicit false there, never inside sparse per-chain overrides.
   autoDefault?: boolean;
   eligibleSteps?: PointerOption[];
+  signerOptions?: SignerAddressOption[];
   onChange: (value: unknown) => void;
+}
+
+export function signerFillChoices(
+  options: SignerAddressOption[]
+): Array<{ address: string; label: string }> {
+  const byAddress = new Map<
+    string,
+    { address: string; chainLabels: Set<string> }
+  >();
+  for (const option of options) {
+    const key = option.address.toLowerCase();
+    const current = byAddress.get(key) ?? {
+      address: option.address,
+      chainLabels: new Set<string>(),
+    };
+    current.chainLabels.add(option.chainLabel);
+    byAddress.set(key, current);
+  }
+  return [...byAddress.values()].map(({ address, chainLabels }) => ({
+    address,
+    label: `${[...chainLabels].join(', ')} · ${shortSignerAddress(address)}`,
+  }));
+}
+
+function SignerFillAction({
+  options,
+  onFill,
+}: {
+  options: SignerAddressOption[];
+  onFill: (address: string) => void;
+}) {
+  const choices = signerFillChoices(options);
+  if (choices.length === 0) return null;
+  if (choices.length === 1) {
+    return (
+      <button
+        type="button"
+        className="btn btn-sm btn-secondary"
+        aria-label="Fill from effective signer"
+        onClick={() => onFill(choices[0].address)}
+      >
+        Use signer {shortSignerAddress(choices[0].address)}
+      </button>
+    );
+  }
+  return (
+    <select
+      className="input-glass text-xs w-auto"
+      aria-label="Fill from effective signer"
+      value=""
+      onChange={(event) => {
+        if (event.target.value) onFill(event.target.value);
+      }}
+    >
+      <option value="">Use signer…</option>
+      {choices.map((choice) => (
+        <option key={choice.address.toLowerCase()} value={choice.address}>
+          {choice.label}
+        </option>
+      ))}
+    </select>
+  );
 }
 
 function inputHint(type: string): string {
@@ -90,6 +157,7 @@ export default function AbiArgField({
   value,
   autoDefault = false,
   eligibleSteps,
+  signerOptions = [],
   onChange,
 }: AbiArgFieldProps) {
   const label = input.name || fieldKey;
@@ -124,6 +192,7 @@ export default function AbiArgField({
               value={tuple[key]}
               autoDefault={autoDefault}
               eligibleSteps={eligibleSteps}
+              signerOptions={signerOptions}
               onChange={(next) => onChange({ ...tuple, [key]: next })}
             />
           );
@@ -139,7 +208,7 @@ export default function AbiArgField({
         ? value
         : JSON.stringify(value);
   const invalid = validationMessage(input.type, stringValue);
-  if (input.type === 'address' && eligibleSteps) {
+  if (input.type === 'address') {
     const literal = typeof value === 'string' ? value : '';
     const ref =
       value && typeof value === 'object' && '$ref' in value
@@ -147,10 +216,19 @@ export default function AbiArgField({
         : undefined;
     return (
       <div className="grid gap-2">
-        <span className="text-sm font-medium">
-          {label} <span className="mono-data text-muted">{input.type}</span>
-        </span>
-        <PointerValue value={ref ?? literal} onChange={onChange} eligibleSteps={eligibleSteps} />
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <span className="text-sm font-medium">
+            {label} <span className="mono-data text-muted">{input.type}</span>
+          </span>
+          <SignerFillAction options={signerOptions} onFill={onChange} />
+        </div>
+        {eligibleSteps && (
+          <PointerValue
+            value={ref ?? literal}
+            onChange={onChange}
+            eligibleSteps={eligibleSteps}
+          />
+        )}
         {!ref && (
           <input
             className="input-glass"
