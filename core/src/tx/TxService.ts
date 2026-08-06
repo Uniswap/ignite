@@ -165,10 +165,19 @@ export class TxService {
     check('value', parsed.value ?? 0n, BigInt(expected.value));
     check('nonce', parsed.nonce, expected.nonce);
     check('gas', parsed.gas, BigInt(expected.gas));
-    check('maxFeePerGas', parsed.maxFeePerGas, BigInt(expected.maxFeePerGas));
+    // A zero fee RLP-encodes to an empty byte string, which parseTransaction
+    // decodes back as undefined rather than 0n — the same asymmetry `value`
+    // already guards above. Absent means zero here, so a legitimately signed
+    // tx on a zero-priority-fee chain (an FCFS chain reporting
+    // maxPriorityFeePerGas: 0) must not read as tampering.
+    check(
+      'maxFeePerGas',
+      parsed.maxFeePerGas ?? 0n,
+      BigInt(expected.maxFeePerGas)
+    );
     check(
       'maxPriorityFeePerGas',
-      parsed.maxPriorityFeePerGas,
+      parsed.maxPriorityFeePerGas ?? 0n,
       BigInt(expected.maxPriorityFeePerGas)
     );
 
