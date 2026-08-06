@@ -23,7 +23,12 @@ describe('parseIndices', () => {
 describe('MnemonicPlugin', () => {
   const config = {
     mnemonics: [
-      { id: 'anvildev1', label: 'anvil dev', mnemonic: MNEMONIC, 'account-indices': '0,1' },
+      {
+        id: 'anvildev1',
+        label: 'anvil dev',
+        mnemonic: MNEMONIC,
+        'account-indices': '0,1',
+      },
       { id: 'other001', label: 'other', mnemonic: MNEMONIC },
     ],
   };
@@ -53,6 +58,28 @@ describe('MnemonicPlugin', () => {
     ]);
   });
 
+  it('reports invalid derivation indices', async () => {
+    const result = await new MnemonicPlugin().getAccounts({
+      config: {
+        mnemonics: [
+          {
+            id: 'broken01',
+            label: 'broken',
+            mnemonic: MNEMONIC,
+            'account-indices': '0-9999',
+          },
+        ],
+      },
+    });
+    expect(result).toEqual({
+      success: true,
+      data: {
+        accounts: null,
+        warnings: ['broken: account indices are invalid'],
+      },
+    });
+  });
+
   it('returns accounts:null with no configured items', async () => {
     const result = await new MnemonicPlugin().getAccounts({ config: {} });
     expect(result).toEqual({ success: true, data: { accounts: null } });
@@ -75,6 +102,9 @@ describe('MnemonicPlugin', () => {
         label: 'good #0',
         capability: 'sign-only',
       },
+    ]);
+    expect(result.data.warnings).toEqual([
+      'broken: mnemonic phrase is invalid',
     ]);
   });
 

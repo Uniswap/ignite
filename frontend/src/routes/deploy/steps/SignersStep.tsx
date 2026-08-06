@@ -225,6 +225,34 @@ export default function SignersStep() {
             </div>
           );
         })}
+      {signers.providers
+        .filter((provider) => (provider.warnings?.length ?? 0) > 0)
+        .map((provider) => (
+          <div
+            key={`${provider.pluginId}:warnings`}
+            className="card-milky p-3 flex items-start gap-3"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium text-warn">
+                {provider.name} needs attention
+              </div>
+              <ul className="mt-1 grid gap-1 text-xs text-warn list-disc pl-4">
+                {provider.warnings?.map((warning, index) => (
+                  <li key={`${provider.pluginId}:${index}`}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-secondary shrink-0"
+              onClick={() =>
+                dispatch(openConfigModal({ pluginId: provider.pluginId }))
+              }
+            >
+              Configure
+            </button>
+          </div>
+        ))}
       {signers.loading && refs.length === 0 && (
         <div className="card-milky p-4 flex items-center gap-2 text-sm text-muted">
           <Loader2 size={15} className="animate-spin" /> Loading signer

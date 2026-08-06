@@ -148,10 +148,21 @@ export class MnemonicPlugin extends SignerProviderPlugin {
     }
 
     const accounts: SignerAccount[] = [];
+    const warnings: string[] = [];
     for (const item of items) {
       const mnemonic = itemMnemonic(item);
-      if (!mnemonic) continue;
-      for (const index of itemIndices(item)) {
+      const label = item.label ?? item.id;
+      if (!mnemonic) {
+        warnings.push(`${label}: mnemonic phrase is missing`);
+        continue;
+      }
+      const indices = itemIndices(item);
+      if (indices.length === 0) {
+        warnings.push(`${label}: account indices are invalid`);
+        continue;
+      }
+      let usable = false;
+      for (const index of indices) {
         try {
           accounts.push({
             id: makeAccountId(item.id, index),
@@ -160,18 +171,29 @@ export class MnemonicPlugin extends SignerProviderPlugin {
             label: `${item.label ?? item.id} #${index}`,
             capability: "sign-only",
           });
+          usable = true;
         } catch {
           // One malformed phrase must not hide the other items' accounts.
           break;
         }
       }
+      if (!usable) warnings.push(`${label}: mnemonic phrase is invalid`);
     }
 
     // Every item unreadable = the plugin still needs configuration.
     if (accounts.length === 0) {
-      return { success: true, data: { accounts: null } };
+      return {
+        success: true,
+        data: {
+          accounts: null,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        },
+      };
     }
-    return { success: true, data: { accounts } };
+    return {
+      success: true,
+      data: { accounts, ...(warnings.length > 0 ? { warnings } : {}) },
+    };
   }
 
   async signTransaction(
