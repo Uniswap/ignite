@@ -40,6 +40,7 @@ import {
 } from './resolver.js';
 import { ackIsFresh, buildInitcode, buildRuntimeCode, predictPlanAddresses } from './schedule.js';
 import { create2Calldata, effectiveSalt, initcodeHashOf, predictCreate2Address } from './create2.js';
+import { buildFactoryCalldata, factoryPredictSalt, isFactoryStrategy, isInitcodeStrategy, mergeFactoryArgs, resolveFactoryAddress } from './factory.js';
 import { decomposeCreationCalldata } from './create2.js';
 import { linkBytecode } from './linking.js';
 import { RunStore } from './RunStore.js';
@@ -413,7 +414,7 @@ export class DeployEngine {
             const strategy = planStep.strategy;
             if (!strategy || strategy.kind === 'create') throw new IgniteError('Only deterministic deployment can be accepted', ErrorCodes.ILLEGAL_RESOLVE);
             const dynamic = dynamicDeterministicStepIds(current.plan, chainId).has(planStep.id);
-            const salt = dynamic ? targetStep.salt : strategy.saltPerChain?.[String(chainId)] ?? strategy.salt;
+            const salt = dynamic ? targetStep.salt : isInitcodeStrategy(strategy) ? strategy.saltPerChain?.[String(chainId)] ?? strategy.salt : factoryPredictSalt(strategy, chainId);
             if (!salt) throw new IgniteError('Deterministic deployment has no salt', ErrorCodes.ILLEGAL_RESOLVE);
             const initcodeHash = initcodeHashOf(buildInitcode(planStep, current.inputs[planStep.contractId]!, chainId, (id) => {
               const ref = target.steps.find((item) => item.stepId === id);
@@ -1091,6 +1092,23 @@ export class DeployEngine {
     } else {
       const input = run.inputs[step.contractId];
       if (!input) throw coded('estimation', `Frozen input missing for ${step.contractId}`);
+      const factoryStrategy = step.strategy;
+      if (isFactoryStrategy(factoryStrategy)) {
+        // The factory supplies its product's constructor arguments, so there
+        // is no initcode to build here: the transaction IS the factory call.
+        // The product address comes from the prediction committed at review.
+        const factoryValues = resolveStepValues(
+          { ...step, args: mergeFactoryArgs(factoryStrategy, chainId), argsPerChain: undefined },
+          chainId, resolveRef, [], { frozen: run.inputs, contracts: run.plan.contracts }
+        );
+        pointers = factoryValues.pointers;
+        to = resolveFactoryAddress(factoryStrategy, chainId, resolveRef);
+        data = buildFactoryCalldata(step as never, chainId, resolveRef, { frozen: run.inputs, contracts: run.plan.contracts });
+        const predicted = lane.steps[stepIndex].predictedAddress;
+        if (!predicted) throw coded('pointer-unresolved', `Factory step ${step.id} has no predicted product address`);
+        const existing = await this.deps.getCode(rpc.url, predicted);
+        if (existing && existing !== '0x') throw coded('create2-collision', `Code already exists at predicted address ${predicted}`);
+      } else {
       const ctor = (input.abi as Abi).find((entry) => entry.type === 'constructor');
       const values = resolveStepValues(step, chainId, resolveRef, (ctor?.inputs ?? []) as never, { frozen: run.inputs, contracts: run.plan.contracts });
       libraries = values.libraries;
@@ -1119,7 +1137,7 @@ export class DeployEngine {
               }
               predictedAddress = prepared.predictedAddress; salt = prepared.salt; jit = { predictedAddress, salt, notes: prepared.notes };
             } else {
-              salt = effectiveSalt(strategy, chainId);
+              salt = isInitcodeStrategy(strategy) ? effectiveSalt(strategy, chainId) : undefined;
               if (!salt) throw new Error(`Create2 step ${step.id} has no salt`);
               predictedAddress = predictCreate2Address(salt, initcodeHashOf(initcode)); jit = { predictedAddress, salt, notes: [] };
             }
@@ -1162,7 +1180,8 @@ export class DeployEngine {
           }
         }
         to = CREATE2_PROXY_ADDRESS;
-        data = create2Calldata((jit?.salt ?? strategy.saltPerChain?.[String(chainId)] ?? strategy.salt)!, initcode);
+        data = create2Calldata((jit?.salt ?? (isInitcodeStrategy(strategy) ? strategy.saltPerChain?.[String(chainId)] ?? strategy.salt : undefined))!, initcode);
+      }
       }
     }
     const gas = mergeGas(step, chainId);

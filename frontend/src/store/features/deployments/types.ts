@@ -61,7 +61,19 @@ export interface DraftDeployExtras {
   strategy:
     | { kind: 'create' }
     | { kind: 'create2'; salt?: Hex32; saltPerChain?: Record<string, Hex32> }
-    | { kind: 'plugin'; pluginId: string; params?: Record<string, unknown> };
+    | { kind: 'plugin'; pluginId: string; params?: Record<string, unknown> }
+    // Deploys by calling an already-deployed factory. The product address is
+    // predicted by the factory's own helper, or by raw CREATE2 as a fallback.
+    | {
+        kind: 'factory';
+        factoryAddress?: Hex;
+        signature?: string;
+        args?: Record<string, unknown>;
+        predictKind?: 'function' | 'create2';
+        predictSignature?: string;
+        predictArgs?: Record<string, unknown>;
+        salt?: Hex32;
+      };
   libraries?: Record<string, LibraryBinding>;
   librariesPerChain?: Record<string, Record<string, LibraryBinding>>;
   prepared?: Record<

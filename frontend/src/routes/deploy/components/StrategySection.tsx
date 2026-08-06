@@ -3,6 +3,7 @@ import { keccak256, stringToHex } from 'viem';
 import type { DeploymentTypeInfo } from '@ignite/api';
 import { ApiError } from '@ignite/api/client';
 import Select from '../../../components/Select';
+import FactoryStrategyFields from './FactoryStrategyFields';
 import { apiClient } from '../../../store/api/client';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import {
@@ -60,6 +61,8 @@ export default function StrategySection({ stepId }: { stepId: string }) {
       dispatch(setStrategy({ stepId, strategy: { kind: 'create' } }));
     else if (value === 'create2')
       dispatch(setStrategy({ stepId, strategy: { kind: 'create2' } }));
+    else if (value === 'factory')
+      dispatch(setStrategy({ stepId, strategy: { kind: 'factory', predictKind: 'function' } }));
     else
       dispatch(
         setStrategy({
@@ -111,6 +114,7 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           options={[
             { value: 'create', label: 'Create' },
             { value: 'create2', label: 'Create2' },
+            { value: 'factory', label: 'Factory (call an existing factory)' },
             ...types.map((item) => ({
               value: `plugin:${item.pluginId}`,
               label: item.label,
@@ -119,6 +123,9 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           onValueChange={selectStrategy}
         />
       </label>
+      {strategy.kind === 'factory' && (
+        <FactoryStrategyFields stepId={stepId} strategy={strategy} />
+      )}
       {strategy.kind === 'create2' && (
         <>
           <label className="grid gap-1">

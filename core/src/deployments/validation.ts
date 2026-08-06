@@ -98,6 +98,8 @@ type Client = {
     maxPriorityFeePerGas?: bigint;
   }>;
   getCode?(args: { address: Hex }): Promise<Hex>;
+  // Factory products predicted by a helper resolve through one eth_call.
+  call?(args: { to: Hex; data: Hex }): Promise<{ data?: Hex } | Hex | undefined>;
   getTransactionCount?(args: {
     address: Hex;
     blockTag?: 'latest';

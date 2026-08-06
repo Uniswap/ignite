@@ -1,6 +1,7 @@
 import { encodeDeployData, encodeFunctionData, getContractAddress, type Abi, type AbiParameter } from 'viem';
 import { CREATE2_PROXY_ADDRESS, type DeploymentPlan, type DeployStep, type FrozenInputs, type Hex, type Hex32 } from '@ignite/api';
 import { effectiveSalt, initcodeHashOf, predictCreate2Address, create2Calldata } from './create2.js';
+import { buildFactoryCalldata, buildPredictCall, factoryPredictSalt, isFactoryStrategy, mergeFactoryPrediction, mergeFactoryTarget, predictFactoryCreate2, productInitcodeHash, resolveFactoryAddress } from './factory.js';
 import { callAbiItem, callTargetAbi, dynamicDeterministicStepIds, effectiveValue, resolveSigner, resolveStepValues, toConstructorArgs, validateDependencies } from './resolver.js';
 import { flattenLinkReferences, linkBytecode } from './linking.js';
 import type { DeploymentTypeService } from './DeploymentTypeService.js';
@@ -9,7 +10,7 @@ export interface ScheduleEntry { stepId: string; kind: 'tx' | 'existing'; from?:
 export type Predictions = Record<string, { predictedAddress: Hex; initcodeHash: Hex32; salt: Hex32 }>;
 export type ProvisionalPrediction = { predictedAddress: Hex; initcodeHash: Hex32; salt: Hex32; provisional?: true; notes?: string[] } | { absent: true; reason: string; provisional: true };
 export type ChainPredictions = { predictions: Predictions; entries: Record<string, ProvisionalPrediction>; createAddresses: Map<string, Hex>; baseNonces: Map<Hex, number>; nonceError?: string; confirmedExisting: Set<string>; dynamic: Set<string> };
-type SnapshotClient = { getTransactionCount?(args: { address: Hex; blockTag?: 'latest' }): Promise<number | bigint>; getCode?(args: { address: Hex }): Promise<Hex | undefined> };
+type SnapshotClient = { getTransactionCount?(args: { address: Hex; blockTag?: 'latest' }): Promise<number | bigint>; getCode?(args: { address: Hex }): Promise<Hex | undefined>; call?(args: { to: Hex; data: Hex }): Promise<{ data?: Hex } | Hex | undefined> };
 export function hasPredicted(entry: ProvisionalPrediction | undefined): entry is Exclude<ProvisionalPrediction, { absent: true }> { return Boolean(entry && 'predictedAddress' in entry); }
 const provisionalCache = new Map<string, { expires: number; value: Promise<{ salt: Hex32; predictedAddress: Hex; notes: string[] }> }>();
 export function clearProvisionalPredictionCache(): void { provisionalCache.clear(); }
@@ -40,11 +41,18 @@ export function predictPlanAddresses(plan: DeploymentPlan, frozen: FrozenInputs,
   validateDependencies(plan);
   const predicted: Predictions = {};
   const dynamic = dynamicDeterministicStepIds(plan, chainId);
-  const remaining = plan.steps.filter((step): step is DeployStep => step.kind === 'deploy' && !dynamic.has(step.id) && (step.strategy?.kind === 'create2' || step.strategy?.kind === 'plugin'));
+  const remaining = plan.steps.filter((step): step is DeployStep => step.kind === 'deploy' && !dynamic.has(step.id) && (step.strategy?.kind === 'create2' || step.strategy?.kind === 'plugin' || step.strategy?.kind === 'factory'));
   while (remaining.length) {
     let firstRealError: unknown;
     const next = remaining.find((step) => {
       try {
+        // A factory product has no Ignite-built initcode; its readiness is
+        // whether the factory address and prediction inputs resolve.
+        if (isFactoryStrategy(step.strategy)) {
+          const factory = mergeFactoryTarget(step.strategy, chainId);
+          if (factory.kind === 'step' && !predicted[factory.stepId]) throw Object.assign(new Error('unresolved'), { code: 'POINTER_UNRESOLVED' });
+          return true;
+        }
         buildInitcode(step, frozen[step.contractId]!, chainId, (id) => predicted[id]?.predictedAddress ?? (() => { throw new Error('unresolved'); })(), { frozen, contracts: plan.contracts });
         return true;
       } catch (error) {
@@ -57,6 +65,17 @@ export function predictPlanAddresses(plan: DeploymentPlan, frozen: FrozenInputs,
     if (!next && firstRealError) throw firstRealError;
     if (!next) throw new Error('Unable to resolve create2 predictions after dependency validation');
     const strategy = next.strategy!;
+    if (isFactoryStrategy(strategy)) {
+      // Only the raw-CREATE2 prediction mode is computable offline; a predict
+      // helper needs an eth_call and is resolved in buildChainPredictions.
+      const salt = factoryPredictSalt(strategy, chainId);
+      const factory = mergeFactoryTarget(strategy, chainId);
+      if (!salt || factory.kind !== 'address') { remaining.splice(remaining.indexOf(next), 1); continue; }
+      const hash = productInitcodeHash(frozen[next.contractId]!);
+      predicted[next.id] = { salt, initcodeHash: hash, predictedAddress: predictFactoryCreate2(factory.address, salt, hash) };
+      remaining.splice(remaining.indexOf(next), 1);
+      continue;
+    }
     const salt = effectiveSalt(strategy as Extract<typeof strategy, { kind: 'create2' | 'plugin' }>, chainId);
     if (!salt) throw new Error(`No salt is available for ${next.id}`);
     const code = buildInitcode(next, frozen[next.contractId]!, chainId, (id) => predicted[id]!.predictedAddress, { frozen, contracts: plan.contracts });
@@ -86,6 +105,31 @@ export async function buildChainPredictions(plan: DeploymentPlan, frozen: Frozen
     try { baseNonces.set(address, Number(await deps.client!.getTransactionCount!({ address, blockTag: 'latest' }))); }
     catch (error) { nonceError ??= error instanceof Error ? error.message : String(error); }
   }));
+  // Factory products predicted by a helper need one eth_call each; without a
+  // client the entry is absent with a reason rather than silently missing.
+  for (const step of plan.steps) {
+    if (step.kind !== 'deploy' || !isFactoryStrategy(step.strategy) || hasPredicted(entries[step.id])) continue;
+    const strategy = step.strategy;
+    const prediction = mergeFactoryPrediction(strategy, chainId);
+    const absent = (reason: string) => { entries[step.id] = { absent: true, provisional: true, reason }; };
+    if (prediction.kind !== 'function') { absent('factory prediction is unavailable'); continue; }
+    if (!deps.client?.call) { absent('predict call is unavailable without an RPC'); continue; }
+    try {
+      const resolvePointer = (id: string) => {
+        const entry = entries[id];
+        if (hasPredicted(entry)) return entry.predictedAddress;
+        throw new Error(`Missing pointer ${id}`);
+      };
+      const factory = resolveFactoryAddress(strategy, chainId, resolvePointer);
+      const { data, decode } = buildPredictCall(prediction, chainId, resolvePointer, { frozen, contracts: plan.contracts });
+      const raw = await deps.client.call({ to: factory, data });
+      const result = typeof raw === 'string' ? raw : raw?.data;
+      if (!result) throw new Error('predict call returned no data');
+      const predictedAddress = decode(result);
+      entries[step.id] = { salt: `0x${'0'.repeat(64)}` as Hex32, initcodeHash: productInitcodeHash(frozen[step.contractId]!), predictedAddress, provisional: true, notes: [`predicted by ${prediction.signature}`] };
+    } catch (error) { absent(error instanceof Error ? error.message : String(error)); }
+  }
+
   const confirmedExisting = new Set<string>();
   if (deps.client?.getCode) for (const step of plan.steps) {
     if (step.kind !== 'deploy' || dynamic.has(step.id) || !step.strategy || step.strategy.kind === 'create') continue;
@@ -177,7 +221,7 @@ export function buildSchedule(plan: DeploymentPlan, frozen: FrozenInputs, chainI
       return { stepId: step.id, kind: 'tx', from, to: values.target!, data, value: effectiveValue(step, chainId) };
     }
     const strategy = step.strategy ?? { kind: 'create' as const };
-    const data = buildInitcode(step, frozen[step.contractId]!, chainId, addresses, { frozen, contracts: plan.contracts });
+    const data = isFactoryStrategy(strategy) ? ('0x' as Hex) : buildInitcode(step, frozen[step.contractId]!, chainId, addresses, { frozen, contracts: plan.contracts });
     // 'existing' requires OBSERVED code, not just a fresh acknowledgment —
     // the caller (simulation) verifies via eth_getCode; execution deploys
     // when code is absent, so the schedule must include that tx (F7). When
@@ -187,6 +231,10 @@ export function buildSchedule(plan: DeploymentPlan, frozen: FrozenInputs, chainI
       ? opts.confirmedExisting.has(step.id)
       : strategy.kind !== 'create' && ackIsFresh(strategy, chainId, predictions[step.id]!);
     if (strategy.kind !== 'create' && existing) return { stepId: step.id, kind: 'existing', address: predictions[step.id]!.predictedAddress, predictedAddress: predictions[step.id]!.predictedAddress };
+    if (isFactoryStrategy(strategy)) {
+      const factoryData = buildFactoryCalldata(step as never, chainId, addresses, { frozen, contracts: plan.contracts });
+      return { stepId: step.id, kind: 'tx', from, to: resolveFactoryAddress(strategy, chainId, addresses), data: factoryData, value: effectiveValue(step, chainId), ...(predictions[step.id] ? { predictedAddress: predictions[step.id].predictedAddress } : {}) };
+    }
     return strategy.kind === 'create'
       ? { stepId: step.id, kind: 'tx', from, to: null, data, value: effectiveValue(step, chainId), address: creates.get(step.id) }
       : { stepId: step.id, kind: 'tx', from, to: CREATE2_PROXY_ADDRESS, data: create2Calldata(predictions[step.id]!.salt, data), value: effectiveValue(step, chainId), predictedAddress: predictions[step.id]!.predictedAddress };

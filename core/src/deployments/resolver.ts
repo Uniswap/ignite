@@ -63,6 +63,17 @@ export function collectRefs(step: Step, chainId: number): Array<{ path: string; 
   if (step.kind === 'call') {
     const target = step.targetPerChain?.[String(chainId)] ?? step.target;
     if (target.kind === 'step') refs.push({ path: 'target', stepId: target.stepId });
+  } else if (step.strategy?.kind === 'factory') {
+    // A factory deployment's inputs live on the strategy, not on step.args:
+    // the factory it calls, the call's arguments, and any pointer inside the
+    // predict helper's arguments all have to participate in ordering.
+    const strategy = step.strategy;
+    const target = strategy.targetPerChain?.[String(chainId)] ?? strategy.target;
+    if (target.kind === 'step') refs.push({ path: 'factory', stepId: target.stepId });
+    walk({ ...(strategy.args ?? {}), ...(strategy.argsPerChain?.[String(chainId)] ?? {}) }, 'args');
+    const prediction = strategy.predictPerChain?.[String(chainId)] ?? strategy.predict;
+    if (prediction.kind === 'function') walk(prediction.args ?? {}, 'predict');
+    for (const [key, binding] of Object.entries(mergeLibraries(step, chainId))) if (binding.kind === 'step') refs.push({ path: `libraries.${key}`, stepId: binding.stepId });
   } else {
     for (const [key, binding] of Object.entries(mergeLibraries(step, chainId))) if (binding.kind === 'step') refs.push({ path: `libraries.${key}`, stepId: binding.stepId });
   }

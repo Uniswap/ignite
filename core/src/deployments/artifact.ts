@@ -1,6 +1,7 @@
 // Sanitized, portable deployment artifact projection. Run records are the
 // complete private audit source; this document is safe to commit/share.
 import path from 'node:path';
+import { factoryPredictSalt, isFactoryStrategy, isInitcodeStrategy } from './factory.js';
 import type {
   DeploymentArtifact,
   DeploymentArtifactAttempt,
@@ -86,8 +87,11 @@ export function renderArtifact(
           }
           const strategy = step?.kind === 'deploy' ? step.strategy ?? { kind: 'create' as const } : undefined;
           const dynamic = step?.kind === 'deploy' && dynamicDeterministicStepIds(run.plan, lane.chainId).has(step.id);
-          const effectiveSalt = strategy && strategy.kind !== 'create'
-            ? (dynamic ? laneStep.salt : strategy.saltPerChain?.[key] ?? strategy.salt) : undefined;
+          const effectiveSalt = isInitcodeStrategy(strategy)
+            ? (dynamic ? laneStep.salt : strategy.saltPerChain?.[key] ?? strategy.salt)
+            // A factory product is salted by the factory, not the proxy; only
+            // the raw-CREATE2 prediction mode has a salt to report.
+            : isFactoryStrategy(strategy) ? (dynamic ? laneStep.salt : factoryPredictSalt(strategy, lane.chainId)) : undefined;
           const proxy = step?.kind === 'deploy' && step.wraps
             ? renderProxy(run, lane.chainId, step, laneStep)
             : undefined;
