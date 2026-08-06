@@ -20,6 +20,17 @@ export enum ContainerLifecycle {
 const STOP_GRACE_SECONDS =
   Number(process.env.IGNITE_CONTAINER_STOP_GRACE_SECONDS) || 2;
 
+// Plugin containers spend most of their lifetime idle while operations run
+// through `docker exec`. A plain `sleep infinity` used as PID 1 does not exit
+// on SIGTERM, so every cleanup waits the full stop grace period before Docker
+// sends SIGKILL. Keep the grace period (it protects Docker Desktop bind mounts)
+// while making the idle process cooperate with graceful shutdown.
+const SIGNAL_RESPONSIVE_IDLE_COMMAND = [
+  'node',
+  '-e',
+  "process.on('SIGTERM',()=>process.exit(0));process.on('SIGINT',()=>process.exit(0));setInterval(()=>{},1073741824)",
+];
+
 // Container creation options
 export interface ContainerCreateOptions {
   image: string;
@@ -66,7 +77,7 @@ export class ContainerOrchestrator {
       binds,
       volumes,
       workspaceBind,
-      cmd = ['sleep', 'infinity'],
+      cmd = SIGNAL_RESPONSIVE_IDLE_COMMAND,
       env,
       user,
     } = options;
