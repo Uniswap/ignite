@@ -1,25 +1,27 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Box, Loader2, X } from 'lucide-react';
 import type { DraftContract } from '../../../store/features/deployments/types';
-import { apiClient } from '../../../store/api/client';
 import { decodeUrlEncodingForDisplay } from '../../../utils/displayText';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import { toggleWorkflowStep, workflowDependentsForExclusion } from '../../../store/features/deployments/deployDraftSlice';
 import ConfirmDialog from '../../../components/ConfirmDialog';
 import { artifactVariantFromPath } from '../../../utils/artifactVariants';
 import { findVersionForPin, pinChipText } from '../../../utils/pinDisplay';
+import type { DeploymentArtifactEntry } from '../useDeploymentArtifacts';
 
 interface ContractsStepProps {
   contracts: DraftContract[];
+  artifactEntries: Record<string, DeploymentArtifactEntry>;
   onRemove: (contractId: string) => void;
-  onValidityChange: (valid: boolean) => void;
+  onRetry: (contractId: string) => void;
   workflowMode?: boolean;
 }
 
 export default function ContractsStep({
   contracts,
+  artifactEntries,
   onRemove,
-  onValidityChange,
+  onRetry,
   workflowMode = false,
 }: ContractsStepProps) {
   const dispatch = useAppDispatch();
@@ -28,60 +30,6 @@ export default function ContractsStep({
   // record is what reliably holds the tag, so the chip resolves it from there.
   const repositories = useAppSelector((state) => state.repositories.repositories);
   const [pendingToggle, setPendingToggle] = useState<string>();
-  const [checks, setChecks] = useState<
-    Record<string, 'loading' | 'ok' | 'error'>
-  >({});
-  const [libraryNames, setLibraryNames] = useState<Record<string, string[]>>({});
-
-  useEffect(() => {
-    let cancelled = false;
-    setChecks(
-      Object.fromEntries(contracts.map((contract) => [contract.id, contract.origin === 'contract-type' ? 'ok' : 'loading']))
-    );
-    for (const contract of contracts) {
-      if (contract.origin === 'contract-type') continue;
-      void apiClient
-        .request('getArtifactData', {
-          body: {
-            pathOrUrl: contract.repoPathOrUrl,
-            pluginId: contract.frameworkId,
-            artifactPath: contract.artifactPath,
-            ...(contract.pin ? { pin: contract.pin } : {}),
-          },
-        })
-        .then((response) => {
-          if (!('data' in response)) throw new Error(response.message);
-          const names = Object.values(response.data.creationCodeLinkReferences ?? {}).flatMap(
-            (source) => Object.keys(source as Record<string, unknown>)
-          );
-          if (!cancelled) {
-            setChecks((current) => ({
-              ...current,
-              [contract.id]: 'ok',
-            }));
-            setLibraryNames((current) => ({ ...current, [contract.id]: names }));
-          }
-        })
-        .catch(() => {
-          if (!cancelled)
-            setChecks((current) => ({
-              ...current,
-              [contract.id]: 'error',
-            }));
-        });
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [contracts]);
-
-  useEffect(() => {
-    onValidityChange(
-      contracts.length > 0 &&
-        contracts.every((contract) => checks[contract.id] === 'ok')
-    );
-  }, [checks, contracts, onValidityChange]);
-
   return (
     <section className="grid gap-3">
       <div>
@@ -99,6 +47,13 @@ export default function ContractsStep({
       ) : (
         <div className="glass-list">
           {contracts.map((contract) => {
+            const artifactEntry = artifactEntries[contract.id];
+            const libraryNames =
+              artifactEntry?.status === 'ready'
+                ? Object.values(artifactEntry.artifact.creationCodeLinkReferences ?? {}).flatMap(
+                    (source) => Object.keys(source as Record<string, unknown>)
+                  )
+                : [];
             const variant = contract.origin === 'contract-type'
               ? undefined
               : artifactVariantFromPath(contract.artifactPath, contract.contractName);
@@ -116,18 +71,21 @@ export default function ContractsStep({
                   {contract.pin && <span className="chip chip-info">{pinChipText(contract.pin, findVersionForPin(repositories, contract.pin))}</span>}
                   {variant && <span className="chip">{variant}</span>}
                 </div>}
-                {checks[contract.id] === 'loading' && (
+                {artifactEntry?.status === 'loading' && (
                   <div className="text-xs text-muted flex items-center gap-1">
-                    <Loader2 size={12} className="animate-spin" /> Checking
-                    deployability…
+                    <Loader2 size={12} className="animate-spin" /> Loading ABI,
+                    bytecode, and library links…
                   </div>
                 )}
-                {(libraryNames[contract.id] ?? []).length > 0 && (
-                  <div className="text-xs text-muted">Uses libraries: {libraryNames[contract.id].join(', ')}</div>
+                {libraryNames.length > 0 && (
+                  <div className="text-xs text-muted">Uses libraries: {libraryNames.join(', ')}</div>
                 )}
-                {checks[contract.id] === 'error' && (
-                  <div className="text-xs text-err">
-                    Artifact details could not be loaded.
+                {artifactEntry?.status === 'error' && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-err">
+                    <span>Artifact details could not be loaded: {artifactEntry.message}</span>
+                    <button type="button" className="btn btn-sm btn-secondary" onClick={() => onRetry(contract.id)}>
+                      Retry
+                    </button>
                   </div>
                 )}
               </div>
