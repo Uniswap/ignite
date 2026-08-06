@@ -7,6 +7,7 @@ import {
   signerAccountOptionLabel,
   signerAddressSummary,
   signerResolutionLabel,
+  stepSignerAddressOptions,
   stepSignerForChain,
 } from '../signerDisplay';
 
@@ -74,5 +75,46 @@ describe('signer display', () => {
     expect(signerResolutionLabel('Use run default', [globalSigner])).toBe(
       'Use run default (0xde82…2e97)'
     );
+  });
+
+  it("builds fill options from each chain's effective step signer", () => {
+    const run: SignerCascade = {
+      global: globalSigner,
+      perChain: { '1': chainSigner },
+    };
+    expect(
+      stepSignerAddressOptions(run, { global: stepSigner }, [
+        { chainId: 1, label: 'Ethereum' },
+        { chainId: 2, label: 'Base' },
+      ])
+    ).toEqual([
+      {
+        chainId: 1,
+        chainLabel: 'Ethereum',
+        address: stepSigner.address,
+      },
+      {
+        chainId: 2,
+        chainLabel: 'Base',
+        address: stepSigner.address,
+      },
+    ]);
+    expect(
+      stepSignerAddressOptions(run, undefined, [
+        { chainId: 1, label: 'Ethereum' },
+        { chainId: 2, label: 'Base' },
+      ])
+    ).toEqual([
+      {
+        chainId: 1,
+        chainLabel: 'Ethereum',
+        address: chainSigner.address,
+      },
+      {
+        chainId: 2,
+        chainLabel: 'Base',
+        address: globalSigner.address,
+      },
+    ]);
   });
 });
