@@ -1086,7 +1086,7 @@ export class DeployEngine {
       to = values.target!;
       pointers = values.pointers;
       data = fn
-        ? encodeFunctionData({ abi: [fn], functionName: fn.name, args: toConstructorArgs(fn.inputs, values.args) as never })
+        ? encodeFunctionData({ abi: [fn], functionName: fn.name, args: toConstructorArgs(fn.inputs, values.args, 'call') as never })
         : '0x';
     } else {
       const input = run.inputs[step.contractId];
