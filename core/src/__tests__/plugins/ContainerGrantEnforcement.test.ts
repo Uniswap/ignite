@@ -30,6 +30,7 @@ describe('ContainerOrchestrator grant enforcement', () => {
       grant,
     });
     return createContainerMock.mock.calls[0][0] as {
+      Cmd: string[];
       HostConfig: {
         NetworkMode?: string;
         Ulimits?: Array<{ Name: string; Soft: number; Hard: number }>;
@@ -53,6 +54,12 @@ describe('ContainerOrchestrator grant enforcement', () => {
     expect(opts.HostConfig.Ulimits).toEqual([
       { Name: 'stack', Soft: 67108864, Hard: 67108864 },
     ]);
+  });
+
+  it('uses an idle process that exits during the graceful stop period', async () => {
+    const opts = await createWith(NATIVE_GRANT);
+    expect(opts.Cmd.slice(0, 2)).toEqual(['node', '-e']);
+    expect(opts.Cmd[2]).toContain("process.on('SIGTERM'");
   });
 
   it('adds owner labels to managed containers', async () => {
