@@ -22,6 +22,9 @@ export interface SignerAccount {
 // distinct from [], which means the provider ran fine and has no accounts.
 export interface GetAccountsResult {
   accounts: SignerAccount[] | null;
+  // Item-level configuration problems that did not prevent other accounts
+  // from loading. Messages must never include secret values.
+  warnings?: string[];
 }
 
 export interface SignTransactionParams {

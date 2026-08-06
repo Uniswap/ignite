@@ -83,10 +83,16 @@ export class PrivateKeyPlugin extends SignerProviderPlugin {
     }
 
     const accounts: SignerAccount[] = [];
+    const warnings: string[] = [];
     for (const item of items) {
       const raw = item["private-key"];
       const key = raw ? normalizeKey(raw) : null;
-      if (!key) continue;
+      if (!key) {
+        warnings.push(
+          `${item.label ?? item.id}: expected a 32-byte hexadecimal private key`,
+        );
+        continue;
+      }
       accounts.push({
         id: item.id,
         address: privateKeyToAccount(key).address,
@@ -95,7 +101,10 @@ export class PrivateKeyPlugin extends SignerProviderPlugin {
       });
     }
 
-    return { success: true, data: { accounts } };
+    return {
+      success: true,
+      data: { accounts, ...(warnings.length > 0 ? { warnings } : {}) },
+    };
   }
 
   async signTransaction(

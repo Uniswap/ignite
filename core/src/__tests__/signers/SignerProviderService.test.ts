@@ -87,6 +87,28 @@ describe('SignerProviderService.listAccounts', () => {
     expect(other?.accounts).toEqual([VALID]);
   });
 
+  it('surfaces sanitized item warnings while preserving provider state', async () => {
+    const svc = makeService({
+      getProviders: async () => [
+        { id: 'private-key', name: 'Private Key', runtime: 'container' },
+      ],
+      invoke: async () => ({
+        success: true,
+        data: {
+          accounts: [VALID],
+          warnings: ['broken key\u001b[31m', 42, ...Array(25).fill('extra')],
+        },
+      }),
+    });
+    const data = await svc.listAccounts();
+    expect(data.providers[0]).toMatchObject({
+      state: 'ok',
+      accounts: [VALID],
+    });
+    expect(data.providers[0].warnings?.[0]).toBe('broken key[31m');
+    expect(data.providers[0].warnings).toHaveLength(20);
+  });
+
   it('marks frontend-runtime providers as needs-browser when no host is live', async () => {
     const invoke = vi.fn();
     const svc = makeService({

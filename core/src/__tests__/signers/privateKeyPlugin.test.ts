@@ -3,8 +3,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { TxService } from '../../tx/TxService.js';
 import { PrivateKeyPlugin } from '../../../../plugins/src/signer-provider/private-key/index.ts';
 
-const PK =
-  '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const address = privateKeyToAccount(PK as `0x${string}`).address;
 const config = { keys: [{ id: 'k1', label: 'dev', 'private-key': PK }] };
 const tx = {
@@ -34,6 +33,26 @@ describe('PrivateKeyPlugin', () => {
   it('returns accounts:null when nothing is configured', async () => {
     const result = await new PrivateKeyPlugin().getAccounts({ config: {} });
     expect(result).toEqual({ success: true, data: { accounts: null } });
+  });
+
+  it('reports malformed keys without hiding usable accounts', async () => {
+    const result = await new PrivateKeyPlugin().getAccounts({
+      config: {
+        keys: [
+          { id: 'bad1', label: 'broken', 'private-key': 'not-a-key' },
+          ...config.keys,
+        ],
+      },
+    });
+    expect(result).toEqual({
+      success: true,
+      data: {
+        accounts: [
+          { id: 'k1', address, label: 'dev', capability: 'sign-only' },
+        ],
+        warnings: ['broken: expected a 32-byte hexadecimal private key'],
+      },
+    });
   });
 
   it('signs a tx that passes core integrity verification', async () => {

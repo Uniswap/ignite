@@ -24,6 +24,7 @@ import {
   type TxReceiptData,
 } from '../tx/TxService.js';
 import { stripSentinelBlocks } from '../plugins/utils/pluginTransport.js';
+import { sanitizePluginString } from '../verifications/sanitize.js';
 import { getLogger } from '../utils/logger.js';
 import { ErrorCodes, IgniteError } from '../types/errors.js';
 
@@ -41,6 +42,7 @@ type ProviderInfo = {
 interface ProviderAccountsData {
   accounts: SignerAccount[];
   state: SignerProviderAccounts['state'];
+  warnings?: string[];
 }
 
 interface CacheEntry extends ProviderAccountsData {
@@ -148,6 +150,9 @@ export class SignerProviderService {
         name: provider.name,
         state: perProvider[i].state,
         accounts: perProvider[i].accounts,
+        ...(perProvider[i].warnings?.length
+          ? { warnings: perProvider[i].warnings }
+          : {}),
       })),
     };
   }
@@ -310,10 +315,16 @@ export class SignerProviderService {
 
         // Recheck immediately before submission. Validation can be minutes old
         // and another application may have spent this account's funds since.
-        const balance = await this.deps.txService.getBalance(args.rpcUrl, account.address as Hex);
+        const balance = await this.deps.txService.getBalance(
+          args.rpcUrl,
+          account.address as Hex
+        );
         const required = BigInt(tx.gas) * BigInt(tx.maxFeePerGas) + args.value;
         if (balance < required) {
-          throw new IgniteError('Signer balance is insufficient for this transaction', ErrorCodes.INSUFFICIENT_FUNDS);
+          throw new IgniteError(
+            'Signer balance is insufficient for this transaction',
+            ErrorCodes.INSUFFICIENT_FUNDS
+          );
         }
 
         if (account.capability === 'sign-and-send') {
@@ -358,7 +369,10 @@ export class SignerProviderService {
           rawTx
         );
         if (broadcastHash.toLowerCase() !== txHash.toLowerCase()) {
-          throw new IgniteError('RPC returned a transaction hash different from the signed transaction', ErrorCodes.SIGNER_SEND_ERROR);
+          throw new IgniteError(
+            'RPC returned a transaction hash different from the signed transaction',
+            ErrorCodes.SIGNER_SEND_ERROR
+          );
         }
         const receipt = await this.deps.txService.waitForReceipt(
           args.rpcUrl,
@@ -451,9 +465,23 @@ export class SignerProviderService {
       return { accounts: [], state: 'error' };
     }
 
-    const rawAccounts = (data as { accounts?: unknown }).accounts;
+    const result = data as { accounts?: unknown; warnings?: unknown };
+    const warnings = Array.isArray(result.warnings)
+      ? result.warnings
+          .flatMap((warning) => {
+            if (typeof warning !== 'string') return [];
+            const sanitized = sanitizePluginString(warning, 200)?.trim();
+            return sanitized ? [sanitized] : [];
+          })
+          .slice(0, 20)
+      : [];
+    const rawAccounts = result.accounts;
     if (rawAccounts === null) {
-      return { accounts: [], state: 'needs-config' };
+      return {
+        accounts: [],
+        state: 'needs-config',
+        ...(warnings.length ? { warnings } : {}),
+      };
     }
     if (!Array.isArray(rawAccounts)) {
       this.deps.logger.warn(
@@ -473,7 +501,11 @@ export class SignerProviderService {
       accounts.push(account);
       if (accounts.length >= MAX_ACCOUNTS) break;
     }
-    return { accounts, state: 'ok' };
+    return {
+      accounts,
+      state: 'ok',
+      ...(warnings.length ? { warnings } : {}),
+    };
   }
 
   private expectHex(

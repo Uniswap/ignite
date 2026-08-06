@@ -30,6 +30,7 @@ export interface SignerProviderAccounts {
   name: string;
   state: SignerProviderState;
   accounts: SignerAccount[];
+  warnings?: string[];
 }
 
 export interface ListSignerAccountsData {
@@ -62,6 +63,7 @@ export const SignerProviderAccountsSchema = z.object({
   name: z.string(),
   state: z.enum(["ok", "needs-config", "needs-browser", "error"]),
   accounts: z.array(SignerAccountSchema),
+  warnings: z.array(z.string().min(1).max(200)).max(20).optional(),
 });
 
 export const ListSignerAccountsQuerySchema = z.object({
