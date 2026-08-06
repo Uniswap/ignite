@@ -29,6 +29,7 @@ import { collectUnboundWorkflowSlots, projectWorkflowPlan } from './projection';
 import { cloneJson } from '../../utils/cloneJson';
 import PromoteWorkflowDialog from '../../components/PromoteWorkflowDialog';
 import { triggerToast } from '../../store/middleware/toastListener';
+import { useDeploymentArtifacts } from './useDeploymentArtifacts';
 
 const STEPS = [
   { id: 'contracts', label: 'Contracts' },
@@ -124,7 +125,6 @@ export default function DeployWizardPage() {
   const chains = useAppSelector((state) => state.chains.chains);
   const stateExplorers = useAppSelector((state) => state.explorers.byChain);
   const [step, setStep] = useState(0);
-  const [contractsValid, setContractsValid] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
   const workflowRepo = searchParams.get('workflowRepo');
@@ -135,6 +135,16 @@ export default function DeployWizardPage() {
       : undefined
   );
   const draftActive = draft.contracts.length > 0;
+  const {
+    entries: artifactEntries,
+    artifacts,
+    retry: retryArtifact,
+  } = useDeploymentArtifacts(draft.contracts);
+  const contractsValid =
+    draft.contracts.length > 0 &&
+    draft.contracts.every(
+      (contract) => artifactEntries[contract.id]?.status === 'ready'
+    );
   const stepLabels = Object.fromEntries(
     draft.steps.map((draftStep, index) => [
       draftStep.id,
@@ -356,15 +366,16 @@ export default function DeployWizardPage() {
         {step === 0 && (
           <ContractsStep
             contracts={draft.contracts}
-            onValidityChange={setContractsValid}
+            artifactEntries={artifactEntries}
             onRemove={(contractId) => dispatch(removeContract(contractId))}
+            onRetry={retryArtifact}
             workflowMode={Boolean(draft.workflowRef)}
           />
         )}
         {step === 1 && <ChainsStep />}
         {step === 2 && <ExplorersStep />}
         {step === 3 && <SignersStep />}
-        {step === 4 && <StepsStep />}
+        {step === 4 && <StepsStep artifacts={artifacts} />}
         {step === 5 && plan && <ReviewStep plan={plan} />}
       </div>
     </div>
