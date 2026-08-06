@@ -4,6 +4,10 @@ import type { SignerRef } from '@ignite/api';
 import Select from '../../../components/Select';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import { signersApi } from '../../../store/features/signers/signersSlice';
+import {
+  openConfigModal,
+  selectConfigModal,
+} from '../../../store/features/plugins/pluginsSlice';
 import { runtimeHost } from '../../../runtime/RuntimeHost';
 import {
   setChainSigner,
@@ -12,6 +16,33 @@ import {
 
 function refKey(ref: SignerRef | undefined): string | undefined {
   return ref ? `${ref.pluginId}:${ref.accountId}` : undefined;
+}
+
+const ADD_SIGNER_PREFIX = '__add__:';
+
+// Key-based providers are configured, not connected: their accounts come from
+// vault entries (private keys, mnemonics), so the dropdown offers a persistent
+// add row for each — without one, a needs-config provider renders nothing at
+// all and the only path to a signer is hidden away in settings. Frontend
+// runtime providers (browser wallet) connect via the cards above instead.
+export function signerAddOptions(
+  providers: Array<{ pluginId: string; name: string }>,
+  runtimePluginIds: string[]
+): Array<{ value: string; label: string }> {
+  return providers
+    .filter((provider) => !runtimePluginIds.includes(provider.pluginId))
+    .map((provider) => ({
+      value: `${ADD_SIGNER_PREFIX}${provider.pluginId}`,
+      label: `+ Add ${provider.name}…`,
+    }));
+}
+
+// Real option values are `${pluginId}:${accountId}`, so only the reserved
+// prefix marks an add action — a plugin id can never be `__add__`.
+export function parseAddSignerValue(value: string): string | undefined {
+  return value.startsWith(ADD_SIGNER_PREFIX)
+    ? value.slice(ADD_SIGNER_PREFIX.length)
+    : undefined;
 }
 
 export default function SignersStep() {
@@ -39,6 +70,20 @@ export default function SignersStep() {
   useEffect(() => {
     signersApi.listAccounts(true).forEach((action) => dispatch(action));
   }, [dispatch]);
+
+  // An add row opens the provider's config modal in place. Accounts are only
+  // fetched on mount and via Refresh, so without a refetch on close the key
+  // that was just added stays invisible — the same staleness the explorers
+  // step had after saving a verifier API key.
+  const configModalOpen = Boolean(useAppSelector(selectConfigModal));
+  const [pendingAddPluginId, setPendingAddPluginId] = useState<string | null>(
+    null
+  );
+  useEffect(() => {
+    if (!pendingAddPluginId || configModalOpen) return;
+    setPendingAddPluginId(null);
+    signersApi.listAccounts(true).forEach((action) => dispatch(action));
+  }, [configModalOpen, pendingAddPluginId, dispatch]);
 
   // One connect button per installed wallet extension: connecting without an
   // rdns prompts EVERY wallet (MetaMask and Flask both pop up).
@@ -90,7 +135,14 @@ export default function SignersStep() {
       };
     })
   );
-  const options = [{ value: '__none__', label: 'No default' }, ...refs];
+  // Add rows live only in the global select: adding a signer is one-time
+  // setup, so the per-chain overrides stay a plain choice among accounts.
+  const addOptions = signerAddOptions(signers.providers, runtimePluginIds);
+  const options = [
+    { value: '__none__', label: 'No default' },
+    ...refs,
+    ...addOptions,
+  ];
   // A chain without an override INHERITS the global signer — its unset
   // option must say so, not repeat the global select's "No default".
   const overrideOptions = [
@@ -195,7 +247,17 @@ export default function SignersStep() {
         <Select
           options={options}
           value={refKey(draft.signers.global) ?? '__none__'}
-          onValueChange={(value) => dispatch(setGlobalSigner(resolve(value)))}
+          onValueChange={(value) => {
+            // Intercept before resolve(): an add row is an action, not a
+            // selection — the draft keeps whatever signer it already had.
+            const addPluginId = parseAddSignerValue(value);
+            if (addPluginId) {
+              setPendingAddPluginId(addPluginId);
+              dispatch(openConfigModal({ pluginId: addPluginId }));
+              return;
+            }
+            dispatch(setGlobalSigner(resolve(value)));
+          }}
         />
       </div>
       <div className="glass-list">
