@@ -66,13 +66,18 @@ export interface DraftDeployExtras {
     // predicted by the factory's own helper, or by raw CREATE2 as a fallback.
     | {
         kind: 'factory';
+        // The factory's own contract, whose ABI drives the wizard, and the
+        // address it is already deployed at.
+        factoryContractId?: string;
         factoryAddress?: Hex;
+        // The factory's deploy function. Its address-typed return values are
+        // the contracts the call produces.
         signature?: string;
         args?: Record<string, unknown>;
-        predictKind?: 'function' | 'create2';
-        predictSignature?: string;
-        predictArgs?: Record<string, unknown>;
-        salt?: Hex32;
+        // Which returned address this step is, and — for the products that do
+        // not send the transaction — the step whose call creates them.
+        output?: string;
+        fulfilledBy?: string;
       };
   libraries?: Record<string, LibraryBinding>;
   librariesPerChain?: Record<string, Record<string, LibraryBinding>>;

@@ -1,33 +1,35 @@
 import { describe, it, expect } from 'vitest';
 import { encodeFunctionResult, parseAbiItem, type AbiFunction } from 'viem';
-import type { DeploymentPlan, FrozenInputs, Hex, Hex32 } from '@ignite/api';
+import type { DeploymentPlan, FrozenInputs, Hex } from '@ignite/api';
 import {
   buildChainPredictions,
   buildSchedule,
-  predictPlanAddresses,
 } from '../../deployments/schedule.js';
-import {
-  predictFactoryCreate2,
-  productInitcodeHash,
-} from '../../deployments/factory.js';
 
 const FACTORY = '0x2179a60856E37dfeAacA0ab043B931fE224b27B6' as Hex;
 const SIGNER = '0xde82fa0776824286f2a2e9c6445fc40c08422e97' as Hex;
-const PRODUCT = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' as Hex;
-const SALT = `0x${'11'.repeat(32)}` as Hex32;
+const JAR = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' as Hex;
+const RELEASER = '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' as Hex;
 const CHAIN = 11155111;
+const SIGNATURE =
+  'deploy(address,bytes32) returns (address jar, address releaser)';
 
 const frozen: FrozenInputs = {
-  jar: {
-    creationBytecode: '0x6080604052348015600f57600080fd5b50',
-    abi: [],
-  } as never,
+  jar: { creationBytecode: '0x6080', abi: [] } as never,
+  releaser: { creationBytecode: '0x6081', abi: [] } as never,
 };
 
-function plan(predict: Record<string, unknown>): DeploymentPlan {
+/** A jar step that broadcasts, and a releaser step fulfilled by that call. */
+function plan(): DeploymentPlan {
+  const strategy = {
+    kind: 'factory' as const,
+    target: { kind: 'address' as const, address: FACTORY },
+    signature: SIGNATURE,
+    args: { arg0: SIGNER, arg1: `0x${'11'.repeat(32)}` },
+  };
   return {
     schemaVersion: 1,
-    contracts: [{ id: 'jar' } as never],
+    contracts: [{ id: 'jar' }, { id: 'releaser' }] as never,
     chains: [CHAIN],
     signers: {
       global: {
@@ -41,107 +43,99 @@ function plan(predict: Record<string, unknown>): DeploymentPlan {
         id: 'deploy-jar',
         kind: 'deploy',
         contractId: 'jar',
-        strategy: {
-          kind: 'factory',
-          target: { kind: 'address', address: FACTORY },
-          signature: 'deploy(address,bytes32)',
-          args: { arg0: SIGNER, arg1: SALT },
-          predict,
-        },
-      } as never,
-    ],
+        strategy: { ...strategy, output: 'jar' },
+      },
+      {
+        id: 'deploy-releaser',
+        kind: 'deploy',
+        contractId: 'releaser',
+        strategy: { ...strategy, output: 'releaser', fulfilledBy: 'deploy-jar' },
+      },
+    ] as never,
   };
 }
 
-describe('factory deployments in the schedule', () => {
-  // The factory is the deployer, so the product address derives from it rather
-  // than the canonical CREATE2 proxy.
-  it('predicts a raw-create2 product offline from the factory', () => {
-    const predictions = predictPlanAddresses(
-      plan({ kind: 'create2', salt: SALT }),
-      frozen,
-      CHAIN
-    );
-    const expected = predictFactoryCreate2(
-      FACTORY,
-      SALT,
-      productInitcodeHash(frozen.jar!)
-    );
-    expect(predictions['deploy-jar']?.predictedAddress).toBe(expected);
-  });
+function client(calls: Array<{ to: Hex; data: Hex }>) {
+  const fn = parseAbiItem(`function ${SIGNATURE}`) as AbiFunction;
+  return {
+    getTransactionCount: async () => 0,
+    call: async (args: { to: Hex; data: Hex }) => {
+      calls.push(args);
+      return {
+        data: encodeFunctionResult({
+          abi: [fn],
+          functionName: fn.name,
+          result: [JAR, RELEASER] as never,
+        }),
+      };
+    },
+  };
+}
 
-  it('schedules the factory call as the deploying transaction', () => {
-    const target = plan({ kind: 'create2', salt: SALT });
-    const predictions = predictPlanAddresses(target, frozen, CHAIN);
-    const [entry] = buildSchedule(target, frozen, CHAIN, {
-      signers: new Map([['deploy-jar', SIGNER]]),
-      predictions,
-    });
-    expect(entry.kind).toBe('tx');
-    // Not a raw create (to: null) and not the CREATE2 proxy — the factory.
-    expect(entry.to).toBe(FACTORY);
-    expect(entry.data).not.toBe('0x');
-    expect(entry.predictedAddress).toBe(
-      predictions['deploy-jar']?.predictedAddress
-    );
-  });
+const signers = new Map([
+  ['deploy-jar', SIGNER],
+  ['deploy-releaser', SIGNER],
+]);
 
-  it('resolves a predict helper through one eth_call', async () => {
-    const fn = parseAbiItem(
-      'function predictJar(address,bytes32) returns (address)'
-    ) as AbiFunction;
+describe('factory deployments producing several contracts', () => {
+  // One call creates both contracts, so one simulation predicts both — the
+  // releaser needs no predict helper of its own (the factory exposes none).
+  it('predicts every product from a single eth_call', async () => {
     const calls: Array<{ to: Hex; data: Hex }> = [];
-    const snapshot = await buildChainPredictions(
-      plan({
-        kind: 'function',
-        signature: 'predictJar(address,bytes32)',
-        args: { arg0: SIGNER, arg1: SALT },
-      }),
-      frozen,
-      CHAIN,
-      {
-        client: {
-          getTransactionCount: async () => 0,
-          call: async (args) => {
-            calls.push(args);
-            return {
-              data: encodeFunctionResult({
-                abi: [fn],
-                functionName: fn.name,
-                result: PRODUCT as never,
-              }),
-            };
-          },
-        },
-        signers: new Map([['deploy-jar', SIGNER]]),
-      }
-    );
+    const snapshot = await buildChainPredictions(plan(), frozen, CHAIN, {
+      client: client(calls),
+      signers,
+    });
     expect(calls).toHaveLength(1);
     expect(calls[0].to).toBe(FACTORY);
-    const entry = snapshot.entries['deploy-jar'];
-    expect(
-      entry && 'predictedAddress' in entry
+
+    const address = (id: string) => {
+      const entry = snapshot.entries[id];
+      return entry && 'predictedAddress' in entry
         ? entry.predictedAddress.toLowerCase()
-        : undefined
-    ).toBe(PRODUCT.toLowerCase());
+        : undefined;
+    };
+    expect(address('deploy-jar')).toBe(JAR.toLowerCase());
+    expect(address('deploy-releaser')).toBe(RELEASER.toLowerCase());
   });
 
-  // Without an RPC the address is unknown; reporting it as absent-with-reason
-  // keeps review honest instead of inventing an address.
-  it('reports the product as absent when no client can run the predict call', async () => {
-    const snapshot = await buildChainPredictions(
-      plan({
-        kind: 'function',
-        signature: 'predictJar(address,bytes32)',
-        args: { arg0: SIGNER, arg1: SALT },
-      }),
-      frozen,
-      CHAIN,
-      { signers: new Map([['deploy-jar', SIGNER]]) }
+  // The fulfilled product must not send a second transaction: one call
+  // deployed both contracts.
+  it('schedules one transaction for the call and none for the fulfilled product', async () => {
+    const target = plan();
+    const snapshot = await buildChainPredictions(target, frozen, CHAIN, {
+      client: client([]),
+      signers,
+    });
+    const schedule = buildSchedule(target, frozen, CHAIN, {
+      signers,
+      predictions: Object.fromEntries(
+        Object.entries(snapshot.entries).flatMap(([id, entry]) =>
+          entry && 'predictedAddress' in entry ? [[id, entry]] : []
+        )
+      ) as never,
+    });
+    const jar = schedule.find((entry) => entry.stepId === 'deploy-jar');
+    const releaser = schedule.find(
+      (entry) => entry.stepId === 'deploy-releaser'
     );
-    const entry = snapshot.entries['deploy-jar'];
-    expect(entry && 'absent' in entry ? entry.reason : undefined).toMatch(
-      /RPC/i
+    expect(jar?.kind).toBe('tx');
+    expect(jar?.to).toBe(FACTORY);
+    expect(releaser?.kind).not.toBe('tx');
+    expect(releaser?.predictedAddress?.toLowerCase()).toBe(
+      RELEASER.toLowerCase()
     );
+  });
+
+  it('reports products as absent when no RPC can simulate the call', async () => {
+    const snapshot = await buildChainPredictions(plan(), frozen, CHAIN, {
+      signers,
+    });
+    for (const id of ['deploy-jar', 'deploy-releaser']) {
+      const entry = snapshot.entries[id];
+      expect(entry && 'absent' in entry ? entry.reason : undefined).toMatch(
+        /RPC/i
+      );
+    }
   });
 });

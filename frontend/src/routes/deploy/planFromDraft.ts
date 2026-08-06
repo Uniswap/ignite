@@ -198,21 +198,14 @@ function deployStepFromDraft(
   } else if (strategy?.kind === 'factory') {
     if (!strategy.factoryAddress) throw new Error(`Factory step ${step.id} needs a factory address`);
     if (!strategy.signature) throw new Error(`Factory step ${step.id} needs a deploy function`);
-    const predictKind = strategy.predictKind ?? 'function';
-    if (predictKind === 'function' && !strategy.predictSignature)
-      throw new Error(`Factory step ${step.id} needs a predict function`);
-    if (predictKind === 'create2' && !strategy.salt)
-      throw new Error(`Factory step ${step.id} needs a salt`);
     strategyField = {
       strategy: {
         kind: 'factory',
         target: { kind: 'address', address: strategy.factoryAddress },
         signature: strategy.signature,
         ...(strategy.args && Object.keys(strategy.args).length ? { args: { ...strategy.args } } : {}),
-        predict:
-          predictKind === 'function'
-            ? { kind: 'function', signature: strategy.predictSignature!, ...(strategy.predictArgs && Object.keys(strategy.predictArgs).length ? { args: { ...strategy.predictArgs } } : {}) }
-            : { kind: 'create2', salt: strategy.salt! },
+        ...(strategy.output ? { output: strategy.output } : {}),
+        ...(strategy.fulfilledBy ? { fulfilledBy: strategy.fulfilledBy } : {}),
         ...(extras.acknowledged ? { acknowledgeDeployed: { ...extras.acknowledged } } : {}),
       },
     };

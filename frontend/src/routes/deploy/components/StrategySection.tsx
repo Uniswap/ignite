@@ -62,7 +62,7 @@ export default function StrategySection({ stepId }: { stepId: string }) {
     else if (value === 'create2')
       dispatch(setStrategy({ stepId, strategy: { kind: 'create2' } }));
     else if (value === 'factory')
-      dispatch(setStrategy({ stepId, strategy: { kind: 'factory', predictKind: 'function' } }));
+      dispatch(setStrategy({ stepId, strategy: { kind: 'factory' } }));
     else
       dispatch(
         setStrategy({

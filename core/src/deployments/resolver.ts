@@ -71,8 +71,6 @@ export function collectRefs(step: Step, chainId: number): Array<{ path: string; 
     const target = strategy.targetPerChain?.[String(chainId)] ?? strategy.target;
     if (target.kind === 'step') refs.push({ path: 'factory', stepId: target.stepId });
     walk({ ...(strategy.args ?? {}), ...(strategy.argsPerChain?.[String(chainId)] ?? {}) }, 'args');
-    const prediction = strategy.predictPerChain?.[String(chainId)] ?? strategy.predict;
-    if (prediction.kind === 'function') walk(prediction.args ?? {}, 'predict');
     for (const [key, binding] of Object.entries(mergeLibraries(step, chainId))) if (binding.kind === 'step') refs.push({ path: `libraries.${key}`, stepId: binding.stepId });
   } else {
     for (const [key, binding] of Object.entries(mergeLibraries(step, chainId))) if (binding.kind === 'step') refs.push({ path: `libraries.${key}`, stepId: binding.stepId });

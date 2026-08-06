@@ -14,12 +14,11 @@ import type {
   CallTarget,
   DeployStep,
   DeploymentPlan,
-  FactoryPrediction,
   FrozenInputs,
   Hex,
   Hex32,
 } from '@ignite/api';
-import { initcodeHashOf, predictCreate2Address } from './create2.js';
+import { initcodeHashOf } from './create2.js';
 import { linkBytecode } from './linking.js';
 import { mergeArgs, resolveStepValues, toConstructorArgs } from './resolver.js';
 import { ErrorCodes, IgniteError } from '../types/errors.js';
@@ -51,27 +50,11 @@ export function isInitcodeStrategy(
   return strategy?.kind === 'create2' || strategy?.kind === 'plugin';
 }
 
-/** The salt a factory product is predicted with, when raw CREATE2 is used. */
-export function factoryPredictSalt(
-  strategy: FactoryStrategy,
-  chainId: number
-): Hex32 | undefined {
-  const prediction = mergeFactoryPrediction(strategy, chainId);
-  return prediction.kind === 'create2' ? prediction.salt : undefined;
-}
-
 export function mergeFactoryTarget(
   strategy: FactoryStrategy,
   chainId: number
 ): CallTarget {
   return strategy.targetPerChain?.[String(chainId)] ?? strategy.target;
-}
-
-export function mergeFactoryPrediction(
-  strategy: FactoryStrategy,
-  chainId: number
-): FactoryPrediction {
-  return strategy.predictPerChain?.[String(chainId)] ?? strategy.predict;
 }
 
 export function mergeFactoryArgs(
@@ -158,79 +141,6 @@ export function productInitcodeHash(
   return initcodeHashOf(code);
 }
 
-export function predictFactoryCreate2(
-  factory: Hex,
-  salt: Hex32,
-  initcodeHash: Hex32
-): Hex {
-  return predictCreate2Address(salt, initcodeHash, factory);
-}
-
-/** Calldata for the factory's predict helper, and the decoder for its result. */
-export function buildPredictCall(
-  prediction: Extract<FactoryPrediction, { kind: 'function' }>,
-  chainId: number,
-  resolveRef: (stepId: string) => Hex,
-  context: {
-    frozen?: FrozenInputs;
-    contracts?: DeploymentPlan['contracts'];
-  } = {}
-): { data: Hex; decode: (result: Hex) => Hex } {
-  const fn = abiFunction(prediction.signature, 'Predict');
-  // Canonical signatures carry no `returns` clause (the plan schema's
-  // signature pattern forbids one), so the ABI item has no declared outputs
-  // and the result is decoded as a bare address word instead.
-  if (
-    fn.outputs.length > 1 ||
-    (fn.outputs.length === 1 && fn.outputs[0]?.type !== 'address')
-  )
-    throw new IgniteError(
-      `Predict function ${prediction.signature} must return a single address`,
-      ErrorCodes.ARG_TYPE_MISMATCH
-    );
-  const values = resolveStepValues(
-    {
-      kind: 'deploy',
-      id: 'predict',
-      contractId: '',
-      args: prediction.args ?? {},
-    } as unknown as DeployStep,
-    chainId,
-    resolveRef,
-    fn.inputs,
-    context
-  );
-  return {
-    data: encodeFunctionData({
-      abi: [fn],
-      functionName: fn.name,
-      args: toConstructorArgs(fn.inputs, values.args, 'call') as never,
-    }),
-    decode: (result: Hex) => {
-      const address =
-        fn.outputs.length === 1
-          ? (() => {
-              const decoded = decodeFunctionResult({
-                abi: [fn],
-                functionName: fn.name,
-                data: result,
-              });
-              return Array.isArray(decoded) ? decoded[0] : decoded;
-            })()
-          : // A single address occupies one left-padded 32-byte word.
-            /^0x[0-9a-fA-F]{64}$/.test(result)
-            ? (`0x${result.slice(-40)}` as Hex)
-            : undefined;
-      if (typeof address !== 'string' || !isAddress(address))
-        throw new IgniteError(
-          `Predict function ${prediction.signature} did not return an address`,
-          ErrorCodes.ARG_TYPE_MISMATCH
-        );
-      return address as Hex;
-    },
-  };
-}
-
 /** Args a factory strategy contributes to dependency analysis. */
 export function factoryArgRefs(
   strategy: FactoryStrategy,
@@ -239,8 +149,49 @@ export function factoryArgRefs(
   return mergeFactoryArgs(strategy, chainId);
 }
 
-export function mergedPredictArgs(prediction: FactoryPrediction): ArgValues {
-  return prediction.kind === 'function' ? (prediction.args ?? {}) : {};
+export { mergeArgs };
+
+/** The address-typed outputs a deploy function declares, in order. */
+export function factoryProductOutputs(
+  signature: string
+): Array<{ name: string; index: number }> {
+  const fn = abiFunction(signature, 'Factory');
+  return fn.outputs.flatMap((output, index) =>
+    output.type === 'address' ? [{ name: output.name || `output${index}`, index }] : []
+  );
 }
 
-export { mergeArgs };
+/**
+ * Decodes the addresses a deploy function returns. An eth_call of the very
+ * function being sent — same arguments, same sender — yields the addresses it
+ * would create, which is how every product of one call is predicted at once.
+ */
+export function decodeFactoryProducts(
+  signature: string,
+  result: Hex
+): Record<string, Hex> {
+  const fn = abiFunction(signature, 'Factory');
+  const decoded = decodeFunctionResult({ abi: [fn], functionName: fn.name, data: result });
+  const values = Array.isArray(decoded) ? decoded : [decoded];
+  const products: Record<string, Hex> = {};
+  fn.outputs.forEach((output, index) => {
+    const value = values[index];
+    if (output.type !== 'address' || typeof value !== 'string' || !isAddress(value)) return;
+    products[output.name || `output${index}`] = value as Hex;
+  });
+  return products;
+}
+
+/** The product a step takes: its named output, or the first address returned. */
+export function productAddress(
+  products: Record<string, Hex>,
+  output: string | undefined
+): Hex | undefined {
+  if (output) return products[output];
+  return Object.values(products)[0];
+}
+
+/** A product whose transaction is another step's factory call. */
+export function fulfillingStepId(strategy: FactoryStrategy): string | undefined {
+  return strategy.fulfilledBy;
+}

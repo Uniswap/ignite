@@ -1,7 +1,7 @@
 import { encodeDeployData, encodeFunctionData, getContractAddress, type Abi, type AbiParameter } from 'viem';
 import { CREATE2_PROXY_ADDRESS, type DeploymentPlan, type DeployStep, type FrozenInputs, type Hex, type Hex32 } from '@ignite/api';
 import { effectiveSalt, initcodeHashOf, predictCreate2Address, create2Calldata } from './create2.js';
-import { buildFactoryCalldata, buildPredictCall, factoryPredictSalt, isFactoryStrategy, mergeFactoryPrediction, mergeFactoryTarget, predictFactoryCreate2, productInitcodeHash, resolveFactoryAddress } from './factory.js';
+import { buildFactoryCalldata, decodeFactoryProducts, isFactoryStrategy, mergeFactoryTarget, productAddress, productInitcodeHash, resolveFactoryAddress } from './factory.js';
 import { callAbiItem, callTargetAbi, dynamicDeterministicStepIds, effectiveValue, resolveSigner, resolveStepValues, toConstructorArgs, validateDependencies } from './resolver.js';
 import { flattenLinkReferences, linkBytecode } from './linking.js';
 import type { DeploymentTypeService } from './DeploymentTypeService.js';
@@ -41,18 +41,11 @@ export function predictPlanAddresses(plan: DeploymentPlan, frozen: FrozenInputs,
   validateDependencies(plan);
   const predicted: Predictions = {};
   const dynamic = dynamicDeterministicStepIds(plan, chainId);
-  const remaining = plan.steps.filter((step): step is DeployStep => step.kind === 'deploy' && !dynamic.has(step.id) && (step.strategy?.kind === 'create2' || step.strategy?.kind === 'plugin' || step.strategy?.kind === 'factory'));
+  const remaining = plan.steps.filter((step): step is DeployStep => step.kind === 'deploy' && !dynamic.has(step.id) && (step.strategy?.kind === 'create2' || step.strategy?.kind === 'plugin'));
   while (remaining.length) {
     let firstRealError: unknown;
     const next = remaining.find((step) => {
       try {
-        // A factory product has no Ignite-built initcode; its readiness is
-        // whether the factory address and prediction inputs resolve.
-        if (isFactoryStrategy(step.strategy)) {
-          const factory = mergeFactoryTarget(step.strategy, chainId);
-          if (factory.kind === 'step' && !predicted[factory.stepId]) throw Object.assign(new Error('unresolved'), { code: 'POINTER_UNRESOLVED' });
-          return true;
-        }
         buildInitcode(step, frozen[step.contractId]!, chainId, (id) => predicted[id]?.predictedAddress ?? (() => { throw new Error('unresolved'); })(), { frozen, contracts: plan.contracts });
         return true;
       } catch (error) {
@@ -65,17 +58,6 @@ export function predictPlanAddresses(plan: DeploymentPlan, frozen: FrozenInputs,
     if (!next && firstRealError) throw firstRealError;
     if (!next) throw new Error('Unable to resolve create2 predictions after dependency validation');
     const strategy = next.strategy!;
-    if (isFactoryStrategy(strategy)) {
-      // Only the raw-CREATE2 prediction mode is computable offline; a predict
-      // helper needs an eth_call and is resolved in buildChainPredictions.
-      const salt = factoryPredictSalt(strategy, chainId);
-      const factory = mergeFactoryTarget(strategy, chainId);
-      if (!salt || factory.kind !== 'address') { remaining.splice(remaining.indexOf(next), 1); continue; }
-      const hash = productInitcodeHash(frozen[next.contractId]!);
-      predicted[next.id] = { salt, initcodeHash: hash, predictedAddress: predictFactoryCreate2(factory.address, salt, hash) };
-      remaining.splice(remaining.indexOf(next), 1);
-      continue;
-    }
     const salt = effectiveSalt(strategy as Extract<typeof strategy, { kind: 'create2' | 'plugin' }>, chainId);
     if (!salt) throw new Error(`No salt is available for ${next.id}`);
     const code = buildInitcode(next, frozen[next.contractId]!, chainId, (id) => predicted[id]!.predictedAddress, { frozen, contracts: plan.contracts });
@@ -105,29 +87,39 @@ export async function buildChainPredictions(plan: DeploymentPlan, frozen: Frozen
     try { baseNonces.set(address, Number(await deps.client!.getTransactionCount!({ address, blockTag: 'latest' }))); }
     catch (error) { nonceError ??= error instanceof Error ? error.message : String(error); }
   }));
-  // Factory products predicted by a helper need one eth_call each; without a
-  // client the entry is absent with a reason rather than silently missing.
-  for (const step of plan.steps) {
-    if (step.kind !== 'deploy' || !isFactoryStrategy(step.strategy) || hasPredicted(entries[step.id])) continue;
-    const strategy = step.strategy;
-    const prediction = mergeFactoryPrediction(strategy, chainId);
+  // One eth_call of the deploy function yields every address that call would
+  // create, so all products of a call are predicted together. Steps that name
+  // a fulfilling step share its result rather than calling again.
+  const factorySteps = plan.steps.filter((step): step is DeployStep => step.kind === 'deploy' && isFactoryStrategy(step.strategy));
+  const decodedByCall = new Map<string, Record<string, Hex>>();
+  for (const step of factorySteps) {
+    const strategy = step.strategy as Extract<NonNullable<DeployStep['strategy']>, { kind: 'factory' }>;
     const absent = (reason: string) => { entries[step.id] = { absent: true, provisional: true, reason }; };
-    if (prediction.kind !== 'function') { absent('factory prediction is unavailable'); continue; }
-    if (!deps.client?.call) { absent('predict call is unavailable without an RPC'); continue; }
-    try {
-      const resolvePointer = (id: string) => {
-        const entry = entries[id];
-        if (hasPredicted(entry)) return entry.predictedAddress;
-        throw new Error(`Missing pointer ${id}`);
-      };
-      const factory = resolveFactoryAddress(strategy, chainId, resolvePointer);
-      const { data, decode } = buildPredictCall(prediction, chainId, resolvePointer, { frozen, contracts: plan.contracts });
-      const raw = await deps.client.call({ to: factory, data });
-      const result = typeof raw === 'string' ? raw : raw?.data;
-      if (!result) throw new Error('predict call returned no data');
-      const predictedAddress = decode(result);
-      entries[step.id] = { salt: `0x${'0'.repeat(64)}` as Hex32, initcodeHash: productInitcodeHash(frozen[step.contractId]!), predictedAddress, provisional: true, notes: [`predicted by ${prediction.signature}`] };
-    } catch (error) { absent(error instanceof Error ? error.message : String(error)); }
+    const callerId = strategy.fulfilledBy ?? step.id;
+    if (!decodedByCall.has(callerId)) {
+      const caller = callerId === step.id ? step : plan.steps.find((candidate) => candidate.id === callerId);
+      const callerStrategy = caller?.kind === 'deploy' ? caller.strategy : undefined;
+      if (!isFactoryStrategy(callerStrategy)) { absent(`fulfilling step ${callerId} is not a factory deployment`); continue; }
+      if (!deps.client?.call) { absent('product addresses need an RPC to simulate the factory call'); continue; }
+      try {
+        const resolvePointer = (id: string) => {
+          const entry = entries[id];
+          if (hasPredicted(entry)) return entry.predictedAddress;
+          throw new Error(`Missing pointer ${id}`);
+        };
+        const factoryAddress = resolveFactoryAddress(callerStrategy, chainId, resolvePointer);
+        const data = buildFactoryCalldata(caller as never, chainId, resolvePointer, { frozen, contracts: plan.contracts });
+        const raw = await deps.client.call({ to: factoryAddress, data, ...(signers.get(callerId) ? { account: signers.get(callerId)! } : {}) });
+        const result = typeof raw === 'string' ? raw : raw?.data;
+        if (!result) throw new Error('factory call returned no data');
+        decodedByCall.set(callerId, decodeFactoryProducts(callerStrategy.signature, result));
+      } catch (error) { absent(error instanceof Error ? error.message : String(error)); continue; }
+    }
+    const products = decodedByCall.get(callerId);
+    if (!products) { absent('factory call produced no addresses'); continue; }
+    const address = productAddress(products, strategy.output);
+    if (!address) { absent(`the factory call returned no address named ${strategy.output ?? '(first)'}`); continue; }
+    entries[step.id] = { salt: `0x${'0'.repeat(64)}` as Hex32, initcodeHash: productInitcodeHash(frozen[step.contractId]!), predictedAddress: address, provisional: true, notes: [`returned by ${callerStrategyLabel(plan, callerId)}`] };
   }
 
   const confirmedExisting = new Set<string>();
@@ -184,6 +176,12 @@ export async function buildChainPredictions(plan: DeploymentPlan, frozen: Frozen
   return { predictions, entries, createAddresses, baseNonces, ...(nonceError ? { nonceError } : {}), confirmedExisting, dynamic };
 }
 
+function callerStrategyLabel(plan: DeploymentPlan, stepId: string): string {
+  const step = plan.steps.find((candidate) => candidate.id === stepId);
+  const strategy = step?.kind === 'deploy' ? step.strategy : undefined;
+  return isFactoryStrategy(strategy) ? strategy.signature : stepId;
+}
+
 export function ackIsFresh(strategy: Exclude<NonNullable<DeployStep['strategy']>, { kind: 'create' }>, chainId: number, current: { predictedAddress: Hex; initcodeHash: Hex32 }): boolean {
   const ack = strategy.acknowledgeDeployed?.[String(chainId)];
   return Boolean(ack && ack.predictedAddress.toLowerCase() === current.predictedAddress.toLowerCase() && ack.initcodeHash.toLowerCase() === current.initcodeHash.toLowerCase());
@@ -232,6 +230,12 @@ export function buildSchedule(plan: DeploymentPlan, frozen: FrozenInputs, chainI
       : strategy.kind !== 'create' && ackIsFresh(strategy, chainId, predictions[step.id]!);
     if (strategy.kind !== 'create' && existing) return { stepId: step.id, kind: 'existing', address: predictions[step.id]!.predictedAddress, predictedAddress: predictions[step.id]!.predictedAddress };
     if (isFactoryStrategy(strategy)) {
+      // A product whose deployment is performed by another step's call sends
+      // nothing itself; it only carries the address that call will create.
+      if (strategy.fulfilledBy) {
+        const predicted = predictions[step.id]?.predictedAddress;
+        return { stepId: step.id, kind: 'existing', ...(predicted ? { address: predicted, predictedAddress: predicted } : {}) };
+      }
       const factoryData = buildFactoryCalldata(step as never, chainId, addresses, { frozen, contracts: plan.contracts });
       return { stepId: step.id, kind: 'tx', from, to: resolveFactoryAddress(strategy, chainId, addresses), data: factoryData, value: effectiveValue(step, chainId), ...(predictions[step.id] ? { predictedAddress: predictions[step.id].predictedAddress } : {}) };
     }

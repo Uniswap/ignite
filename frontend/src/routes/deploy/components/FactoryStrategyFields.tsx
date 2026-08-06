@@ -1,9 +1,10 @@
 import { useMemo } from 'react';
 import { parseAbiItem, type AbiFunction } from 'viem';
-import type { Hex, Hex32 } from '@ignite/api';
+import type { ArtifactData, Hex } from '@ignite/api';
 import Select from '../../../components/Select';
 import AbiArgField, { type AbiInput } from './AbiArgField';
-import { useAppDispatch } from '../../../store';
+import { useAppDispatch, useAppSelector } from '../../../store';
+import { useDeploymentArtifacts } from '../useDeploymentArtifacts';
 import { setStrategy } from '../../../store/features/deployments/deployDraftSlice';
 import type { DraftDeployExtras } from '../../../store/features/deployments/types';
 
@@ -12,15 +13,54 @@ type FactoryStrategy = Extract<
   { kind: 'factory' }
 >;
 
-/** Parses a canonical signature into its ABI inputs, ignoring incomplete input. */
-function inputsOf(signature: string | undefined): AbiInput[] {
-  if (!signature?.trim()) return [];
+interface AbiEntry {
+  type?: string;
+  name?: string;
+  inputs?: AbiInput[];
+  outputs?: AbiInput[];
+  stateMutability?: string;
+}
+
+/** Functions that could deploy: state-changing and returning an address. */
+function deployCandidates(abi: unknown): AbiEntry[] {
+  if (!Array.isArray(abi)) return [];
+  return (abi as AbiEntry[]).filter(
+    (entry) =>
+      entry.type === 'function' &&
+      entry.stateMutability !== 'view' &&
+      entry.stateMutability !== 'pure' &&
+      (entry.outputs ?? []).some((output) => output.type === 'address')
+  );
+}
+
+/**
+ * The signature keeps its return clause: a deploy function's address-typed
+ * outputs are how Ignite knows which contracts the call produces, and what
+ * each of them is called.
+ */
+function signatureOf(entry: AbiEntry): string {
+  const inputs = (entry.inputs ?? []).map((input) => input.type).join(',');
+  const outputs = (entry.outputs ?? [])
+    .map((output) => `${output.type}${output.name ? ` ${output.name}` : ''}`)
+    .join(', ');
+  return `${entry.name}(${inputs})${outputs ? ` returns (${outputs})` : ''}`;
+}
+
+function parsedFn(signature: string | undefined): AbiFunction | undefined {
+  if (!signature?.trim()) return undefined;
   try {
-    return ((parseAbiItem(`function ${signature.trim()}`) as AbiFunction)
-      .inputs ?? []) as AbiInput[];
+    return parseAbiItem(`function ${signature.trim()}`) as AbiFunction;
   } catch {
-    return [];
+    return undefined;
   }
+}
+
+/** The contracts a deploy function declares it produces, in order. */
+export function productsOf(signature: string | undefined): string[] {
+  const fn = parsedFn(signature);
+  return (fn?.outputs ?? []).flatMap((output, index) =>
+    output.type === 'address' ? [output.name || `output${index}`] : []
+  );
 }
 
 export default function FactoryStrategyFields({
@@ -31,55 +71,158 @@ export default function FactoryStrategyFields({
   strategy: FactoryStrategy;
 }) {
   const dispatch = useAppDispatch();
-  // setStrategy replaces the whole strategy, so every edit merges onto the
-  // current value rather than needing a reducer per field.
+  const draft = useAppSelector((state) => state.deployDraft);
+  const { artifacts } = useDeploymentArtifacts(draft.contracts);
   const update = (patch: Partial<FactoryStrategy>) =>
     dispatch(setStrategy({ stepId, strategy: { ...strategy, ...patch } }));
 
-  const deployInputs = useMemo(
-    () => inputsOf(strategy.signature),
+  // The factory's own contract supplies the ABI that drives these pickers, so
+  // functions and argument names come from the compiled artifact rather than a
+  // typed signature.
+  const factoryAbi = strategy.factoryContractId
+    ? (artifacts[strategy.factoryContractId] as ArtifactData | undefined)?.abi
+    : undefined;
+  const candidates = useMemo(() => deployCandidates(factoryAbi), [factoryAbi]);
+  const fn = useMemo(() => parsedFn(strategy.signature), [strategy.signature]);
+  const products = useMemo(
+    () => productsOf(strategy.signature),
     [strategy.signature]
   );
-  const predictInputs = useMemo(
-    () => inputsOf(strategy.predictSignature),
-    [strategy.predictSignature]
-  );
-  const predictKind = strategy.predictKind ?? 'function';
+
+  // Other factory steps whose call could deploy this product too — how the
+  // second contract from one call rides along with the step that sends it.
+  const fulfillers = draft.steps.flatMap((candidate) => {
+    if (candidate.id === stepId) return [];
+    const other = draft.deployExtras[candidate.id]?.strategy;
+    return other?.kind === 'factory' && !other.fulfilledBy && other.signature
+      ? [{ value: candidate.id, label: other.signature.split('(')[0] }]
+      : [];
+  });
 
   return (
     <div className="grid gap-3">
-      <label className="grid gap-1">
-        <span className="eyebrow">Factory address</span>
-        <input
-          className="input-glass"
-          value={strategy.factoryAddress ?? ''}
-          placeholder="0x… (already deployed)"
-          onChange={(event) =>
-            update({
-              factoryAddress: (event.target.value || undefined) as
-                | Hex
-                | undefined,
-            })
-          }
-        />
-      </label>
+      {fulfillers.length > 0 && (
+        <label className="grid gap-1">
+          <span className="eyebrow">Deployed by</span>
+          <Select
+            value={strategy.fulfilledBy ?? '__own__'}
+            requireSelection
+            options={[
+              { value: '__own__', label: 'Its own factory call' },
+              ...fulfillers.map((item) => ({
+                value: item.value,
+                label: `Another step's call · ${item.label}`,
+              })),
+            ]}
+            onValueChange={(value) =>
+              update({ fulfilledBy: value === '__own__' ? undefined : value })
+            }
+          />
+        </label>
+      )}
+
+      {!strategy.fulfilledBy && (
+        <label className="grid gap-1">
+          <span className="eyebrow">Factory contract</span>
+          <Select
+            value={strategy.factoryContractId ?? ''}
+            requireSelection
+            placeholder="Which contract is the factory?"
+            options={draft.contracts.map((contract) => ({
+              value: contract.id,
+              label: contract.contractName ?? contract.id,
+            }))}
+            onValueChange={(value) => update({ factoryContractId: value })}
+          />
+          <span className="text-xs text-muted">
+            Its ABI lists the deploy functions and names their arguments.
+          </span>
+        </label>
+      )}
+
+      {!strategy.fulfilledBy && (
+        <label className="grid gap-1">
+          <span className="eyebrow">Factory address</span>
+          <input
+            className="input-glass"
+            value={strategy.factoryAddress ?? ''}
+            placeholder="0x… (already deployed)"
+            onChange={(event) =>
+              update({
+                factoryAddress: (event.target.value || undefined) as
+                  | Hex
+                  | undefined,
+              })
+            }
+          />
+        </label>
+      )}
 
       <label className="grid gap-1">
         <span className="eyebrow">Deploy function</span>
-        <input
-          className="input-glass"
-          value={strategy.signature ?? ''}
-          placeholder="deploy(address,bytes32)"
-          onChange={(event) =>
-            update({ signature: event.target.value || undefined })
-          }
-        />
+        {candidates.length > 0 ? (
+          <Select
+            value={strategy.signature ?? ''}
+            requireSelection
+            placeholder="Choose the function that deploys"
+            options={candidates.map((entry) => {
+              const signature = signatureOf(entry);
+              const produced = productsOf(signature);
+              return {
+                value: signature,
+                label: `${entry.name}(${(entry.inputs ?? [])
+                  .map((input) => input.name || input.type)
+                  .join(', ')}) → ${produced.join(', ')}`,
+              };
+            })}
+            onValueChange={(value) =>
+              update({ signature: value, output: productsOf(value)[0] })
+            }
+          />
+        ) : (
+          <>
+            <input
+              className="input-glass"
+              value={strategy.signature ?? ''}
+              placeholder="deploy(address,bytes32) returns (address jar, address releaser)"
+              onChange={(event) =>
+                update({ signature: event.target.value || undefined })
+              }
+            />
+            <span className="text-xs text-muted">
+              Add the factory&apos;s contract to this deployment to pick its
+              functions from the ABI instead of typing a signature.
+            </span>
+          </>
+        )}
       </label>
 
-      {deployInputs.length > 0 && (
+      {products.length > 0 && (
+        <label className="grid gap-1">
+          <span className="eyebrow">
+            {products.length > 1
+              ? `This call deploys ${products.length} contracts — which is this step?`
+              : 'Deployed contract'}
+          </span>
+          <Select
+            value={strategy.output ?? products[0]}
+            requireSelection
+            options={products.map((name) => ({ value: name, label: name }))}
+            onValueChange={(value) => update({ output: value })}
+          />
+          {products.length > 1 && !strategy.fulfilledBy && (
+            <span className="text-xs text-muted">
+              Add a step for each other product and set its “Deployed by” to
+              this step, so later calls can point at them.
+            </span>
+          )}
+        </label>
+      )}
+
+      {!strategy.fulfilledBy && fn && (fn.inputs ?? []).length > 0 && (
         <section className="grid gap-2">
           <span className="eyebrow">Factory arguments</span>
-          {deployInputs.map((input, index) => {
+          {(fn.inputs as AbiInput[]).map((input, index) => {
             const key = input.name || `arg${index}`;
             return (
               <AbiArgField
@@ -94,80 +237,6 @@ export default function FactoryStrategyFields({
             );
           })}
         </section>
-      )}
-
-      <label className="grid gap-1">
-        <span className="eyebrow">Predicted address</span>
-        <Select
-          value={predictKind}
-          requireSelection
-          options={[
-            { value: 'function', label: 'Ask the factory (predict function)' },
-            { value: 'create2', label: 'Raw CREATE2 (salt)' },
-          ]}
-          onValueChange={(value) =>
-            update({ predictKind: value as 'function' | 'create2' })
-          }
-        />
-        <span className="text-xs text-muted">
-          A factory may transform the salt (commonly scoping it to the caller),
-          so its own predict helper is authoritative. Use raw CREATE2 only when
-          the factory exposes no helper.
-        </span>
-      </label>
-
-      {predictKind === 'function' ? (
-        <>
-          <label className="grid gap-1">
-            <span className="eyebrow">Predict function</span>
-            <input
-              className="input-glass"
-              value={strategy.predictSignature ?? ''}
-              placeholder="predictJar(address,bytes32)"
-              onChange={(event) =>
-                update({ predictSignature: event.target.value || undefined })
-              }
-            />
-          </label>
-          {predictInputs.map((input, index) => {
-            const key = input.name || `arg${index}`;
-            return (
-              <AbiArgField
-                key={key}
-                input={input}
-                fieldKey={key}
-                value={strategy.predictArgs?.[key]}
-                onChange={(value) =>
-                  update({
-                    predictArgs: {
-                      ...(strategy.predictArgs ?? {}),
-                      [key]: value,
-                    },
-                  })
-                }
-              />
-            );
-          })}
-        </>
-      ) : (
-        <label className="grid gap-1">
-          <span className="eyebrow">Salt</span>
-          <input
-            className="input-glass"
-            value={strategy.salt ?? ''}
-            placeholder="0x… (32 bytes)"
-            onChange={(event) =>
-              update({
-                salt: (event.target.value || undefined) as Hex32 | undefined,
-              })
-            }
-          />
-          <span className="text-xs text-muted">
-            The product&apos;s creation bytecode is used as-is: raw CREATE2
-            cannot reconstruct constructor arguments the factory supplies
-            itself.
-          </span>
-        </label>
       )}
     </div>
   );

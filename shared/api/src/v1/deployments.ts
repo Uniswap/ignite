@@ -106,18 +106,13 @@ export interface WrapsRef { stepId: string; contractTypePluginId: string }
 export type LibraryBinding = { kind: 'address'; address: Hex } | { kind: 'step'; stepId: string };
 export type AckMap = Record<string, { predictedAddress: Hex; initcodeHash: Hex32 }>;
 /**
- * How a factory's product address is known before the call runs.
- *
- * `function` asks the factory itself (e.g. `predictJar(address,bytes32)`) via
- * eth_call and is the default: a factory is free to transform the salt — a
- * common pattern scopes it to msg.sender so callers cannot squat each other's
- * addresses — which raw CREATE2 math would silently get wrong. `create2` is
- * the fallback for factories that expose no predict helper, deriving the
- * address from the factory as the deployer.
+ * Factory deployments read their product addresses from the deploy function
+ * itself: a function returning addresses names them in its ABI outputs, and an
+ * eth_call of that same function with the same arguments and sender yields the
+ * addresses it would create. That covers every product of a call at once,
+ * needs no predict helper, and avoids reconstructing a salt the factory may
+ * transform (commonly scoping it to msg.sender).
  */
-export type FactoryPrediction =
-  | { kind: 'function'; signature: string; args?: ArgValues }
-  | { kind: 'create2'; salt: Hex32 };
 export type DeployStrategy =
   | { kind: 'create' }
   | { kind: 'create2'; salt: Hex32; saltPerChain?: Record<string, Hex32>; acknowledgeDeployed?: AckMap }
@@ -126,7 +121,12 @@ export type DeployStrategy =
   // than submitting initcode. The transaction is the factory call; the step
   // stays a deploy step so the product keeps pointers, the run artifact and
   // verification.
-  | { kind: 'factory'; target: CallTarget; targetPerChain?: Record<string, CallTarget>; signature: string; args?: ArgValues; argsPerChain?: Record<string, Partial<ArgValues>>; predict: FactoryPrediction; predictPerChain?: Record<string, FactoryPrediction>; acknowledgeDeployed?: AckMap };
+  // `output` names which of the deploy function's returned addresses this step
+  // is. A call producing several contracts is modelled as one factory step per
+  // product: the first broadcasts, the rest set `fulfilledBy` to it and send no
+  // transaction of their own, so each product keeps a step id that later steps
+  // can point at.
+  | { kind: 'factory'; target: CallTarget; targetPerChain?: Record<string, CallTarget>; signature: string; args?: ArgValues; argsPerChain?: Record<string, Partial<ArgValues>>; output?: string; fulfilledBy?: string; acknowledgeDeployed?: AckMap };
 export type CallTarget = { kind: 'step'; stepId: string } | { kind: 'address'; address: Hex };
 export interface CallStep {
   id: string; kind: 'call'; target: CallTarget; targetPerChain?: Record<string, CallTarget>;
@@ -232,15 +232,12 @@ export const LibraryBindingSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('step'), stepId: z.string().min(1) }),
 ]) satisfies z.ZodType<LibraryBinding>;
 const AckMapSchema = z.record(ChainIdKeySchema, z.object({ predictedAddress: AddressSchema, initcodeHash: Hex32Schema }));
-export const FactoryPredictionSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('function'), signature: z.string().min(1).max(512).regex(FN_SIGNATURE, 'signature must be a canonical function signature'), args: ArgValuesSchema.optional() }),
-  z.object({ kind: z.literal('create2'), salt: Hex32Schema }),
-]) satisfies z.ZodType<FactoryPrediction>;
+
 export const DeployStrategySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('create') }),
   z.object({ kind: z.literal('create2'), salt: Hex32Schema, saltPerChain: z.record(ChainIdKeySchema, Hex32Schema).optional(), acknowledgeDeployed: AckMapSchema.optional() }),
   z.object({ kind: z.literal('plugin'), pluginId: z.string().min(1), params: z.record(z.string(), z.unknown()).optional(), salt: Hex32Schema.optional(), saltPerChain: z.record(ChainIdKeySchema, Hex32Schema).optional(), prepared: z.record(ChainIdKeySchema, z.object({ initcodeHash: Hex32Schema, predictedAddress: AddressSchema })).optional(), acknowledgeDeployed: AckMapSchema.optional() }),
-  z.object({ kind: z.literal('factory'), target: z.lazy(() => CallTargetSchema), targetPerChain: z.record(ChainIdKeySchema, z.lazy(() => CallTargetSchema)).optional(), signature: z.string().min(1).max(512).regex(FN_SIGNATURE, 'signature must be a canonical function signature'), args: ArgValuesSchema.optional(), argsPerChain: z.record(ChainIdKeySchema, ArgValuesSchema).optional(), predict: FactoryPredictionSchema, predictPerChain: z.record(ChainIdKeySchema, FactoryPredictionSchema).optional(), acknowledgeDeployed: AckMapSchema.optional() }),
+  z.object({ kind: z.literal('factory'), target: z.lazy(() => CallTargetSchema), targetPerChain: z.record(ChainIdKeySchema, z.lazy(() => CallTargetSchema)).optional(), signature: z.string().min(1).max(512).regex(FN_SIGNATURE, 'signature must be a canonical function signature'), args: ArgValuesSchema.optional(), argsPerChain: z.record(ChainIdKeySchema, ArgValuesSchema).optional(), output: z.string().min(1).max(128).optional(), fulfilledBy: z.string().min(1).optional(), acknowledgeDeployed: AckMapSchema.optional() }),
 ]) satisfies z.ZodType<DeployStrategy>;
 export const CallTargetSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('step'), stepId: z.string().min(1) }),
