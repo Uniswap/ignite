@@ -74,6 +74,48 @@ describe('TxService.verifySignedTx', () => {
       )
     ).rejects.toThrow(/signer/i);
   });
+
+  // A zero fee RLP-encodes to an empty byte string and decodes back as
+  // undefined, so comparing it against 0n failed and paused the lane at
+  // broadcast on chains where a zero priority fee is correct (FCFS ordering).
+  it('accepts a faithful signature on a zero-priority-fee chain', async () => {
+    const zeroTip = { ...unsigned, maxPriorityFeePerGas: '0x0' as const };
+    const raw = await signUnsigned(zeroTip);
+    const svc = new TxService();
+    await expect(
+      svc.verifySignedTx(raw, zeroTip, account.address)
+    ).resolves.toBeUndefined();
+  });
+
+  it('accepts a faithful signature when both fees are zero', async () => {
+    const zeroFees = {
+      ...unsigned,
+      maxFeePerGas: '0x0' as const,
+      maxPriorityFeePerGas: '0x0' as const,
+    };
+    const raw = await signUnsigned(zeroFees);
+    const svc = new TxService();
+    await expect(
+      svc.verifySignedTx(raw, zeroFees, account.address)
+    ).resolves.toBeUndefined();
+  });
+
+  // Absent-means-zero must not blunt the integrity gate: a signer that
+  // returns a fee the caller never requested is still tampering.
+  it('rejects a nonzero fee when zero was requested', async () => {
+    const raw = await signUnsigned({
+      ...unsigned,
+      maxPriorityFeePerGas: '0x3b9aca00' as const,
+    });
+    const svc = new TxService();
+    await expect(
+      svc.verifySignedTx(
+        raw,
+        { ...unsigned, maxPriorityFeePerGas: '0x0' as const },
+        account.address
+      )
+    ).rejects.toThrow(/maxPriorityFeePerGas/);
+  });
 });
 
 describe('toUnsignedTx', () => {
