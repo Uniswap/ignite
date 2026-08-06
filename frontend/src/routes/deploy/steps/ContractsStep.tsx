@@ -7,6 +7,7 @@ import { useAppDispatch, useAppSelector } from '../../../store';
 import { toggleWorkflowStep, workflowDependentsForExclusion } from '../../../store/features/deployments/deployDraftSlice';
 import ConfirmDialog from '../../../components/ConfirmDialog';
 import { artifactVariantFromPath } from '../../../utils/artifactVariants';
+import { findVersionForPin, pinChipText } from '../../../utils/pinDisplay';
 
 interface ContractsStepProps {
   contracts: DraftContract[];
@@ -23,6 +24,9 @@ export default function ContractsStep({
 }: ContractsStepProps) {
   const dispatch = useAppDispatch();
   const draft = useAppSelector((state) => state.deployDraft);
+  // The draft pin only carries a ref on some entry paths; the server's version
+  // record is what reliably holds the tag, so the chip resolves it from there.
+  const repositories = useAppSelector((state) => state.repositories.repositories);
   const [pendingToggle, setPendingToggle] = useState<string>();
   const [checks, setChecks] = useState<
     Record<string, 'loading' | 'ok' | 'error'>
@@ -109,7 +113,7 @@ export default function ContractsStep({
                   {contract.origin === 'contract-type' ? `${contract.pluginId} @ ${contract.versionLabel}` : `${decodeUrlEncodingForDisplay(contract.sourcePath)} · ${contract.frameworkId}`}
                 </div>
                 {(contract.origin !== 'contract-type' && (contract.pin || variant)) && <div className="flex flex-wrap gap-1 mt-1">
-                  {contract.pin && <span className="chip chip-info">{contract.pin.ref ?? contract.pin.commit.slice(0, 12)} · {contract.pin.commit.slice(0, 12)}</span>}
+                  {contract.pin && <span className="chip chip-info">{pinChipText(contract.pin, findVersionForPin(repositories, contract.pin))}</span>}
                   {variant && <span className="chip">{variant}</span>}
                 </div>}
                 {checks[contract.id] === 'loading' && (
