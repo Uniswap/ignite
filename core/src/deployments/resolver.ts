@@ -126,7 +126,7 @@ function resolveAbiRefs(parameter: AbiParameter, value: unknown, path: string, r
       if (Object.prototype.hasOwnProperty.call(rawArgs, key))
         resolvedArgs[key] = resolveAbiRefs(input, rawArgs[key], `${path}.$encode.${key}`, resolve, context);
     }
-    return encodeFunctionData({ abi: [fn], functionName: fn.name, args: toConstructorArgs(fn.inputs, resolvedArgs) as never });
+    return encodeFunctionData({ abi: [fn], functionName: fn.name, args: toConstructorArgs(fn.inputs, resolvedArgs, 'call') as never });
   }
   if (isValueRef(value)) {
     if (parameter.type !== 'address') throw new IgniteError(`Pointer at ${path} is only valid for address ABI inputs`, ErrorCodes.ARG_TYPE_MISMATCH, { field: path });
@@ -284,72 +284,81 @@ export function resolveSigner(
 
 export function toConstructorArgs(
   abiInputs: readonly AbiParameter[],
-  merged: ArgValues
+  merged: ArgValues,
+  context: 'constructor' | 'call' = 'constructor'
 ): unknown[] {
   return abiInputs.map((input, index) => {
     const key = input.name || `arg${index}`;
     if (!Object.prototype.hasOwnProperty.call(merged, key)) {
-      throw argError(key, 'is required');
+      throw argError(key, 'is required', context);
     }
-    return coerceAbiValue(input, merged[key], key);
+    return coerceAbiValue(input, merged[key], key, context);
   });
 }
 
 function coerceAbiValue(
   parameter: AbiParameter,
   value: unknown,
-  field: string
+  field: string,
+  context: 'constructor' | 'call'
 ): unknown {
   const arrayMatch = parameter.type.match(/^(.*)\[([0-9]*)\]$/);
   if (arrayMatch) {
     if (!Array.isArray(value)) {
-      throw argError(field, 'must be an array');
+      throw argError(field, 'must be an array', context);
     }
     const [, elementType, fixedLength] = arrayMatch;
     if (fixedLength && value.length !== Number(fixedLength)) {
-      throw argError(field, `must contain exactly ${fixedLength} items`);
+      throw argError(
+        field,
+        `must contain exactly ${fixedLength} items`,
+        context
+      );
     }
     return value.map((item, index) =>
       coerceAbiValue(
         { ...parameter, type: elementType },
         item,
-        `${field}[${index}]`
+        `${field}[${index}]`,
+        context
       )
     );
   }
 
   if (parameter.type === 'tuple') {
-    return coerceTuple(parameter, value, field);
+    return coerceTuple(parameter, value, field, context);
   }
 
   if (/^u?int(?:[0-9]+)?$/.test(parameter.type)) {
     if (typeof value !== 'string' || !/^-?\d+$/.test(value)) {
-      throw argError(field, 'must be a decimal integer string');
+      throw argError(field, 'must be a decimal integer string', context);
     }
     if (parameter.type.startsWith('uint') && value.startsWith('-')) {
-      throw argError(field, 'must not be negative');
+      throw argError(field, 'must not be negative', context);
     }
     try {
       return BigInt(value);
     } catch {
-      throw argError(field, 'must be a decimal integer string');
+      throw argError(field, 'must be a decimal integer string', context);
     }
   }
 
   if (parameter.type === 'address') {
     if (typeof value !== 'string' || !isAddress(value)) {
-      throw argError(field, 'must be a valid address');
+      throw argError(field, 'must be a valid address', context);
     }
     return value;
   }
 
   if (parameter.type === 'bool') {
-    if (typeof value !== 'boolean') throw argError(field, 'must be a boolean');
+    if (typeof value !== 'boolean')
+      throw argError(field, 'must be a boolean', context);
     return value;
   }
 
   if (parameter.type === 'string') {
-    if (typeof value !== 'string') throw argError(field, 'must be a string');
+    if (typeof value !== 'string')
+      throw argError(field, 'must be a string', context);
     return value;
   }
 
@@ -358,39 +367,49 @@ function coerceAbiValue(
     /^bytes(?:[1-9]|[12][0-9]|3[0-2])$/.test(parameter.type)
   ) {
     if (typeof value !== 'string' || !/^0x(?:[0-9a-fA-F]{2})*$/.test(value)) {
-      throw argError(field, 'must be hex data');
+      throw argError(field, 'must be hex data', context);
     }
     const fixedBytes = parameter.type.match(/^bytes([0-9]+)$/)?.[1];
     if (fixedBytes && value.length !== 2 + Number(fixedBytes) * 2) {
-      throw argError(field, `must be exactly ${fixedBytes} bytes`);
+      throw argError(field, `must be exactly ${fixedBytes} bytes`, context);
     }
     return value;
   }
 
-  throw argError(field, `uses unsupported ABI type ${parameter.type}`);
+  throw argError(
+    field,
+    `uses unsupported ABI type ${parameter.type}`,
+    context
+  );
 }
 
 function coerceTuple(
   parameter: AbiParameter,
   value: unknown,
-  field: string
+  field: string,
+  context: 'constructor' | 'call'
 ): unknown {
   const components =
     'components' in parameter ? (parameter.components ?? []) : [];
   if (Array.isArray(value)) {
     if (value.length !== components.length) {
-      throw argError(field, `must contain exactly ${components.length} fields`);
+      throw argError(
+        field,
+        `must contain exactly ${components.length} fields`,
+        context
+      );
     }
     return components.map((component, index) =>
       coerceAbiValue(
         component,
         value[index],
-        `${field}.${component.name || `arg${index}`}`
+        `${field}.${component.name || `arg${index}`}`,
+        context
       )
     );
   }
   if (typeof value !== 'object' || value === null) {
-    throw argError(field, 'must be a tuple object or array');
+    throw argError(field, 'must be a tuple object or array', context);
   }
 
   const record = value as Record<string, unknown>;
@@ -401,18 +420,27 @@ function coerceTuple(
     const component = components[index];
     const key = component.name || `arg${index}`;
     if (!Object.prototype.hasOwnProperty.call(record, key)) {
-      throw argError(`${field}.${key}`, 'is required');
+      throw argError(`${field}.${key}`, 'is required', context);
     }
-    const coerced = coerceAbiValue(component, record[key], `${field}.${key}`);
+    const coerced = coerceAbiValue(
+      component,
+      record[key],
+      `${field}.${key}`,
+      context
+    );
     if (allUnnamed) positional.push(coerced);
     else result[key] = coerced;
   }
   return allUnnamed ? positional : result;
 }
 
-function argError(field: string, detail: string): IgniteError {
+function argError(
+  field: string,
+  detail: string,
+  context: 'constructor' | 'call'
+): IgniteError {
   return new IgniteError(
-    `Constructor argument ${field} ${detail}`,
+    `${context === 'call' ? 'Call' : 'Constructor'} argument ${field} ${detail}`,
     ErrorCodes.ARG_TYPE_MISMATCH,
     { field }
   );

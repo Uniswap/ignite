@@ -65,6 +65,16 @@ describe('deployment resolver', () => {
     expect(() => toConstructorArgs(inputs, { supply: 'not-a-number', owner: 'not-an-address', config: { recipient: alternateAddress, amounts: 'not-an-array' }, pairs: [] })).toThrow(/supply/);
   });
 
+  it('labels ABI coercion errors for calls separately from constructors', () => {
+    const inputs: AbiParameter[] = [{ name: 'newOwner', type: 'address' }];
+    expect(() => toConstructorArgs(inputs, {})).toThrow(
+      'Constructor argument newOwner is required'
+    );
+    expect(() => toConstructorArgs(inputs, {}, 'call')).toThrow(
+      'Call argument newOwner is required'
+    );
+  });
+
   it('resolves only address-typed pointer leaves', () => {
     const step = { id: 'a', kind: 'deploy' as const, contractId: 'a', args: { owner: { $ref: { kind: 'step' as const, stepId: 'b' } } } };
     expect(resolveStepValues(step, 1, () => address, [{ name: 'owner', type: 'address' }])).toMatchObject({ args: { owner: address }, pointers: { 'args.owner': address } });

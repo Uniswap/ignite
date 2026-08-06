@@ -787,7 +787,7 @@ function validateArgs(
             `Call arguments are missing for ${stepLabel(plan, step.id)}`,
             { fields: missingCall }
           );
-        toConstructorArgs(fn.inputs, resolveStepValues(step, chainId, resolveRef, fn.inputs, { frozen, contracts: plan.contracts }).args);
+        toConstructorArgs(fn.inputs, resolveStepValues(step, chainId, resolveRef, fn.inputs, { frozen, contracts: plan.contracts }).args, 'call');
         continue;
       }
       const input = frozen[step.contractId];

@@ -173,7 +173,7 @@ export function buildSchedule(plan: DeploymentPlan, frozen: FrozenInputs, chainI
     if (step.kind === 'call') {
       const fn = callAbiItem(step, chainId, callTargetAbi(plan, step, chainId, frozen));
       const values = resolveStepValues(step, chainId, addresses, fn?.inputs ?? [], { frozen, contracts: plan.contracts });
-      const data = fn ? encodeFunctionData({ abi: [fn], functionName: fn.name, args: toConstructorArgs(fn.inputs, values.args) }) : '0x';
+      const data = fn ? encodeFunctionData({ abi: [fn], functionName: fn.name, args: toConstructorArgs(fn.inputs, values.args, 'call') }) : '0x';
       return { stepId: step.id, kind: 'tx', from, to: values.target!, data, value: effectiveValue(step, chainId) };
     }
     const strategy = step.strategy ?? { kind: 'create' as const };
