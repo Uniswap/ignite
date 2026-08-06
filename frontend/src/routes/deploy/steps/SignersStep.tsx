@@ -13,6 +13,7 @@ import {
   setChainSigner,
   setGlobalSigner,
 } from '../../../store/features/deployments/deployDraftSlice';
+import { signerAccountOptionLabel } from '../signerDisplay';
 
 function refKey(ref: SignerRef | undefined): string | undefined {
   return ref ? `${ref.pluginId}:${ref.accountId}` : undefined;
@@ -112,21 +113,9 @@ export default function SignersStep() {
 
   const refs = signers.providers.flatMap((provider) =>
     provider.accounts.map((account) => {
-      const short = `${account.address.slice(0, 6)}…${account.address.slice(-4)}`;
-      // Provider first, then the account label, and always the address —
-      // "Account 0" alone doesn't identify a key. Skip the suffix when the
-      // label already embeds the address (browser-wallet labels do).
-      const labelHasAddress = account.label
-        ?.toLowerCase()
-        .includes(account.address.slice(0, 6).toLowerCase());
-      const parts = [
-        provider.name,
-        account.label ?? short,
-        ...(account.label && !labelHasAddress ? [short] : []),
-      ];
       return {
         value: `${provider.pluginId}:${account.id}`,
-        label: parts.join(' · '),
+        label: signerAccountOptionLabel(provider.name, account),
         ref: {
           pluginId: provider.pluginId,
           accountId: account.id,

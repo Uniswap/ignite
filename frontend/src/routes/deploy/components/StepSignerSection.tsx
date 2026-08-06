@@ -2,6 +2,12 @@ import type { SignerCascade, SignerRef } from '@ignite/api';
 import Select from '../../../components/Select';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import { setStepSigner } from '../../../store/features/deployments/deployDraftSlice';
+import {
+  runSignerForChain,
+  signerAccountOptionLabel,
+  signerResolutionLabel,
+  stepSignerForChain,
+} from '../signerDisplay';
 
 function key(ref: SignerRef | undefined) {
   return ref ? `${ref.pluginId}:${ref.accountId}` : '__default__';
@@ -18,7 +24,7 @@ export default function StepSignerSection({ stepId }: { stepId: string }) {
   const refs = providers.flatMap((provider) =>
     provider.accounts.map((account) => ({
       value: `${provider.pluginId}:${account.id}`,
-      label: `${provider.name} · ${account.label ?? account.address}`,
+      label: signerAccountOptionLabel(provider.name, account),
       ref: {
         pluginId: provider.pluginId,
         accountId: account.id,
@@ -56,13 +62,22 @@ export default function StepSignerSection({ stepId }: { stepId: string }) {
     );
   };
   const hasPerChain = Object.keys(override?.perChain ?? {}).length > 0;
-  const label = hasPerChain
+  const sourceLabel = hasPerChain
     ? override?.global
       ? 'step + per-chain override'
       : 'per-chain override'
     : override?.global
       ? 'step override'
       : 'run default';
+  const runDefaults = draft.chains.length
+    ? draft.chains.map((chainId) => runSignerForChain(draft.signers, chainId))
+    : [draft.signers.global];
+  const effectiveSigners = draft.chains.length
+    ? draft.chains.map((chainId) =>
+        stepSignerForChain(draft.signers, override, chainId)
+      )
+    : [override?.global ?? draft.signers.global];
+  const label = signerResolutionLabel(sourceLabel, effectiveSigners);
   return (
     <details className="border-t border-[var(--hairline)] pt-3">
       <summary className="text-sm cursor-pointer">Signer: {label}</summary>
@@ -72,7 +87,10 @@ export default function StepSignerSection({ stepId }: { stepId: string }) {
           value={key(override?.global)}
           requireSelection
           options={[
-            { value: '__default__', label: 'Use run default' },
+            {
+              value: '__default__',
+              label: signerResolutionLabel('Use run default', runDefaults),
+            },
             ...refs,
           ]}
           onValueChange={setGlobal}
@@ -91,7 +109,13 @@ export default function StepSignerSection({ stepId }: { stepId: string }) {
                     value={key(override?.perChain?.[String(chainId)])}
                     requireSelection
                     options={[
-                      { value: '__default__', label: 'Inherit' },
+                      {
+                        value: '__default__',
+                        label: signerResolutionLabel('Inherit', [
+                          override?.global ??
+                            runSignerForChain(draft.signers, chainId),
+                        ]),
+                      },
                       ...refs,
                     ]}
                     onValueChange={(value) => setPerChain(chainId, value)}

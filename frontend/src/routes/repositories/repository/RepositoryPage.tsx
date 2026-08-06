@@ -9,6 +9,7 @@ import { useEffect, useMemo } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
 import { useAppSelector, useAppDispatch } from '../../../store/hooks';
 import { getRepoName } from '../../../utils/repo';
+import { pinChipText } from '../../../utils/pinDisplay';
 import StatusCard from './components/StatusCard';
 import ArtifactBrowser from './components/ArtifactBrowser';
 import {
@@ -249,7 +250,7 @@ export default function RepositoryPage() {
           </nav>
           <div className="flex items-center gap-2 mt-1">
             <p className="mono-data text-muted truncate">{decodedPath}</p>
-            {pin && <span className="chip chip-info shrink-0"><Pin size={12} /> {version?.refLabel ?? pin.commit.slice(0, 12)} · {pin.commit.slice(0, 12)}</span>}
+            {pin && <span className="chip chip-info shrink-0"><Pin size={12} /> {pinChipText(pin, version)}</span>}
           </div>
         </div>
       </div>
