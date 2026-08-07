@@ -60,6 +60,45 @@ export function pinForRepoVersion(
   };
 }
 
+// Every lookup that walks repo versions must agree that the session
+// workspace is a source, or a version pinned under it resolves in the
+// dropdown but nowhere else.
+function pickerRepoEntries(repositories: RepoList | null) {
+  const session = repositories?.session;
+  const attached = [
+    ...(repositories?.local ?? []),
+    ...(repositories?.cloned ?? []),
+  ];
+  return session &&
+    !attached.some((repo) => repo.pathOrUrl === session.pathOrUrl)
+    ? [session, ...attached]
+    : attached;
+}
+
+/**
+ * The stored version summary a pin refers to, wherever it lives — session
+ * workspace, attached repo, or orphaned version group. Selecting the
+ * workspace's own version tag used to resolve no frameworks (only
+ * local/cloned were searched), so the artifact listing never dispatched and
+ * the picker sat on "Loading contracts…" forever.
+ */
+export function pinnedVersionSummary(
+  repositories: RepoList | null,
+  pin: ContractSourcePin | undefined
+): RepoVersionSummary | undefined {
+  if (!pin) return undefined;
+  return (
+    pickerRepoEntries(repositories)
+      .flatMap((repo) => repo.versions)
+      .find(
+        (version) => version.url === pin.url && version.commit === pin.commit
+      ) ??
+    repositories?.versionGroups
+      .find((group) => group.url === pin.url)
+      ?.versions.find((version) => version.commit === pin.commit)
+  );
+}
+
 /**
  * Every repository an artifact can be picked from. The session workspace is
  * a first-class source: in a fresh setup it is often the only repo, and
@@ -68,14 +107,7 @@ export function pinForRepoVersion(
  */
 export function repoChoicesFor(repositories: RepoList | null): RepoChoice[] {
   const session = repositories?.session;
-  const attached = [
-    ...(repositories?.local ?? []),
-    ...(repositories?.cloned ?? []),
-  ];
-  const entries =
-    session && !attached.some((repo) => repo.pathOrUrl === session.pathOrUrl)
-      ? [session, ...attached]
-      : attached;
+  const entries = pickerRepoEntries(repositories);
   const withVersions = entries.flatMap<RepoChoice>((repo) => [
     {
       value: `live:${repo.pathOrUrl}`,
@@ -185,33 +217,15 @@ export default function ArtifactPicker({
     );
   const repoOptions = repoChoices.map(({ value, label }) => ({ value, label }));
   const frameworks = pin
-    ? (
-        repositories?.versionGroups
-          .find((group) => group.url === pin.url)
-          ?.versions.find((version) => version.commit === pin.commit)
-          ?.frameworks ??
-        [...(repositories?.local ?? []), ...(repositories?.cloned ?? [])]
-          .flatMap((repo) => repo.versions)
-          .find(
-            (version) =>
-              version.url === pin.url && version.commit === pin.commit
-          )?.frameworks ??
-        []
-      ).map(({ id, name }) => ({ id, name }))
+    ? (pinnedVersionSummary(repositories, pin)?.frameworks ?? []).map(
+        ({ id, name }) => ({ id, name })
+      )
     : (repositoryData[repoPath]?.frameworks ?? []);
   const effectiveFramework = frameworkId || frameworks[0]?.id || '';
   const scopeKey = compilerScopeKey(repoPath, pin);
   const compilation = compilations[scopeKey]?.[effectiveFramework];
   const artifacts = compilation?.artifacts;
-  const pinnedVersion = pin
-    ? [
-        ...(repositories?.local ?? []),
-        ...(repositories?.cloned ?? []),
-      ].flatMap((repo) => repo.versions).find(
-        (version) => version.url === pin.url && version.commit === pin.commit
-      ) ?? repositories?.versionGroups.find((group) => group.url === pin.url)
-        ?.versions.find((version) => version.commit === pin.commit)
-    : undefined;
+  const pinnedVersion = pinnedVersionSummary(repositories, pin);
   const lifecycleError = pin ? pinnedVersion?.lastError : repositoryData[repoPath]?.lastError;
 
   useEffect(() => {

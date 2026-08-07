@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement } from 'react';
 import ArtifactPicker, {
   pinForRepoVersion,
+  pinnedVersionSummary,
   repoChoicesFor,
 } from '../ArtifactPicker';
 import { artifactListReceived, compilerReducer } from '../../store/features/compiler/compilerSlice';
@@ -129,5 +130,55 @@ describe('repoChoicesFor', () => {
       session: entry, local: [entry], cloned: [], versionGroups: [], pinned: [],
     } as never);
     expect(choices.filter((choice) => choice.value === 'live:/repo')).toHaveLength(1);
+  });
+});
+
+describe('pinnedVersionSummary', () => {
+  const version = {
+    url: 'https://example.test/tjar.git',
+    commit: 'a'.repeat(40),
+    refLabel: 'oz-audit-final',
+    refKind: 'tag' as const,
+    frameworks: [{ id: 'foundry', name: 'Foundry', state: 'compiled' }],
+    lastUsedAt: '2026-08-06T00:00:00.000Z',
+  };
+  const pin = pinForRepoVersion(version as never);
+
+  it('finds a version pinned under the session workspace', () => {
+    // Selecting the workspace's own version tag resolved no frameworks, so
+    // the artifact listing never dispatched and the picker sat on
+    // "Loading contracts…" forever.
+    const found = pinnedVersionSummary(
+      {
+        session: { pathOrUrl: '/workspace', initialized: true, frameworks: [], versions: [version] },
+        local: [], cloned: [], versionGroups: [], pinned: [],
+      } as never,
+      pin
+    );
+    expect(found?.frameworks?.[0]?.id).toBe('foundry');
+  });
+
+  it('still finds attached and orphaned versions', () => {
+    const attached = pinnedVersionSummary(
+      {
+        session: null,
+        local: [{ pathOrUrl: '/repo', initialized: true, frameworks: [], versions: [version] }],
+        cloned: [], versionGroups: [], pinned: [],
+      } as never,
+      pin
+    );
+    expect(attached?.commit).toBe(version.commit);
+    const orphaned = pinnedVersionSummary(
+      {
+        session: null, local: [], cloned: [],
+        versionGroups: [{ url: version.url, versions: [version] }], pinned: [],
+      } as never,
+      pin
+    );
+    expect(orphaned?.commit).toBe(version.commit);
+  });
+
+  it('is undefined without a pin', () => {
+    expect(pinnedVersionSummary(null, undefined)).toBeUndefined();
   });
 });
