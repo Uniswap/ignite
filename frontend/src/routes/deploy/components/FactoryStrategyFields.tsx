@@ -1,5 +1,4 @@
 import { useMemo } from 'react';
-import { parseAbiItem, type AbiFunction } from 'viem';
 import type { ArtifactData, Hex } from '@ignite/api';
 import Select from '../../../components/Select';
 import AbiArgField, { type AbiInput } from './AbiArgField';
@@ -7,36 +6,23 @@ import { useAppDispatch, useAppSelector } from '../../../store';
 import { useDeploymentArtifacts } from '../useDeploymentArtifacts';
 import { setStrategy } from '../../../store/features/deployments/deployDraftSlice';
 import type { DraftDeployExtras } from '../../../store/features/deployments/types';
+import {
+  deployCandidates,
+  parsedFactoryFunction,
+  productsOf,
+  type AbiEntry,
+} from '../../../utils/factorySignatures';
 
 type FactoryStrategy = Extract<
   DraftDeployExtras['strategy'],
   { kind: 'factory' }
 >;
 
-interface AbiEntry {
-  type?: string;
-  name?: string;
-  inputs?: AbiInput[];
-  outputs?: AbiInput[];
-  stateMutability?: string;
-}
-
-/** Functions that could deploy: state-changing and returning an address. */
-function deployCandidates(abi: unknown): AbiEntry[] {
-  if (!Array.isArray(abi)) return [];
-  return (abi as AbiEntry[]).filter(
-    (entry) =>
-      entry.type === 'function' &&
-      entry.stateMutability !== 'view' &&
-      entry.stateMutability !== 'pure' &&
-      (entry.outputs ?? []).some((output) => output.type === 'address')
-  );
-}
-
 /**
  * The signature keeps its return clause: a deploy function's address-typed
  * outputs are how Ignite knows which contracts the call produces, and what
- * each of them is called.
+ * each of them is called. Inputs stay types-only — the storage format of
+ * per-step factory strategies already in drafts and workflows.
  */
 function signatureOf(entry: AbiEntry): string {
   const inputs = (entry.inputs ?? []).map((input) => input.type).join(',');
@@ -44,23 +30,6 @@ function signatureOf(entry: AbiEntry): string {
     .map((output) => `${output.type}${output.name ? ` ${output.name}` : ''}`)
     .join(', ');
   return `${entry.name}(${inputs})${outputs ? ` returns (${outputs})` : ''}`;
-}
-
-function parsedFn(signature: string | undefined): AbiFunction | undefined {
-  if (!signature?.trim()) return undefined;
-  try {
-    return parseAbiItem(`function ${signature.trim()}`) as AbiFunction;
-  } catch {
-    return undefined;
-  }
-}
-
-/** The contracts a deploy function declares it produces, in order. */
-export function productsOf(signature: string | undefined): string[] {
-  const fn = parsedFn(signature);
-  return (fn?.outputs ?? []).flatMap((output, index) =>
-    output.type === 'address' ? [output.name || `output${index}`] : []
-  );
 }
 
 export default function FactoryStrategyFields({
@@ -83,7 +52,10 @@ export default function FactoryStrategyFields({
     ? (artifacts[strategy.factoryContractId] as ArtifactData | undefined)?.abi
     : undefined;
   const candidates = useMemo(() => deployCandidates(factoryAbi), [factoryAbi]);
-  const fn = useMemo(() => parsedFn(strategy.signature), [strategy.signature]);
+  const fn = useMemo(
+    () => parsedFactoryFunction(strategy.signature),
+    [strategy.signature]
+  );
   const products = useMemo(
     () => productsOf(strategy.signature),
     [strategy.signature]
