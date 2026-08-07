@@ -116,7 +116,7 @@ export function repoChoicesFor(repositories: RepoList | null): RepoChoice[] {
     },
     ...repo.versions.map((version) => ({
       value: `version:${repo.pathOrUrl}\u0000${version.commit}`,
-      label: `  ↳ ${version.refLabel ?? version.commit.slice(0, 12)} · ${version.commit.slice(0, 12)}`,
+      label: `  ↳ ${version.refLabel ? `${version.refLabel} · ` : ''}${version.commit.slice(0, 12)}`,
       path: version.url,
       pin: pinForRepoVersion(version),
     })),
@@ -139,7 +139,7 @@ export function repoChoicesFor(repositories: RepoList | null): RepoChoice[] {
     (group) => [
       ...group.versions.map((version) => ({
         value: `version:${group.url}\u0000${version.commit}`,
-        label: `  ↳ ${group.url} · ${version.refLabel ?? version.commit.slice(0, 12)} · ${version.commit.slice(0, 12)}`,
+        label: `  ↳ ${group.url} · ${version.refLabel ? `${version.refLabel} · ` : ''}${version.commit.slice(0, 12)}`,
         path: group.url,
         pin: pinForRepoVersion(version),
       })),

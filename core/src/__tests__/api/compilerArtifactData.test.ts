@@ -86,7 +86,8 @@ describe('getCompilerArtifactData on a source-only pinned checkout', () => {
       { op: 'getArtifactData', result: { success: true, data: { abi: [] } } },
     ]);
 
-    const data = await getCompilerArtifactData(deps(executor), {
+    const d = deps(executor);
+    const data = await getCompilerArtifactData(d, {
       profileId: 'default',
       contract: pinnedContract(),
     });
@@ -98,6 +99,16 @@ describe('getCompilerArtifactData on a source-only pinned checkout', () => {
       'getArtifactData',
     ]);
     expect(executor.calls[1].workspacePath).toBe('/cache/versions/aaa');
+    // Materialization upserts the version record from these options; passing
+    // a bare ref erased the tag's refKind (and, once the frontend stopped
+    // sending refs, the label too) — the picker then showed hash · hash.
+    expect(d.repos.withVersionMaterialized).toHaveBeenCalledWith(
+      'default',
+      PIN.url,
+      PIN.commit,
+      { ref: PIN.ref, refLabel: PIN.ref, refKind: PIN.refKind },
+      expect.any(Function)
+    );
   });
 
   it('surfaces the original miss when the on-demand compile fails', async () => {

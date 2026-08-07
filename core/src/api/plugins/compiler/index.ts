@@ -136,7 +136,7 @@ export async function getCompilerArtifactData(
   let result;
   try {
     result = contract.pin
-      ? await deps.repos.withVersionMaterialized(input.profileId, contract.pin.url, contract.pin.commit, { ref: contract.pin.ref }, ({ checkout }) => executeWithPinnedCompile(deps.executor, contract, execute, checkout))
+      ? await deps.repos.withVersionMaterialized(input.profileId, contract.pin.url, contract.pin.commit, { ref: contract.pin.ref, refLabel: contract.pin.ref, refKind: contract.pin.refKind }, ({ checkout }) => executeWithPinnedCompile(deps.executor, contract, execute, checkout))
       : await resolveContractWorkspace(contract, input.profileId, { verifyIntegrity: true }, { repos: deps.repos, versionStore: new VersionStore() }).then(execute);
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error) throw error;
@@ -183,7 +183,7 @@ export async function getCompilerVerificationBundle(
   let result;
   try {
     result = contract.pin
-      ? await deps.repos.withVersionMaterialized(input.profileId, contract.pin.url, contract.pin.commit, { ref: contract.pin.ref }, ({ checkout }) => executeWithPinnedCompile(deps.executor, contract, execute, checkout))
+      ? await deps.repos.withVersionMaterialized(input.profileId, contract.pin.url, contract.pin.commit, { ref: contract.pin.ref, refLabel: contract.pin.ref, refKind: contract.pin.refKind }, ({ checkout }) => executeWithPinnedCompile(deps.executor, contract, execute, checkout))
       : await resolveContractWorkspace(contract, input.profileId, { verifyIntegrity: true }, { repos: deps.repos, versionStore: new VersionStore() }).then(execute);
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error) throw error;

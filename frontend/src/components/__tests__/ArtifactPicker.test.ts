@@ -124,6 +124,19 @@ describe('repoChoicesFor', () => {
     expect(choices.find((choice) => choice.newVersion && choice.path === '/workspace')).toMatchObject({ local: true });
   });
 
+  it('shows a bare commit once when a version has no tag label', () => {
+    // A record whose ref metadata was lost used to render "hash · hash".
+    const choices = repoChoicesFor({
+      session: {
+        pathOrUrl: '/workspace', initialized: true, frameworks: [],
+        versions: [{ url: 'https://example.test/tjar', commit: 'c'.repeat(40), lastUsedAt: '2026-08-07T00:00:00.000Z' }],
+      },
+      local: [], cloned: [], versionGroups: [], pinned: [],
+    } as never);
+    const row = choices.find((choice) => choice.pin);
+    expect(row?.label).toBe(`  ↳ ${'c'.repeat(12)}`);
+  });
+
   it('does not duplicate a session that is also attached as local', () => {
     const entry = { pathOrUrl: '/repo', initialized: true, frameworks: [], versions: [] };
     const choices = repoChoicesFor({
