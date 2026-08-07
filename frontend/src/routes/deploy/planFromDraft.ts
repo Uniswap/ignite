@@ -196,19 +196,31 @@ function deployStepFromDraft(
       },
     };
   } else if (strategy?.kind === 'factory') {
-    if (!strategy.factoryAddress) throw new Error(`Factory step ${step.id} needs a factory address`);
-    if (!strategy.signature) throw new Error(`Factory step ${step.id} needs a deploy function`);
-    strategyField = {
-      strategy: {
-        kind: 'factory',
-        target: { kind: 'address', address: strategy.factoryAddress },
-        signature: strategy.signature,
-        ...(strategy.args && Object.keys(strategy.args).length ? { args: { ...strategy.args } } : {}),
-        ...(strategy.output ? { output: strategy.output } : {}),
-        ...(strategy.fulfilledBy ? { fulfilledBy: strategy.fulfilledBy } : {}),
-        ...(extras.acknowledged ? { acknowledgeDeployed: { ...extras.acknowledged } } : {}),
-      },
-    };
+    // A fulfilled product carries no call of its own — target, signature and
+    // args belong to the step named by fulfilledBy (ordinarily a call step).
+    if (strategy.fulfilledBy) {
+      strategyField = {
+        strategy: {
+          kind: 'factory',
+          fulfilledBy: strategy.fulfilledBy,
+          ...(strategy.output ? { output: strategy.output } : {}),
+          ...(extras.acknowledged ? { acknowledgeDeployed: { ...extras.acknowledged } } : {}),
+        },
+      };
+    } else {
+      if (!strategy.factoryAddress) throw new Error(`Factory step ${step.id} needs a factory address`);
+      if (!strategy.signature) throw new Error(`Factory step ${step.id} needs a deploy function`);
+      strategyField = {
+        strategy: {
+          kind: 'factory',
+          target: { kind: 'address', address: strategy.factoryAddress },
+          signature: strategy.signature,
+          ...(strategy.args && Object.keys(strategy.args).length ? { args: { ...strategy.args } } : {}),
+          ...(strategy.output ? { output: strategy.output } : {}),
+          ...(extras.acknowledged ? { acknowledgeDeployed: { ...extras.acknowledged } } : {}),
+        },
+      };
+    }
   } else if (strategy?.kind === 'plugin') {
     const prepared = Object.fromEntries(
       Object.entries(extras.prepared ?? {}).map(([chainId, prepared]) => [
