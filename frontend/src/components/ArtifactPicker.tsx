@@ -6,6 +6,7 @@ import type {
   ContractTypeInfo,
   ContractSourcePin,
   AddRepoVersionRequest,
+  RepoList,
   RepoVersionSummary,
 } from '@ignite/api';
 import Select from './Select';
@@ -59,6 +60,69 @@ export function pinForRepoVersion(
   };
 }
 
+/**
+ * Every repository an artifact can be picked from. The session workspace is
+ * a first-class source: in a fresh setup it is often the only repo, and
+ * omitting it left this picker rendering "No options found" on exactly the
+ * environments the deploy-via-factory flow starts in.
+ */
+export function repoChoicesFor(repositories: RepoList | null): RepoChoice[] {
+  const session = repositories?.session;
+  const attached = [
+    ...(repositories?.local ?? []),
+    ...(repositories?.cloned ?? []),
+  ];
+  const entries =
+    session && !attached.some((repo) => repo.pathOrUrl === session.pathOrUrl)
+      ? [session, ...attached]
+      : attached;
+  const withVersions = entries.flatMap<RepoChoice>((repo) => [
+    {
+      value: `live:${repo.pathOrUrl}`,
+      label: repo.pathOrUrl,
+      path: repo.pathOrUrl as string,
+    },
+    ...repo.versions.map((version) => ({
+      value: `version:${repo.pathOrUrl}\u0000${version.commit}`,
+      label: `  ↳ ${version.refLabel ?? version.commit.slice(0, 12)} · ${version.commit.slice(0, 12)}`,
+      path: version.url,
+      pin: pinForRepoVersion(version),
+    })),
+    {
+      value: `new:${repo.pathOrUrl}`,
+      label: `  + new version… (${repo.pathOrUrl})`,
+      path: repo.pathOrUrl,
+      newVersion: true,
+      // The workspace is a filesystem checkout like a local repo, so its
+      // new-version flow must not treat the path as a remote URL.
+      local:
+        repo.pathOrUrl === session?.pathOrUrl ||
+        (repositories?.local ?? []).some(
+          (local) => local.pathOrUrl === repo.pathOrUrl
+        ),
+      workspace: true,
+    },
+  ]);
+  const orphaned = (repositories?.versionGroups ?? []).flatMap<RepoChoice>(
+    (group) => [
+      ...group.versions.map((version) => ({
+        value: `version:${group.url}\u0000${version.commit}`,
+        label: `  ↳ ${group.url} · ${version.refLabel ?? version.commit.slice(0, 12)} · ${version.commit.slice(0, 12)}`,
+        path: group.url,
+        pin: pinForRepoVersion(version),
+      })),
+      {
+        value: `new:${group.url}`,
+        label: `  + new version… (${group.url})`,
+        path: group.url,
+        newVersion: true,
+        local: false,
+      },
+    ]
+  );
+  return [...withVersions, ...orphaned];
+}
+
 export default function ArtifactPicker({
   value,
   onSelect,
@@ -102,53 +166,10 @@ export default function ArtifactPicker({
     request: AddRepoVersionRequest;
   } | null>(null);
 
-  const repoChoices = useMemo(() => {
-    const entries = [
-      ...(repositories?.local ?? []),
-      ...(repositories?.cloned ?? []),
-    ];
-    const attached = entries.flatMap<RepoChoice>((repo) => [
-      {
-        value: `live:${repo.pathOrUrl}`,
-        label: repo.pathOrUrl,
-        path: repo.pathOrUrl as string,
-      },
-      ...repo.versions.map((version) => ({
-        value: `version:${repo.pathOrUrl}\u0000${version.commit}`,
-        label: `  ↳ ${version.refLabel ?? version.commit.slice(0, 12)} · ${version.commit.slice(0, 12)}`,
-        path: version.url,
-        pin: pinForRepoVersion(version),
-      })),
-      {
-        value: `new:${repo.pathOrUrl}`,
-        label: `  + new version… (${repo.pathOrUrl})`,
-        path: repo.pathOrUrl,
-        newVersion: true,
-        local: (repositories?.local ?? []).some(
-          (local) => local.pathOrUrl === repo.pathOrUrl
-        ),
-        workspace: true,
-      },
-    ]);
-    const orphaned = (repositories?.versionGroups ?? []).flatMap<RepoChoice>(
-      (group) => [
-        ...group.versions.map((version) => ({
-          value: `version:${group.url}\u0000${version.commit}`,
-          label: `  ↳ ${group.url} · ${version.refLabel ?? version.commit.slice(0, 12)} · ${version.commit.slice(0, 12)}`,
-          path: group.url,
-          pin: pinForRepoVersion(version),
-        })),
-        {
-          value: `new:${group.url}`,
-          label: `  + new version… (${group.url})`,
-          path: group.url,
-          newVersion: true,
-          local: false,
-        },
-      ]
-    );
-    return [...attached, ...orphaned];
-  }, [repositories]);
+  const repoChoices = useMemo(
+    () => repoChoicesFor(repositories),
+    [repositories]
+  );
   const selectedChoice =
     repoChoices.find(
       (choice) => choice.path === repoPath && choice.pin?.commit === pin?.commit

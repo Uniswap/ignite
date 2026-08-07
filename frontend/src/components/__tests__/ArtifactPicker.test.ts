@@ -5,7 +5,10 @@ import { configureStore } from '@reduxjs/toolkit';
 import { Provider } from 'react-redux';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement } from 'react';
-import ArtifactPicker, { pinForRepoVersion } from '../ArtifactPicker';
+import ArtifactPicker, {
+  pinForRepoVersion,
+  repoChoicesFor,
+} from '../ArtifactPicker';
 import { artifactListReceived, compilerReducer } from '../../store/features/compiler/compilerSlice';
 import { profilesReducer } from '../../store/features/profiles/profilesSlice';
 import { repositoriesReducer, setRepositories } from '../../store/features/repositories/repositoriesSlice';
@@ -71,5 +74,28 @@ describe('ArtifactPicker version pins', () => {
       ref: version.refLabel,
       refKind: 'tag',
     });
+  });
+});
+
+describe('repoChoicesFor', () => {
+  it('offers the session workspace as a first-class repository', () => {
+    // In a fresh setup the workspace is often the ONLY repo — without it the
+    // picker renders "No options found" and the factory flow dead-ends.
+    const choices = repoChoicesFor({
+      session: { pathOrUrl: '/workspace', initialized: true, frameworks: [], versions: [] },
+      local: [], cloned: [], versionGroups: [], pinned: [],
+    } as never);
+    expect(choices[0]).toMatchObject({ value: 'live:/workspace', path: '/workspace' });
+    // The workspace is a filesystem checkout: its "new version" flow must
+    // treat it as local.
+    expect(choices.find((choice) => choice.newVersion && choice.path === '/workspace')).toMatchObject({ local: true });
+  });
+
+  it('does not duplicate a session that is also attached as local', () => {
+    const entry = { pathOrUrl: '/repo', initialized: true, frameworks: [], versions: [] };
+    const choices = repoChoicesFor({
+      session: entry, local: [entry], cloned: [], versionGroups: [], pinned: [],
+    } as never);
+    expect(choices.filter((choice) => choice.value === 'live:/repo')).toHaveLength(1);
   });
 });
