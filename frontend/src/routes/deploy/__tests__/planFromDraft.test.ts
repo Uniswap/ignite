@@ -221,4 +221,45 @@ describe('planFromDraft', () => {
       },
     });
   });
+
+  it('maps fulfilled factory products without demanding the call fields', () => {
+    // The canonical shape: the transaction is a plain call step, and every
+    // product points at it — no product carries target or signature.
+    const draft: DeployDraftState = {
+      contracts: [
+        { id: 'jar-art:jar', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/TokenJar.json', contractName: 'TokenJar', sourcePath: 'src/TokenJar.sol' },
+        { id: 'rel-art:releaser', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/ExchangeReleaser.json', contractName: 'ExchangeReleaser', sourcePath: 'src/ExchangeReleaser.sol' },
+      ],
+      chains: [1], rpcSelection: {}, explorerSelection: {}, signers: {}, unseenIds: [],
+      steps: [
+        {
+          id: 'call-factory-1',
+          kind: 'call',
+          target: { kind: 'address', address: `0x${'21'.repeat(20)}` },
+          signature: 'deploy(address owner, bytes32 salt) returns (address jar, address releaser)',
+          args: { owner: `0x${'ab'.repeat(20)}`, salt: `0x${'11'.repeat(32)}` },
+        },
+        { id: 'deploy-jar-art:jar', kind: 'deploy', contractId: 'jar-art:jar' },
+        { id: 'deploy-rel-art:releaser', kind: 'deploy', contractId: 'rel-art:releaser' },
+      ],
+      deployExtras: {
+        'deploy-jar-art:jar': { strategy: { kind: 'factory', fulfilledBy: 'call-factory-1', output: 'jar' } },
+        'deploy-rel-art:releaser': { strategy: { kind: 'factory', fulfilledBy: 'call-factory-1', output: 'releaser' } },
+      },
+    };
+
+    const plan = planFromDraft(draft, chains);
+    expect(plan.steps[1]).toEqual({
+      id: 'deploy-jar-art:jar',
+      kind: 'deploy',
+      contractId: 'jar-art:jar',
+      strategy: { kind: 'factory', fulfilledBy: 'call-factory-1', output: 'jar' },
+    });
+    expect(plan.steps[2]).toEqual({
+      id: 'deploy-rel-art:releaser',
+      kind: 'deploy',
+      contractId: 'rel-art:releaser',
+      strategy: { kind: 'factory', fulfilledBy: 'call-factory-1', output: 'releaser' },
+    });
+  });
 });

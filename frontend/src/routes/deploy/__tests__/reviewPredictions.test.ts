@@ -57,4 +57,37 @@ describe('reviewPredictedAddresses', () => {
       },
     ]);
   });
+
+  it('labels a factory product with its own prediction note, not "mined"', () => {
+    // Nothing is mined for a factory product: its address came back from the
+    // deploy function's eth_call. The entry's note says so — show that.
+    const report = {
+      chains: {
+        '1': {
+          create2: {
+            details: {
+              predicted: {
+                'product-jar': {
+                  predictedAddress:
+                    '0x0000000000000000000000000000000000000004',
+                  provisional: true,
+                  notes: ['returned by Factory call'],
+                },
+              },
+            },
+          },
+        },
+      },
+    } as unknown as ValidationReport;
+
+    expect(reviewPredictedAddresses(report)).toEqual([
+      {
+        chainId: '1',
+        stepId: 'product-jar',
+        address: '0x0000000000000000000000000000000000000004',
+        provisional: true,
+        provisionalLabel: 'provisional — returned by Factory call',
+      },
+    ]);
+  });
 });

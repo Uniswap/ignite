@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Factory,
   History,
   Loader2,
   Play,
@@ -40,6 +41,12 @@ export default function DeploymentsPage() {
   const navigate = useNavigate();
   const summaries = useAppSelector((state) => state.deployments.summaries);
   const draftActive = useAppSelector((s) => s.deployDraft.contracts.length > 0);
+  // A factory setup with no contracts yet is still a session in progress:
+  // "Manage deployment" must resume it (via the flow param — a plain /deploy
+  // entry deliberately clears an un-materialized setup).
+  const factorySetupActive = useAppSelector((s) =>
+    Boolean(s.deployDraft.factorySetup)
+  );
   const [unreadable, setUnreadable] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -136,17 +143,31 @@ export default function DeploymentsPage() {
             Active runs and durable deployment history.
           </p>
         </div>
-        <Link to="/deploy" className="btn btn-primary">
-          {draftActive ? (
-            <>
-              <Rocket size={16} /> Manage deployment
-            </>
-          ) : (
-            <>
-              <Plus size={16} /> New deployment
-            </>
+        <div className="flex items-center gap-2">
+          {!draftActive && !factorySetupActive && (
+            <Link to="/deploy?flow=factory" className="btn btn-secondary">
+              <Factory size={16} /> Deploy via factory
+            </Link>
           )}
-        </Link>
+          <Link
+            to={
+              factorySetupActive && !draftActive
+                ? '/deploy?flow=factory'
+                : '/deploy'
+            }
+            className="btn btn-primary"
+          >
+            {draftActive || factorySetupActive ? (
+              <>
+                <Rocket size={16} /> Manage deployment
+              </>
+            ) : (
+              <>
+                <Plus size={16} /> New deployment
+              </>
+            )}
+          </Link>
+        </div>
       </div>
       {loading && (
         <div className="card-milky p-8 flex justify-center gap-2 text-muted">

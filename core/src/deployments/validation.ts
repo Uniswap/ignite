@@ -5,6 +5,7 @@ import {
   http,
   keccak256,
   parseAbiItem,
+  type AbiFunction,
   type Hex,
 } from 'viem';
 import type {
@@ -38,6 +39,7 @@ import {
   callTargetAbi,
 } from './resolver.js';
 import { ackIsFresh, buildChainPredictions, buildInitcode, buildRuntimeCode, hasPredicted, type ChainPredictions } from './schedule.js';
+import { isFactoryStrategy, mergeFactoryArgs } from './factory.js';
 import {
   simulateChain,
   type SimulationOutcome,
@@ -98,6 +100,8 @@ type Client = {
     maxPriorityFeePerGas?: bigint;
   }>;
   getCode?(args: { address: Hex }): Promise<Hex>;
+  // Factory products predicted by a helper resolve through one eth_call.
+  call?(args: { to: Hex; data: Hex; account?: Hex }): Promise<{ data?: Hex } | Hex | undefined>;
   getTransactionCount?(args: {
     address: Hex;
     blockTag?: 'latest';
@@ -790,6 +794,51 @@ function validateArgs(
         toConstructorArgs(fn.inputs, resolveStepValues(step, chainId, resolveRef, fn.inputs, { frozen, contracts: plan.contracts }).args, 'call');
         continue;
       }
+      if (isFactoryStrategy(step.strategy)) {
+        // A factory supplies its product's constructor arguments itself, so
+        // demanding them here rejects every valid factory plan. What needs
+        // checking is the call that deploys: a fulfilledBy product's call is
+        // an ordinary call step already covered above, and a step carrying
+        // its own call gets the same discipline against the deploy function.
+        const strategy = step.strategy;
+        if (strategy.fulfilledBy) continue;
+        if (!strategy.signature)
+          return failure(
+            'SIGNATURE_NOT_IN_ABI',
+            `Factory step ${stepLabel(plan, step.id)} carries no deploy function`
+          );
+        const fn = parseAbiItem(`function ${strategy.signature}`) as AbiFunction;
+        const merged = mergeFactoryArgs(strategy, chainId);
+        const known = new Set(
+          fn.inputs.map((entry, index) => entry.name || `arg${index}`)
+        );
+        const unknown = Object.keys(merged).filter((key) => !known.has(key));
+        if (unknown.length)
+          return failure(
+            'UNKNOWN_ARGUMENT',
+            `Unknown factory call arguments for ${stepLabel(plan, step.id)}`,
+            { fields: unknown }
+          );
+        const missing = missingArgKeys([...fn.inputs], merged);
+        if (missing.length)
+          return failure(
+            'MISSING_ARGUMENT',
+            `Factory call arguments are missing for ${stepLabel(plan, step.id)}`,
+            { fields: missing }
+          );
+        toConstructorArgs(
+          fn.inputs,
+          resolveStepValues(
+            { ...step, args: merged, argsPerChain: undefined },
+            chainId,
+            resolveRef,
+            fn.inputs,
+            { frozen, contracts: plan.contracts }
+          ).args,
+          'call'
+        );
+        continue;
+      }
       const input = frozen[step.contractId];
       if (!input)
         return failure(
@@ -902,7 +951,22 @@ async function validateCreate2(
       step.kind === 'deploy' &&
       (step.strategy?.kind === 'create2' || step.strategy?.kind === 'plugin')
   );
-  if (!deterministic.length) return { item: success('No create2 steps') };
+  if (!deterministic.length) {
+    // Factory products have no initcode and no proxy to check, but their
+    // predicted addresses are still the review's address picture — the plain
+    // early return used to drop them whenever no create2/plugin step existed.
+    const predicted: Record<string, PredictedEntryInfo> = {};
+    for (const step of plan.steps) {
+      if (step.kind !== 'deploy' || !isFactoryStrategy(step.strategy)) continue;
+      const entry = snapshot?.entries[step.id];
+      if (hasPredicted(entry)) predicted[step.id] = { ...entry, provisional: true };
+    }
+    if (!Object.keys(predicted).length)
+      return { item: success('No create2 steps') };
+    return {
+      item: success('Factory product addresses are predicted', { predicted }),
+    };
+  }
   if (freezeError || !rpcUrl)
     return {
       item: failure(

@@ -111,7 +111,7 @@ export function reaches(
 function draftStrategyKind(
   draft: DeployDraftState,
   stepId: string
-): 'create' | 'create2' | 'plugin' {
+): 'create' | 'create2' | 'plugin' | 'factory' {
   return draft.deployExtras[stepId]?.strategy.kind ?? 'create';
 }
 

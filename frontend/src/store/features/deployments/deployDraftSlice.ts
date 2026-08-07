@@ -17,11 +17,13 @@ import type {
   DeployDraftState,
   DraftContract,
   DraftStep,
+  FactoryDraftSetup,
   GasOverrideKey,
   SetArgPayload,
   SetChainArgOverridePayload,
 } from './types';
 import { cloneJson } from '../../../utils/cloneJson';
+import { productsOf } from '../../../utils/factorySignatures';
 
 const initialState: DeployDraftState = {
   contracts: [],
@@ -422,6 +424,10 @@ const deployDraftSlice = createSlice({
       // the wizard, so those contracts are seen by definition. Only additions
       // to an already-active draft feed the sidebar badge.
       const wasEmpty = state.contracts.length === 0;
+      // Deploying plain contracts abandons an un-materialized factory setup:
+      // otherwise the wizard would show the factory step over contracts that
+      // are not its products.
+      if (wasEmpty) delete state.factorySetup;
       const existing = new Set(state.contracts.map((contract) => contract.id));
       for (const contract of action.payload) {
         if (existing.has(contract.id)) continue;
@@ -483,6 +489,17 @@ const deployDraftSlice = createSlice({
         state.steps.splice(fromIndex, 0, step);
         return;
       }
+      // Likewise a factory product may never precede the call that deploys
+      // it: fulfilledBy must resolve to an earlier step.
+      if (state.steps.some((candidate, index) => {
+        if (candidate.kind !== 'deploy') return false;
+        const strategy = state.deployExtras[candidate.id]?.strategy;
+        return strategy?.kind === 'factory' && Boolean(strategy.fulfilledBy) && index <= state.steps.findIndex((item) => item.id === strategy.fulfilledBy);
+      })) {
+        state.steps.splice(toIndex, 1);
+        state.steps.splice(fromIndex, 0, step);
+        return;
+      }
       // Step order is part of preparation context (and controls which plain
       // creates are resolvable), so a reorder invalidates prepared results.
       for (const item of state.steps) {
@@ -516,6 +533,14 @@ const deployDraftSlice = createSlice({
         (step) => step.id === action.payload && step.kind === 'call'
       );
       if (index === -1) return;
+      // A fulfilling call cannot be removed from under its products — they
+      // carry no transaction of their own. The Factory step is where the
+      // flow is unmade.
+      if (state.steps.some((step) => {
+        if (step.kind !== 'deploy') return false;
+        const strategy = state.deployExtras[step.id]?.strategy;
+        return strategy?.kind === 'factory' && strategy.fulfilledBy === action.payload;
+      })) return;
       const [removed] = state.steps.splice(index, 1);
       const affected = state.steps
         .filter(
@@ -526,6 +551,145 @@ const deployDraftSlice = createSlice({
         .map((step) => step.id);
       clearDanglingReferences(state, removed.id);
       for (const stepId of affected) invalidatePredictions(state, stepId);
+    },
+    startFactoryDraft: {
+      reducer(state, action: PayloadAction<{ callStepId: string }>) {
+        // The entry point is hidden while a draft is active; this guard makes
+        // the reducer safe against a stale link regardless.
+        if (state.contracts.length > 0 || state.factorySetup) return state;
+        return {
+          ...initialState,
+          factorySetup: { callStepId: action.payload.callStepId },
+        };
+      },
+      prepare() {
+        return {
+          payload: {
+            callStepId: `call-factory-${globalThis.crypto.randomUUID()}`,
+          },
+        };
+      },
+    },
+    setFactorySetup(
+      state,
+      action: PayloadAction<Partial<Omit<FactoryDraftSetup, 'callStepId'>>>
+    ) {
+      const setup = state.factorySetup;
+      if (!setup) return;
+      const patch = action.payload;
+      // A different factory means a different ABI: everything derived from
+      // the old one is meaningless.
+      if (patch.source && patch.source.id !== setup.source?.id) {
+        delete setup.signature;
+        delete setup.payable;
+        delete setup.products;
+      }
+      if (patch.signature !== undefined && patch.signature !== setup.signature) {
+        delete setup.products;
+        // Post-generation the call step carries the committed structure:
+        // switch its function immediately and drop args keyed to the old
+        // parameters — encoding them against the new function would silently
+        // mismatch.
+        const call = state.steps.find(
+          (step): step is DraftCallStep =>
+            step.id === setup.callStepId && step.kind === 'call'
+        );
+        if (call) {
+          call.signature = patch.signature;
+          if (patch.payable) call.payable = true;
+          else delete call.payable;
+          delete call.args;
+          delete call.argsPerChain;
+        }
+      }
+      const record = setup as unknown as Record<string, unknown>;
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) delete record[key];
+        else record[key] = value;
+      }
+    },
+    setFactoryProduct(
+      state,
+      action: PayloadAction<{ output: string; source: DraftContract }>
+    ) {
+      const setup = state.factorySetup;
+      if (!setup) return;
+      setup.products ??= {};
+      setup.products[action.payload.output] = action.payload.source;
+    },
+    applyFactorySetup(state) {
+      const setup = state.factorySetup;
+      if (!setup?.signature) return;
+      const outputs = productsOf(setup.signature);
+      if (outputs.length === 0) return;
+      const mappings = outputs.map((output) => {
+        const artifact = setup.products?.[output];
+        return artifact
+          ? { output, artifact, contractId: `${artifact.id}:${output}` }
+          : undefined;
+      });
+      // Fail closed on a partial mapping: generating some products but not
+      // others would leave returned contracts silently untracked.
+      if (mappings.some((entry) => entry === undefined)) return;
+      const callId = setup.callStepId;
+      if (!state.steps.some((step) => step.id === callId && step.kind === 'call')) {
+        // Created argument-less on purpose: the call's arguments are filled
+        // on its step card in Steps, where the full editor lives.
+        state.steps.unshift({
+          id: callId,
+          kind: 'call',
+          target: setup.address
+            ? { kind: 'address', address: setup.address }
+            : null,
+          signature: setup.signature,
+          ...(setup.payable ? { payable: true } : {}),
+        });
+      }
+      const generated = state.steps.filter((step) => {
+        if (step.kind !== 'deploy') return false;
+        const strategy = state.deployExtras[step.id]?.strategy;
+        return strategy?.kind === 'factory' && strategy.fulfilledBy === callId;
+      });
+      for (const step of generated) {
+        const strategy = state.deployExtras[step.id]?.strategy;
+        const output = strategy?.kind === 'factory' ? strategy.output : undefined;
+        const wanted = mappings.find((entry) => entry?.output === output);
+        if (wanted && step.kind === 'deploy' && wanted.contractId === step.contractId) continue;
+        invalidatePredictions(state, step.id);
+        removeStepAndSource(state, step.id);
+      }
+      const callIndex = state.steps.findIndex((step) => step.id === callId);
+      for (const entry of mappings) {
+        if (!entry) continue;
+        const stepId = `deploy-${entry.contractId}`;
+        if (state.steps.some((step) => step.id === stepId)) continue;
+        if (!state.contracts.some((contract) => contract.id === entry.contractId)) {
+          state.contracts.push({ ...entry.artifact, id: entry.contractId });
+        }
+        // Insert after the call and the products already in place so a fresh
+        // generation lists products in declared output order.
+        let at = callIndex;
+        while (at + 1 < state.steps.length) {
+          const next = state.steps[at + 1];
+          const strategy =
+            next.kind === 'deploy'
+              ? state.deployExtras[next.id]?.strategy
+              : undefined;
+          if (strategy?.kind === 'factory' && strategy.fulfilledBy === callId) at += 1;
+          else break;
+        }
+        state.steps.splice(at + 1, 0, {
+          id: stepId,
+          kind: 'deploy',
+          contractId: entry.contractId,
+        });
+        state.deployExtras[stepId] = {
+          strategy: { kind: 'factory', fulfilledBy: callId, output: entry.output },
+        };
+      }
+      // The call step owns the address from here; stale staging would shadow
+      // operator edits on the next apply.
+      delete setup.address;
     },
     toggleChain(state, action: PayloadAction<number>) {
       const chainId = action.payload;
@@ -976,6 +1140,10 @@ export const {
   moveStep,
   addCallStep,
   removeCallStep,
+  startFactoryDraft,
+  setFactorySetup,
+  setFactoryProduct,
+  applyFactorySetup,
   toggleChain,
   selectRpc,
   setExplorerSelection,

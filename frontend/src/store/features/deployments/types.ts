@@ -61,7 +61,25 @@ export interface DraftDeployExtras {
   strategy:
     | { kind: 'create' }
     | { kind: 'create2'; salt?: Hex32; saltPerChain?: Record<string, Hex32> }
-    | { kind: 'plugin'; pluginId: string; params?: Record<string, unknown> };
+    | { kind: 'plugin'; pluginId: string; params?: Record<string, unknown> }
+    // Deploys by calling an already-deployed factory. Product addresses come
+    // from an eth_call of the deploy function itself, so no predict helper or
+    // salt reconstruction is involved.
+    | {
+        kind: 'factory';
+        // The factory's own contract, whose ABI drives the wizard, and the
+        // address it is already deployed at.
+        factoryContractId?: string;
+        factoryAddress?: Hex;
+        // The factory's deploy function. Its address-typed return values are
+        // the contracts the call produces.
+        signature?: string;
+        args?: Record<string, unknown>;
+        // Which returned address this step is, and — for the products that do
+        // not send the transaction — the step whose call creates them.
+        output?: string;
+        fulfilledBy?: string;
+      };
   libraries?: Record<string, LibraryBinding>;
   librariesPerChain?: Record<string, Record<string, LibraryBinding>>;
   prepared?: Record<
@@ -75,6 +93,26 @@ export interface DraftDeployExtras {
   >;
   acknowledged?: AckMap;
   needsPrepare?: boolean;
+}
+
+// The "Deploy via factory" flow's composer state. Structure (which factory,
+// which function, which artifact each output becomes) lives here for the
+// whole session; the address is only STAGED here until the call step exists —
+// afterwards the generated call step is the single source of truth, or edits
+// made on its card and edits made in the setup step would silently overwrite
+// each other. The call's arguments never live here at all: they are filled on
+// the call step's card in Steps, which has the full argument editor.
+export interface FactoryDraftSetup {
+  // Minted once when the flow starts so re-applying the setup reconciles the
+  // same call step instead of accumulating new ones.
+  callStepId: string;
+  // The factory's own artifact. Never deployed; its ABI drives the pickers.
+  source?: DraftContract;
+  address?: Hex;
+  signature?: string;
+  payable?: boolean;
+  // Output name -> the artifact deployed under that name.
+  products?: Record<string, DraftContract>;
 }
 
 export interface DraftRpcSelection {
@@ -113,6 +151,7 @@ export interface DeployDraftState {
   workflowRunHooks?: string[];
   acknowledgeArtifactDrift?: ArtifactDriftAcknowledgements;
   contractTypeSelectionPending?: boolean;
+  factorySetup?: FactoryDraftSetup;
 }
 
 export type GasOverrideKey = keyof GasOverrides;

@@ -632,8 +632,11 @@ export class RepoService {
       await this.versionStore.upsert({
         url,
         commit,
-        refLabel: opts.refLabel ?? opts.ref,
-        refKind: opts.refKind,
+        // Metadata-less callers (artifact-data reads) must not erase a stored
+        // tag identity: without it the picker renders the version as a bare
+        // commit, and pins stop carrying refs entirely.
+        refLabel: opts.refLabel ?? opts.ref ?? stored?.refLabel,
+        refKind: opts.refKind ?? stored?.refKind,
         fetchUrl: effectiveFetchUrl !== url ? effectiveFetchUrl : undefined,
         ...(localFallback ? { localFallback: true } : {}),
         createdAt: now,

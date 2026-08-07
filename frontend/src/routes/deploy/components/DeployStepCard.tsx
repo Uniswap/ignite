@@ -1,7 +1,7 @@
 import { Loader2 } from 'lucide-react';
 import type { ArtifactData, ContractTypeInfo } from '@ignite/api';
 import { ApiError } from '@ignite/api/client';
-import type { DraftDeployStep } from '../../../store/features/deployments/types';
+import type { DraftDeployExtras, DraftDeployStep } from '../../../store/features/deployments/types';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import { selectContractType, setArg, setChainArgOverride, setContractTypeSelectionPending, setGasOverride, setValue } from '../../../store/features/deployments/deployDraftSlice';
 import AbiArgField, { type AbiInput } from './AbiArgField';
@@ -28,6 +28,25 @@ function libraryReferences(data: ArtifactData | undefined) {
   );
 }
 
+/**
+ * Which sections a deploy step card renders. A factory supplies its
+ * product's constructor arguments onchain and Ignite builds no initcode for
+ * it, so the constructor and library editors would collect values nothing
+ * reads. A fulfilled product additionally sends no transaction of its own —
+ * gas, value and signer belong to the fulfilling call step.
+ */
+export function factoryProductPresentation(
+  strategy: DraftDeployExtras['strategy'] | undefined
+): { constructorArgs: boolean; libraries: boolean; transaction: boolean } {
+  if (strategy?.kind !== 'factory')
+    return { constructorArgs: true, libraries: true, transaction: true };
+  return {
+    constructorArgs: false,
+    libraries: false,
+    transaction: !strategy.fulfilledBy,
+  };
+}
+
 export default function DeployStepCard({ step, data, onMove }: { step: DraftDeployStep; data?: ArtifactData; onMove: (delta: number) => void }) {
   const dispatch = useAppDispatch();
   const draft = useAppSelector((state) => state.deployDraft);
@@ -48,6 +67,7 @@ export default function DeployStepCard({ step, data, onMove }: { step: DraftDepl
   // Wrapper sources are dispatched to WrapperStepCard by StepsStep. Keeping
   // this card focused on implementation deployments avoids a second UI path.
   const sourcePath = contract?.origin === 'contract-type' ? undefined : contract?.sourcePath;
+  const presentation = factoryProductPresentation(draft.deployExtras[step.id]?.strategy);
   const inputs = ((data?.abi as Array<{ type?: string; inputs?: AbiInput[] }> | undefined)?.find((entry) => entry.type === 'constructor')?.inputs ?? []);
   const eligible = eligiblePointerSteps(draft, step.id);
   const signerOptions = stepSignerAddressOptions(
@@ -63,9 +83,9 @@ export default function DeployStepCard({ step, data, onMove }: { step: DraftDepl
     <header className="flex gap-2 items-start"><div className="flex-1"><h3 className="font-semibold">{contract?.contractName ?? decodeUrlEncodingForDisplay(step.contractId)}</h3><p className="mono-data text-muted">{sourcePath ? decodeUrlEncodingForDisplay(sourcePath) : undefined}</p></div><button type="button" className="btn btn-sm btn-secondary" aria-label="Move step up" onClick={() => onMove(-1)}>↑</button><button type="button" className="btn btn-sm btn-secondary" aria-label="Move step down" onClick={() => onMove(1)}>↓</button></header>
     <section className="grid gap-1"><label className="grid gap-1"><span className="eyebrow">Contract type</span><Select value={selectedWrapper ? `plugin:${selectedWrapper.wraps?.contractTypePluginId}` : 'immutable'} options={[{ value: 'immutable', label: 'Immutable' }, ...contractTypes.map((item) => ({ value: `plugin:${item.pluginId}`, label: `${item.label} (${item.versionLabel})` }))]} onValueChange={(value) => { const request = ++contractTypeRequest.current; setContractTypeError(undefined); if (value === 'immutable') { setContractTypePending(false); dispatch(setContractTypeSelectionPending(false)); dispatch(selectContractType({ implementationStepId: step.id })); return; } const type = contractTypes.find((item) => item.pluginId === value.slice('plugin:'.length)); const synthesis = type?.synthesis; if (!type || !synthesis) return; setContractTypePending(true); dispatch(setContractTypeSelectionPending(true)); void apiClient.request('getContractTypeArtifact', { params: { pluginId: type.pluginId, artifactKey: synthesis.artifact } }).then((response) => { if (request !== contractTypeRequest.current) return; if (!('data' in response)) throw new Error(response.message); dispatch(selectContractType({ implementationStepId: step.id, contractType: type, artifact: response.data.artifact })); }).catch((reason) => { if (request === contractTypeRequest.current) setContractTypeError(reason instanceof ApiError ? (reason.body.message ?? reason.message) : String(reason)); }).finally(() => { if (request === contractTypeRequest.current) { setContractTypePending(false); dispatch(setContractTypeSelectionPending(false)); } }); }} /></label>{requiresGrant.map((pluginId) => <button key={pluginId} type="button" disabled className="input-glass text-sm text-muted opacity-60 text-left">{pluginId} — grant contract bytecode access to use this contract type.</button>)}{contractTypePending && <p className="text-xs text-muted">Loading contract type…</p>}{contractTypeError && <p className="text-xs text-err">{contractTypeError}</p>}</section>
     <StrategySection stepId={step.id} />
-    <LibrariesSection stepId={step.id} libraries={libraryReferences(data)} />
-    <section className="grid gap-3"><h4 className="font-medium">Constructor arguments</h4>{!data && <p className="flex items-center gap-2 text-sm text-muted"><Loader2 size={14} className="animate-spin" /> Loading artifact…</p>}{inputs.map((input, index) => { const key = input.name || `arg${index}`; return <div key={key} className="grid gap-2"><AbiArgField input={input} fieldKey={key} value={step.args?.[key]} autoDefault eligibleSteps={eligible} signerOptions={signerOptions} onChange={(value) => dispatch(setArg({ stepId: step.id, key, value }))} />{draft.chains.length > 1 && <details className="text-xs"><summary className="text-muted cursor-pointer">Per-chain override</summary>{draft.chains.map((chainId) => <div key={chainId} className="mt-2"><AbiArgField input={input} fieldKey={key} value={step.argsPerChain?.[String(chainId)]?.[key]} eligibleSteps={eligible} signerOptions={signerOptions.filter((option) => option.chainId === chainId)} onChange={(value) => dispatch(setChainArgOverride({ stepId: step.id, chainId, key, value }))} /></div>)}</details>}</div>; })}</section>
-    <AdvancedStepSection>{(data?.abi as Array<{ type?: string; stateMutability?: string }> | undefined)?.find((entry) => entry.type === 'constructor')?.stateMutability === 'payable' && <label className="grid gap-1"><span className="eyebrow">Value (native units)</span><input className="input-glass" value={step.value ?? ''} onChange={(event) => dispatch(setValue({ stepId: step.id, value: event.target.value || undefined }))} /></label>}<div className="grid grid-cols-3 gap-2">{(['gasLimit', 'maxFeePerGas', 'maxPriorityFeePerGas'] as const).map((key) => <label key={key} className="grid gap-1"><span className="eyebrow">{key}</span><input className="input-glass" value={step.gasOverrides?.[key] ?? ''} onChange={(event) => dispatch(setGasOverride({ stepId: step.id, key, value: event.target.value || undefined }))} /></label>)}</div><PerChainTransactionOverrides stepId={step.id} showValue={(data?.abi as Array<{ type?: string; stateMutability?: string }> | undefined)?.find((entry) => entry.type === 'constructor')?.stateMutability === 'payable'} /></AdvancedStepSection>
-    <StepSignerSection stepId={step.id} />
+    {presentation.libraries && <LibrariesSection stepId={step.id} libraries={libraryReferences(data)} />}
+    {presentation.constructorArgs && <section className="grid gap-3"><h4 className="font-medium">Constructor arguments</h4>{!data && <p className="flex items-center gap-2 text-sm text-muted"><Loader2 size={14} className="animate-spin" /> Loading artifact…</p>}{inputs.map((input, index) => { const key = input.name || `arg${index}`; return <div key={key} className="grid gap-2"><AbiArgField input={input} fieldKey={key} value={step.args?.[key]} autoDefault eligibleSteps={eligible} signerOptions={signerOptions} onChange={(value) => dispatch(setArg({ stepId: step.id, key, value }))} />{draft.chains.length > 1 && <details className="text-xs"><summary className="text-muted cursor-pointer">Per-chain override</summary>{draft.chains.map((chainId) => <div key={chainId} className="mt-2"><AbiArgField input={input} fieldKey={key} value={step.argsPerChain?.[String(chainId)]?.[key]} eligibleSteps={eligible} signerOptions={signerOptions.filter((option) => option.chainId === chainId)} onChange={(value) => dispatch(setChainArgOverride({ stepId: step.id, chainId, key, value }))} /></div>)}</details>}</div>; })}</section>}
+    {presentation.transaction && <AdvancedStepSection>{(data?.abi as Array<{ type?: string; stateMutability?: string }> | undefined)?.find((entry) => entry.type === 'constructor')?.stateMutability === 'payable' && <label className="grid gap-1"><span className="eyebrow">Value (native units)</span><input className="input-glass" value={step.value ?? ''} onChange={(event) => dispatch(setValue({ stepId: step.id, value: event.target.value || undefined }))} /></label>}<div className="grid grid-cols-3 gap-2">{(['gasLimit', 'maxFeePerGas', 'maxPriorityFeePerGas'] as const).map((key) => <label key={key} className="grid gap-1"><span className="eyebrow">{key}</span><input className="input-glass" value={step.gasOverrides?.[key] ?? ''} onChange={(event) => dispatch(setGasOverride({ stepId: step.id, key, value: event.target.value || undefined }))} /></label>)}</div><PerChainTransactionOverrides stepId={step.id} showValue={(data?.abi as Array<{ type?: string; stateMutability?: string }> | undefined)?.find((entry) => entry.type === 'constructor')?.stateMutability === 'payable'} /></AdvancedStepSection>}
+    {presentation.transaction && <StepSignerSection stepId={step.id} />}
   </article>;
 }

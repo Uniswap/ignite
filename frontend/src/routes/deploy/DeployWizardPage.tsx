@@ -8,10 +8,19 @@ import {
   clearDraft,
   removeContract,
   hydrateWorkflowDraft,
+  startFactoryDraft,
+  applyFactorySetup,
 } from '../../store/features/deployments/deployDraftSlice';
+import type {
+  DeployDraftState,
+  DraftCallStep,
+} from '../../store/features/deployments/types';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import WizardStepper from './components/WizardStepper';
 import ContractsStep from './steps/ContractsStep';
+import FactorySetupStep, {
+  factorySetupBlocker,
+} from './steps/FactorySetupStep';
 import ChainsStep from './steps/ChainsStep';
 import ExplorersStep from './steps/ExplorersStep';
 import SignersStep from './steps/SignersStep';
@@ -39,6 +48,29 @@ const STEPS = [
   { id: 'steps', label: 'Steps' },
   { id: 'review', label: 'Review' },
 ];
+
+// The factory flow swaps only the first station: products become contracts on
+// Continue, so the rest of the wizard runs unchanged.
+const FACTORY_STEPS = [{ id: 'factory', label: 'Factory' }, ...STEPS.slice(1)];
+
+/** What entering /deploy should do about the factory flow, if anything. */
+export function factoryEntryAction(
+  flow: string | null,
+  draft: Pick<DeployDraftState, 'contracts' | 'factorySetup' | 'workflowRef'>
+): 'start' | 'clear' | 'none' {
+  if (
+    flow === 'factory' &&
+    !draft.factorySetup &&
+    draft.contracts.length === 0 &&
+    !draft.workflowRef
+  )
+    return 'start';
+  // Backing out of the flow before materialization must not leave "New
+  // deployment" opening onto the factory step.
+  if (flow !== 'factory' && draft.factorySetup && draft.contracts.length === 0)
+    return 'clear';
+  return 'none';
+}
 
 export function explorerBlocker(
   chainIds: number[],
@@ -134,7 +166,15 @@ export default function DeployWizardPage() {
       ? selectWorkflowDocument(state, workflowRepo, workflowName)
       : undefined
   );
-  const draftActive = draft.contracts.length > 0;
+  const factoryMode = Boolean(draft.factorySetup);
+  const wizardSteps = factoryMode ? FACTORY_STEPS : STEPS;
+  const factoryCall = draft.steps.find(
+    (candidate): candidate is DraftCallStep =>
+      candidate.id === draft.factorySetup?.callStepId &&
+      candidate.kind === 'call'
+  );
+  const flow = searchParams.get('flow');
+  const draftActive = draft.contracts.length > 0 || factoryMode;
   const {
     entries: artifactEntries,
     artifacts,
@@ -163,6 +203,11 @@ export default function DeployWizardPage() {
   useEffect(() => {
     dispatch(markDraftSeen());
   }, [dispatch]);
+  useEffect(() => {
+    const action = factoryEntryAction(flow, draft);
+    if (action === 'start') dispatch(startFactoryDraft());
+    else if (action === 'clear') dispatch(clearDraft());
+  }, [dispatch, draft, flow]);
   useEnsureChainMetadata(draft.chains);
   useEffect(() => {
     if (workflowRepo && workflowName)
@@ -241,7 +286,14 @@ export default function DeployWizardPage() {
   // disabled button. A silently disabled Continue with the offending chain
   // scrolled off-screen reads as a dead end.
   const blockers: Array<string | undefined> = [
-    contractsValid ? undefined : 'Select at least one deployable contract',
+    factoryMode
+      ? (factorySetupBlocker(draft.factorySetup, factoryCall) ??
+        (draft.contracts.length > 0 && !contractsValid
+          ? 'Product artifacts are not ready yet'
+          : undefined))
+      : contractsValid
+        ? undefined
+        : 'Select at least one deployable contract',
     (() => {
       if (draft.chains.length === 0) return 'Select at least one chain';
       const missing = draft.chains.find(
@@ -283,7 +335,7 @@ export default function DeployWizardPage() {
     draft.contractTypeSelectionPending ? 'Contract type is still loading' : undefined,
   ];
 
-  const nav = step < STEPS.length - 1 && (
+  const nav = step < wizardSteps.length - 1 && (
     <WizardNav
       step={step}
       blocker={
@@ -292,7 +344,12 @@ export default function DeployWizardPage() {
           : undefined
       }
       onBack={() => setStep((value) => value - 1)}
-      onContinue={() => setStep((value) => value + 1)}
+      onContinue={() => {
+        // Continuing out of the factory step is what turns the setup into
+        // the call step, product deploy steps and their contracts.
+        if (factoryMode && step === 0) dispatch(applyFactorySetup());
+        setStep((value) => value + 1);
+      }}
     />
   );
 
@@ -324,7 +381,7 @@ export default function DeployWizardPage() {
             Create a frozen, recoverable deployment run.
           </p>
         </div>
-        {draftActive && !draft.workflowRef && plan && (
+        {draft.contracts.length > 0 && !draft.workflowRef && plan && (
           <button
             type="button"
             className="btn btn-secondary"
@@ -355,7 +412,7 @@ export default function DeployWizardPage() {
         />
       )}
       <WizardStepper
-        steps={STEPS}
+        steps={wizardSteps}
         currentIndex={step}
         onStepSelect={(index) => {
           if (index <= step) setStep(index);
@@ -363,15 +420,22 @@ export default function DeployWizardPage() {
       />
       {nav && <div className="mb-4">{nav}</div>}
       <div className="card-milky p-5">
-        {step === 0 && (
-          <ContractsStep
-            contracts={draft.contracts}
-            artifactEntries={artifactEntries}
-            onRemove={(contractId) => dispatch(removeContract(contractId))}
-            onRetry={retryArtifact}
-            workflowMode={Boolean(draft.workflowRef)}
-          />
-        )}
+        {step === 0 &&
+          (draft.factorySetup ? (
+            <FactorySetupStep
+              setup={draft.factorySetup}
+              artifactEntries={artifactEntries}
+              onRetry={retryArtifact}
+            />
+          ) : (
+            <ContractsStep
+              contracts={draft.contracts}
+              artifactEntries={artifactEntries}
+              onRemove={(contractId) => dispatch(removeContract(contractId))}
+              onRetry={retryArtifact}
+              workflowMode={Boolean(draft.workflowRef)}
+            />
+          ))}
         {step === 1 && <ChainsStep />}
         {step === 2 && <ExplorersStep />}
         {step === 3 && <SignersStep />}

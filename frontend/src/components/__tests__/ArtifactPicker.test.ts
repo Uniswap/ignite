@@ -5,7 +5,11 @@ import { configureStore } from '@reduxjs/toolkit';
 import { Provider } from 'react-redux';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement } from 'react';
-import ArtifactPicker, { pinForRepoVersion } from '../ArtifactPicker';
+import ArtifactPicker, {
+  pinForRepoVersion,
+  pinnedVersionSummary,
+  repoChoicesFor,
+} from '../ArtifactPicker';
 import { artifactListReceived, compilerReducer } from '../../store/features/compiler/compilerSlice';
 import { profilesReducer } from '../../store/features/profiles/profilesSlice';
 import { repositoriesReducer, setRepositories } from '../../store/features/repositories/repositoriesSlice';
@@ -56,6 +60,38 @@ describe('ArtifactPicker version pins', () => {
     }
   });
 
+  it('omits the contract-type source section when the caller opts out', () => {
+    // In the factory flow the section reads as a classification field ("is
+    // this immutable?") and a bare proxy template is never the right answer,
+    // so the flow hides it. Everywhere else stays unchanged by default.
+    const originalDocument = globalThis.document;
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true,
+      value: { createElement: () => ({ getContext: () => null }) },
+    });
+    try {
+      const store = configureStore({
+        reducer: { compiler: compilerReducer, profiles: profilesReducer, repositories: repositoriesReducer },
+      });
+      const render = (showContractTypes?: boolean) => renderToStaticMarkup(
+        createElement(
+          Provider,
+          {
+            store,
+            children: createElement(ArtifactPicker, {
+              onSelect: () => undefined,
+              ...(showContractTypes === undefined ? {} : { showContractTypes }),
+            } as never),
+          }
+        )
+      );
+      expect(render()).toContain('Contract type');
+      expect(render(false)).not.toContain('Contract type');
+    } finally {
+      Object.defineProperty(globalThis, 'document', { configurable: true, value: originalDocument });
+    }
+  });
+
   it('carries a tag refKind into a schema-valid source pin', () => {
     const version: RepoVersionSummary = {
       url: 'https://example.test/contracts.git',
@@ -71,5 +107,91 @@ describe('ArtifactPicker version pins', () => {
       ref: version.refLabel,
       refKind: 'tag',
     });
+  });
+});
+
+describe('repoChoicesFor', () => {
+  it('offers the session workspace as a first-class repository', () => {
+    // In a fresh setup the workspace is often the ONLY repo — without it the
+    // picker renders "No options found" and the factory flow dead-ends.
+    const choices = repoChoicesFor({
+      session: { pathOrUrl: '/workspace', initialized: true, frameworks: [], versions: [] },
+      local: [], cloned: [], versionGroups: [], pinned: [],
+    } as never);
+    expect(choices[0]).toMatchObject({ value: 'live:/workspace', path: '/workspace' });
+    // The workspace is a filesystem checkout: its "new version" flow must
+    // treat it as local.
+    expect(choices.find((choice) => choice.newVersion && choice.path === '/workspace')).toMatchObject({ local: true });
+  });
+
+  it('shows a bare commit once when a version has no tag label', () => {
+    // A record whose ref metadata was lost used to render "hash · hash".
+    const choices = repoChoicesFor({
+      session: {
+        pathOrUrl: '/workspace', initialized: true, frameworks: [],
+        versions: [{ url: 'https://example.test/tjar', commit: 'c'.repeat(40), lastUsedAt: '2026-08-07T00:00:00.000Z' }],
+      },
+      local: [], cloned: [], versionGroups: [], pinned: [],
+    } as never);
+    const row = choices.find((choice) => choice.pin);
+    expect(row?.label).toBe(`  ↳ ${'c'.repeat(12)}`);
+  });
+
+  it('does not duplicate a session that is also attached as local', () => {
+    const entry = { pathOrUrl: '/repo', initialized: true, frameworks: [], versions: [] };
+    const choices = repoChoicesFor({
+      session: entry, local: [entry], cloned: [], versionGroups: [], pinned: [],
+    } as never);
+    expect(choices.filter((choice) => choice.value === 'live:/repo')).toHaveLength(1);
+  });
+});
+
+describe('pinnedVersionSummary', () => {
+  const version = {
+    url: 'https://example.test/tjar.git',
+    commit: 'a'.repeat(40),
+    refLabel: 'oz-audit-final',
+    refKind: 'tag' as const,
+    frameworks: [{ id: 'foundry', name: 'Foundry', state: 'compiled' }],
+    lastUsedAt: '2026-08-06T00:00:00.000Z',
+  };
+  const pin = pinForRepoVersion(version as never);
+
+  it('finds a version pinned under the session workspace', () => {
+    // Selecting the workspace's own version tag resolved no frameworks, so
+    // the artifact listing never dispatched and the picker sat on
+    // "Loading contracts…" forever.
+    const found = pinnedVersionSummary(
+      {
+        session: { pathOrUrl: '/workspace', initialized: true, frameworks: [], versions: [version] },
+        local: [], cloned: [], versionGroups: [], pinned: [],
+      } as never,
+      pin
+    );
+    expect(found?.frameworks?.[0]?.id).toBe('foundry');
+  });
+
+  it('still finds attached and orphaned versions', () => {
+    const attached = pinnedVersionSummary(
+      {
+        session: null,
+        local: [{ pathOrUrl: '/repo', initialized: true, frameworks: [], versions: [version] }],
+        cloned: [], versionGroups: [], pinned: [],
+      } as never,
+      pin
+    );
+    expect(attached?.commit).toBe(version.commit);
+    const orphaned = pinnedVersionSummary(
+      {
+        session: null, local: [], cloned: [],
+        versionGroups: [{ url: version.url, versions: [version] }], pinned: [],
+      } as never,
+      pin
+    );
+    expect(orphaned?.commit).toBe(version.commit);
+  });
+
+  it('is undefined without a pin', () => {
+    expect(pinnedVersionSummary(null, undefined)).toBeUndefined();
   });
 });

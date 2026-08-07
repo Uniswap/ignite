@@ -54,7 +54,9 @@ export function reviewPredictedAddresses(
                     provisionalLabel:
                       entry.kind === 'create'
                         ? 'provisional — depends on signer nonce'
-                        : 'provisional — mined during run',
+                        : entry.notes?.length
+                          ? `provisional — ${entry.notes[0]}`
+                          : 'provisional — mined during run',
                   }
                 : {}),
             },

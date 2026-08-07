@@ -6,6 +6,7 @@ import type {
   ContractTypeInfo,
   ContractSourcePin,
   AddRepoVersionRequest,
+  RepoList,
   RepoVersionSummary,
 } from '@ignite/api';
 import Select from './Select';
@@ -59,12 +60,113 @@ export function pinForRepoVersion(
   };
 }
 
+// Every lookup that walks repo versions must agree that the session
+// workspace is a source, or a version pinned under it resolves in the
+// dropdown but nowhere else.
+function pickerRepoEntries(repositories: RepoList | null) {
+  const session = repositories?.session;
+  const attached = [
+    ...(repositories?.local ?? []),
+    ...(repositories?.cloned ?? []),
+  ];
+  return session &&
+    !attached.some((repo) => repo.pathOrUrl === session.pathOrUrl)
+    ? [session, ...attached]
+    : attached;
+}
+
+/**
+ * The stored version summary a pin refers to, wherever it lives — session
+ * workspace, attached repo, or orphaned version group. Selecting the
+ * workspace's own version tag used to resolve no frameworks (only
+ * local/cloned were searched), so the artifact listing never dispatched and
+ * the picker sat on "Loading contracts…" forever.
+ */
+export function pinnedVersionSummary(
+  repositories: RepoList | null,
+  pin: ContractSourcePin | undefined
+): RepoVersionSummary | undefined {
+  if (!pin) return undefined;
+  return (
+    pickerRepoEntries(repositories)
+      .flatMap((repo) => repo.versions)
+      .find(
+        (version) => version.url === pin.url && version.commit === pin.commit
+      ) ??
+    repositories?.versionGroups
+      .find((group) => group.url === pin.url)
+      ?.versions.find((version) => version.commit === pin.commit)
+  );
+}
+
+/**
+ * Every repository an artifact can be picked from. The session workspace is
+ * a first-class source: in a fresh setup it is often the only repo, and
+ * omitting it left this picker rendering "No options found" on exactly the
+ * environments the deploy-via-factory flow starts in.
+ */
+export function repoChoicesFor(repositories: RepoList | null): RepoChoice[] {
+  const session = repositories?.session;
+  const entries = pickerRepoEntries(repositories);
+  const withVersions = entries.flatMap<RepoChoice>((repo) => [
+    {
+      value: `live:${repo.pathOrUrl}`,
+      label: repo.pathOrUrl,
+      path: repo.pathOrUrl as string,
+    },
+    ...repo.versions.map((version) => ({
+      value: `version:${repo.pathOrUrl}\u0000${version.commit}`,
+      label: `  ↳ ${version.refLabel ? `${version.refLabel} · ` : ''}${version.commit.slice(0, 12)}`,
+      path: version.url,
+      pin: pinForRepoVersion(version),
+    })),
+    {
+      value: `new:${repo.pathOrUrl}`,
+      label: `  + new version… (${repo.pathOrUrl})`,
+      path: repo.pathOrUrl,
+      newVersion: true,
+      // The workspace is a filesystem checkout like a local repo, so its
+      // new-version flow must not treat the path as a remote URL.
+      local:
+        repo.pathOrUrl === session?.pathOrUrl ||
+        (repositories?.local ?? []).some(
+          (local) => local.pathOrUrl === repo.pathOrUrl
+        ),
+      workspace: true,
+    },
+  ]);
+  const orphaned = (repositories?.versionGroups ?? []).flatMap<RepoChoice>(
+    (group) => [
+      ...group.versions.map((version) => ({
+        value: `version:${group.url}\u0000${version.commit}`,
+        label: `  ↳ ${group.url} · ${version.refLabel ? `${version.refLabel} · ` : ''}${version.commit.slice(0, 12)}`,
+        path: group.url,
+        pin: pinForRepoVersion(version),
+      })),
+      {
+        value: `new:${group.url}`,
+        label: `  + new version… (${group.url})`,
+        path: group.url,
+        newVersion: true,
+        local: false,
+      },
+    ]
+  );
+  return [...withVersions, ...orphaned];
+}
+
 export default function ArtifactPicker({
   value,
   onSelect,
+  showContractTypes = true,
 }: {
   value?: ContractSource;
   onSelect: (contract: ContractSource, abi: ArtifactData['abi']) => void;
+  // The contract-type section offers artifacts SOURCED from contract-type
+  // plugins (standard proxy templates). Callers where that reads as a
+  // classification field — the factory flow's product mapping, whose steps
+  // are plain immutable deployments — hide it rather than confuse the two.
+  showContractTypes?: boolean;
 }) {
   const dispatch = useAppDispatch();
   const repositories = useAppSelector(
@@ -102,53 +204,10 @@ export default function ArtifactPicker({
     request: AddRepoVersionRequest;
   } | null>(null);
 
-  const repoChoices = useMemo(() => {
-    const entries = [
-      ...(repositories?.local ?? []),
-      ...(repositories?.cloned ?? []),
-    ];
-    const attached = entries.flatMap<RepoChoice>((repo) => [
-      {
-        value: `live:${repo.pathOrUrl}`,
-        label: repo.pathOrUrl,
-        path: repo.pathOrUrl as string,
-      },
-      ...repo.versions.map((version) => ({
-        value: `version:${repo.pathOrUrl}\u0000${version.commit}`,
-        label: `  ↳ ${version.refLabel ?? version.commit.slice(0, 12)} · ${version.commit.slice(0, 12)}`,
-        path: version.url,
-        pin: pinForRepoVersion(version),
-      })),
-      {
-        value: `new:${repo.pathOrUrl}`,
-        label: `  + new version… (${repo.pathOrUrl})`,
-        path: repo.pathOrUrl,
-        newVersion: true,
-        local: (repositories?.local ?? []).some(
-          (local) => local.pathOrUrl === repo.pathOrUrl
-        ),
-        workspace: true,
-      },
-    ]);
-    const orphaned = (repositories?.versionGroups ?? []).flatMap<RepoChoice>(
-      (group) => [
-        ...group.versions.map((version) => ({
-          value: `version:${group.url}\u0000${version.commit}`,
-          label: `  ↳ ${group.url} · ${version.refLabel ?? version.commit.slice(0, 12)} · ${version.commit.slice(0, 12)}`,
-          path: group.url,
-          pin: pinForRepoVersion(version),
-        })),
-        {
-          value: `new:${group.url}`,
-          label: `  + new version… (${group.url})`,
-          path: group.url,
-          newVersion: true,
-          local: false,
-        },
-      ]
-    );
-    return [...attached, ...orphaned];
-  }, [repositories]);
+  const repoChoices = useMemo(
+    () => repoChoicesFor(repositories),
+    [repositories]
+  );
   const selectedChoice =
     repoChoices.find(
       (choice) => choice.path === repoPath && choice.pin?.commit === pin?.commit
@@ -158,33 +217,15 @@ export default function ArtifactPicker({
     );
   const repoOptions = repoChoices.map(({ value, label }) => ({ value, label }));
   const frameworks = pin
-    ? (
-        repositories?.versionGroups
-          .find((group) => group.url === pin.url)
-          ?.versions.find((version) => version.commit === pin.commit)
-          ?.frameworks ??
-        [...(repositories?.local ?? []), ...(repositories?.cloned ?? [])]
-          .flatMap((repo) => repo.versions)
-          .find(
-            (version) =>
-              version.url === pin.url && version.commit === pin.commit
-          )?.frameworks ??
-        []
-      ).map(({ id, name }) => ({ id, name }))
+    ? (pinnedVersionSummary(repositories, pin)?.frameworks ?? []).map(
+        ({ id, name }) => ({ id, name })
+      )
     : (repositoryData[repoPath]?.frameworks ?? []);
   const effectiveFramework = frameworkId || frameworks[0]?.id || '';
   const scopeKey = compilerScopeKey(repoPath, pin);
   const compilation = compilations[scopeKey]?.[effectiveFramework];
   const artifacts = compilation?.artifacts;
-  const pinnedVersion = pin
-    ? [
-        ...(repositories?.local ?? []),
-        ...(repositories?.cloned ?? []),
-      ].flatMap((repo) => repo.versions).find(
-        (version) => version.url === pin.url && version.commit === pin.commit
-      ) ?? repositories?.versionGroups.find((group) => group.url === pin.url)
-        ?.versions.find((version) => version.commit === pin.commit)
-    : undefined;
+  const pinnedVersion = pinnedVersionSummary(repositories, pin);
   const lifecycleError = pin ? pinnedVersion?.lastError : repositoryData[repoPath]?.lastError;
 
   useEffect(() => {
@@ -202,6 +243,7 @@ export default function ArtifactPicker({
     dispatch(clearArtifactWait({ repoPath: scopeKey, ...(effectiveFramework ? { frameworkId: effectiveFramework } : {}) }));
   }, [dispatch, scopeKey, effectiveFramework]);
   useEffect(() => {
+    if (!showContractTypes) return;
     let cancelled = false;
     void apiClient.request('listContractTypes', {}).then((response) => {
       if ('data' in response && !cancelled) {
@@ -212,7 +254,7 @@ export default function ArtifactPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [showContractTypes]);
 
   const groupedArtifacts = useMemo(
     () => groupArtifactVariants(artifacts ?? []),
@@ -380,48 +422,51 @@ export default function ArtifactPicker({
           )}
         </div>
       )}
-      <section className="grid gap-2">
-        <span className="eyebrow">Contract type</span>
-        <Select
-          options={contractTypes.map((type) => ({
-            value: type.pluginId,
-            label: `${type.label} (${type.versionLabel})`,
-          }))}
-          value={contractTypeId}
-          requireSelection
-          placeholder="Select contract type"
-          onValueChange={setContractTypeId}
-        />
-        {selectedType && (
-          <div className="glass-list">
-            {selectedType.artifacts.map((artifactKey) => (
-              <button
-                key={artifactKey}
-                type="button"
-                className="list-row clickable text-left"
-                onClick={() =>
-                  void chooseContractType(selectedType, artifactKey)
-                }
-              >
-                <div className="font-medium">{artifactKey}</div>
-                <div className="mono-data text-muted">
-                  {selectedType.pluginId}
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
-        {requiresGrant.map((pluginId) => (
-          <button
-            key={pluginId}
-            type="button"
-            disabled
-            className="input-glass text-sm text-muted opacity-60 text-left"
-          >
-            {pluginId} — grant contract bytecode access to select its artifacts.
-          </button>
-        ))}
-      </section>
+      {showContractTypes && (
+        <section className="grid gap-2">
+          <span className="eyebrow">Contract type</span>
+          <Select
+            options={contractTypes.map((type) => ({
+              value: type.pluginId,
+              label: `${type.label} (${type.versionLabel})`,
+            }))}
+            value={contractTypeId}
+            requireSelection
+            placeholder="Select contract type"
+            onValueChange={setContractTypeId}
+          />
+          {selectedType && (
+            <div className="glass-list">
+              {selectedType.artifacts.map((artifactKey) => (
+                <button
+                  key={artifactKey}
+                  type="button"
+                  className="list-row clickable text-left"
+                  onClick={() =>
+                    void chooseContractType(selectedType, artifactKey)
+                  }
+                >
+                  <div className="font-medium">{artifactKey}</div>
+                  <div className="mono-data text-muted">
+                    {selectedType.pluginId}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+          {requiresGrant.map((pluginId) => (
+            <button
+              key={pluginId}
+              type="button"
+              disabled
+              className="input-glass text-sm text-muted opacity-60 text-left"
+            >
+              {pluginId} — grant contract bytecode access to select its
+              artifacts.
+            </button>
+          ))}
+        </section>
+      )}
       <AddVersionModal
         variant="add"
         open={addVersionOpen}

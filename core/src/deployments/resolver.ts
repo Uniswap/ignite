@@ -1,6 +1,13 @@
 // Canonical deployment-plan resolution. Validation and execution share these
 // rules so a per-chain preview cannot diverge from the transaction submitted.
-import { encodeFunctionData, isAddress, parseAbiItem, toFunctionSignature, type AbiFunction, type AbiParameter } from 'viem';
+import {
+  encodeFunctionData,
+  isAddress,
+  parseAbiItem,
+  toFunctionSignature,
+  type AbiFunction,
+  type AbiParameter,
+} from 'viem';
 import type {
   ArgValues,
   CallStep,
@@ -20,7 +27,15 @@ export function argKeysForAbi(abiInputs: { name?: string }[]): string[] {
   return abiInputs.map((input, index) => input.name || `arg${index}`);
 }
 
-type ValueStep = Pick<DeployStep, 'args' | 'argsPerChain' | 'gasOverrides' | 'gasOverridesPerChain' | 'value' | 'valuePerChain'>;
+type ValueStep = Pick<
+  DeployStep,
+  | 'args'
+  | 'argsPerChain'
+  | 'gasOverrides'
+  | 'gasOverridesPerChain'
+  | 'value'
+  | 'valuePerChain'
+>;
 export function mergeArgs(step: ValueStep, chainId: number): ArgValues {
   return {
     ...(step.args ?? {}),
@@ -28,8 +43,14 @@ export function mergeArgs(step: ValueStep, chainId: number): ArgValues {
   };
 }
 
-export function mergeLibraries(step: DeployStep, chainId: number): Record<string, LibraryBinding> {
-  return { ...(step.libraries ?? {}), ...(step.librariesPerChain?.[String(chainId)] ?? {}) };
+export function mergeLibraries(
+  step: DeployStep,
+  chainId: number
+): Record<string, LibraryBinding> {
+  return {
+    ...(step.libraries ?? {}),
+    ...(step.librariesPerChain?.[String(chainId)] ?? {}),
+  };
 }
 
 export function missingArgKeys(
@@ -52,19 +73,54 @@ export function effectiveValue(step: ValueStep, chainId: number): bigint {
   return BigInt(step.valuePerChain?.[String(chainId)] ?? step.value ?? '0');
 }
 
-export function collectRefs(step: Step, chainId: number): Array<{ path: string; stepId: string }> {
+export function collectRefs(
+  step: Step,
+  chainId: number
+): Array<{ path: string; stepId: string }> {
   const refs: Array<{ path: string; stepId: string }> = [];
   const walk = (value: unknown, path: string) => {
-    if (isValueRef(value)) { refs.push({ path, stepId: value.$ref.stepId }); return; }
-    if (Array.isArray(value)) value.forEach((item, index) => walk(item, `${path}[${index}]`));
-    else if (value && typeof value === 'object') Object.entries(value as Record<string, unknown>).forEach(([key, item]) => walk(item, path ? `${path}.${key}` : key));
+    if (isValueRef(value)) {
+      refs.push({ path, stepId: value.$ref.stepId });
+      return;
+    }
+    if (Array.isArray(value))
+      value.forEach((item, index) => walk(item, `${path}[${index}]`));
+    else if (value && typeof value === 'object')
+      Object.entries(value as Record<string, unknown>).forEach(([key, item]) =>
+        walk(item, path ? `${path}.${key}` : key)
+      );
   };
   walk(mergeArgs(step as DeployStep, chainId), 'args');
   if (step.kind === 'call') {
     const target = step.targetPerChain?.[String(chainId)] ?? step.target;
-    if (target.kind === 'step') refs.push({ path: 'target', stepId: target.stepId });
+    if (target.kind === 'step')
+      refs.push({ path: 'target', stepId: target.stepId });
+  } else if (step.strategy?.kind === 'factory') {
+    // A factory deployment's inputs live on the strategy, not on step.args:
+    // the factory it calls, the call's arguments, and any pointer inside the
+    // predict helper's arguments all have to participate in ordering.
+    const strategy = step.strategy;
+    const target =
+      strategy.targetPerChain?.[String(chainId)] ?? strategy.target;
+    if (target?.kind === 'step')
+      refs.push({ path: 'factory', stepId: target.stepId });
+    // A product deployed by another step's call depends on that step.
+    if (strategy.fulfilledBy)
+      refs.push({ path: 'fulfilledBy', stepId: strategy.fulfilledBy });
+    walk(
+      {
+        ...(strategy.args ?? {}),
+        ...(strategy.argsPerChain?.[String(chainId)] ?? {}),
+      },
+      'args'
+    );
+    for (const [key, binding] of Object.entries(mergeLibraries(step, chainId)))
+      if (binding.kind === 'step')
+        refs.push({ path: `libraries.${key}`, stepId: binding.stepId });
   } else {
-    for (const [key, binding] of Object.entries(mergeLibraries(step, chainId))) if (binding.kind === 'step') refs.push({ path: `libraries.${key}`, stepId: binding.stepId });
+    for (const [key, binding] of Object.entries(mergeLibraries(step, chainId)))
+      if (binding.kind === 'step')
+        refs.push({ path: `libraries.${key}`, stepId: binding.stepId });
   }
   return refs;
 }
@@ -74,85 +130,230 @@ export interface ResolveStepContext {
   contracts?: DeploymentPlan['contracts'];
 }
 
-export function resolveStepValues(step: Step, chainId: number, resolveRef: (stepId: string) => Hex, abiInputs: readonly AbiParameter[] = [], context: ResolveStepContext = {}): { args: ArgValues; target?: Hex; libraries?: Record<string, Hex>; pointers: Record<string, Hex> } {
+export function resolveStepValues(
+  step: Step,
+  chainId: number,
+  resolveRef: (stepId: string) => Hex,
+  abiInputs: readonly AbiParameter[] = [],
+  context: ResolveStepContext = {}
+): {
+  args: ArgValues;
+  target?: Hex;
+  libraries?: Record<string, Hex>;
+  pointers: Record<string, Hex>;
+} {
   const pointers: Record<string, Hex> = {};
   const resolve = (stepId: string, path: string): Hex => {
-    try { const address = resolveRef(stepId); if (!address) throw new Error('missing'); pointers[path] = address; return address; }
-    catch { throw new IgniteError(`Pointer ${stepId} at ${path} is unresolved`, 'POINTER_UNRESOLVED', { stepId, path }); }
+    try {
+      const address = resolveRef(stepId);
+      if (!address) throw new Error('missing');
+      pointers[path] = address;
+      return address;
+    } catch {
+      throw new IgniteError(
+        `Pointer ${stepId} at ${path} is unresolved`,
+        'POINTER_UNRESOLVED',
+        { stepId, path }
+      );
+    }
   };
   const merged = mergeArgs(step as DeployStep, chainId);
   const args: ArgValues = {};
   for (let index = 0; index < abiInputs.length; index += 1) {
-    const parameter = abiInputs[index]; const key = parameter.name || `arg${index}`;
+    const parameter = abiInputs[index];
+    const key = parameter.name || `arg${index}`;
     // Pointer paths use the same `args.`-rooted vocabulary as collectRefs so
     // Attempt.expected.pointers and artifact rendering line up exactly.
-    if (Object.prototype.hasOwnProperty.call(merged, key)) args[key] = resolveAbiRefs(parameter, merged[key], `args.${key}`, resolve, context);
+    if (Object.prototype.hasOwnProperty.call(merged, key))
+      args[key] = resolveAbiRefs(
+        parameter,
+        merged[key],
+        `args.${key}`,
+        resolve,
+        context
+      );
   }
   // Without ABI inputs, retain data for callers that only need target/library resolution.
   if (abiInputs.length === 0) Object.assign(args, merged);
-  const result: { args: ArgValues; target?: Hex; libraries?: Record<string, Hex>; pointers: Record<string, Hex> } = { args, pointers };
+  const result: {
+    args: ArgValues;
+    target?: Hex;
+    libraries?: Record<string, Hex>;
+    pointers: Record<string, Hex>;
+  } = { args, pointers };
   if (step.kind === 'call') {
     const target = mergeCallTarget(step, chainId);
-    result.target = target.kind === 'address' ? target.address : resolve(target.stepId, 'target');
+    result.target =
+      target.kind === 'address'
+        ? target.address
+        : resolve(target.stepId, 'target');
   } else {
     const libraries: Record<string, Hex> = {};
-    for (const [key, binding] of Object.entries(mergeLibraries(step, chainId))) libraries[key] = binding.kind === 'address' ? binding.address : resolve(binding.stepId, `libraries.${key}`);
+    for (const [key, binding] of Object.entries(mergeLibraries(step, chainId)))
+      libraries[key] =
+        binding.kind === 'address'
+          ? binding.address
+          : resolve(binding.stepId, `libraries.${key}`);
     if (Object.keys(libraries).length) result.libraries = libraries;
   }
   return result;
 }
 
-function resolveAbiRefs(parameter: AbiParameter, value: unknown, path: string, resolve: (stepId: string, path: string) => Hex, context: ResolveStepContext): unknown {
+function resolveAbiRefs(
+  parameter: AbiParameter,
+  value: unknown,
+  path: string,
+  resolve: (stepId: string, path: string) => Hex,
+  context: ResolveStepContext
+): unknown {
   // $encode is intentionally detected by ownership, not by its type guard:
   // a malformed marker must never fall through as a tuple/object value.
   if (ownsEncode(value)) {
     const parsed = EncodedCallValueSchema.safeParse(value);
-    if (!parsed.success) throw new IgniteError(`Encoded call at ${path} is malformed`, 'ENCODED_CALL_INVALID', { field: path });
-    if (parameter.type !== 'bytes') throw new IgniteError(`Encoded call at ${path} is only valid for bytes ABI inputs`, 'ENCODED_CALL_NON_BYTES', { field: path });
-    if (containsEncode(parsed.data.$encode.args)) throw new IgniteError(`Nested $encode is not supported at ${path}`, 'ENCODED_CALL_NESTED', { field: path });
-    const contract = context.contracts?.find((candidate) => candidate.id === parsed.data.$encode.contractId);
+    if (!parsed.success)
+      throw new IgniteError(
+        `Encoded call at ${path} is malformed`,
+        'ENCODED_CALL_INVALID',
+        { field: path }
+      );
+    if (parameter.type !== 'bytes')
+      throw new IgniteError(
+        `Encoded call at ${path} is only valid for bytes ABI inputs`,
+        'ENCODED_CALL_NON_BYTES',
+        { field: path }
+      );
+    if (containsEncode(parsed.data.$encode.args))
+      throw new IgniteError(
+        `Nested $encode is not supported at ${path}`,
+        'ENCODED_CALL_NESTED',
+        { field: path }
+      );
+    const contract = context.contracts?.find(
+      (candidate) => candidate.id === parsed.data.$encode.contractId
+    );
     const abi = context.frozen?.[parsed.data.$encode.contractId]?.abi;
-    if (!contract || !Array.isArray(abi)) throw new IgniteError(`Encoded call contract ${parsed.data.$encode.contractId} is not frozen`, 'ENCODED_CALL_CONTRACT_NOT_FOUND', { contractId: parsed.data.$encode.contractId, field: path });
+    if (!contract || !Array.isArray(abi))
+      throw new IgniteError(
+        `Encoded call contract ${parsed.data.$encode.contractId} is not frozen`,
+        'ENCODED_CALL_CONTRACT_NOT_FOUND',
+        { contractId: parsed.data.$encode.contractId, field: path }
+      );
     const fn = abi.find((entry): entry is AbiFunction => {
-      if (!entry || typeof entry !== 'object' || (entry as { type?: string }).type !== 'function') return false;
-      try { return toFunctionSignature(entry as AbiFunction) === parsed.data.$encode.fn; } catch { return false; }
+      if (
+        !entry ||
+        typeof entry !== 'object' ||
+        (entry as { type?: string }).type !== 'function'
+      )
+        return false;
+      try {
+        return (
+          toFunctionSignature(entry as AbiFunction) === parsed.data.$encode.fn
+        );
+      } catch {
+        return false;
+      }
     });
-    if (!fn) throw new IgniteError(`Encoded call function ${parsed.data.$encode.fn} is not in the frozen ABI`, 'ENCODED_CALL_FUNCTION_NOT_FOUND', { contractId: contract.id, fn: parsed.data.$encode.fn, field: path });
+    if (!fn)
+      throw new IgniteError(
+        `Encoded call function ${parsed.data.$encode.fn} is not in the frozen ABI`,
+        'ENCODED_CALL_FUNCTION_NOT_FOUND',
+        { contractId: contract.id, fn: parsed.data.$encode.fn, field: path }
+      );
     const rawArgs = parsed.data.$encode.args ?? {};
     const resolvedArgs: ArgValues = {};
     for (let index = 0; index < fn.inputs.length; index += 1) {
       const input = fn.inputs[index]!;
       const key = input.name || `arg${index}`;
       if (Object.prototype.hasOwnProperty.call(rawArgs, key))
-        resolvedArgs[key] = resolveAbiRefs(input, rawArgs[key], `${path}.$encode.${key}`, resolve, context);
+        resolvedArgs[key] = resolveAbiRefs(
+          input,
+          rawArgs[key],
+          `${path}.$encode.${key}`,
+          resolve,
+          context
+        );
     }
-    return encodeFunctionData({ abi: [fn], functionName: fn.name, args: toConstructorArgs(fn.inputs, resolvedArgs, 'call') as never });
+    return encodeFunctionData({
+      abi: [fn],
+      functionName: fn.name,
+      args: toConstructorArgs(fn.inputs, resolvedArgs, 'call') as never,
+    });
   }
   if (isValueRef(value)) {
-    if (parameter.type !== 'address') throw new IgniteError(`Pointer at ${path} is only valid for address ABI inputs`, ErrorCodes.ARG_TYPE_MISMATCH, { field: path });
+    if (parameter.type !== 'address')
+      throw new IgniteError(
+        `Pointer at ${path} is only valid for address ABI inputs`,
+        ErrorCodes.ARG_TYPE_MISMATCH,
+        { field: path }
+      );
     return resolve(value.$ref.stepId, path);
   }
   const array = parameter.type.match(/^(.*)\[([0-9]*)\]$/);
-  if (array && Array.isArray(value)) return value.map((item, index) => resolveAbiRefs({ ...parameter, type: array[1] }, item, `${path}[${index}]`, resolve, context));
+  if (array && Array.isArray(value))
+    return value.map((item, index) =>
+      resolveAbiRefs(
+        { ...parameter, type: array[1] },
+        item,
+        `${path}[${index}]`,
+        resolve,
+        context
+      )
+    );
   if (parameter.type === 'tuple' && value && typeof value === 'object') {
-    const components = 'components' in parameter ? parameter.components ?? [] : [];
-    if (Array.isArray(value)) return value.map((item, index) => resolveAbiRefs(components[index]!, item, `${path}.${components[index]?.name || `arg${index}`}`, resolve, context));
-    return Object.fromEntries(components.map((component, index) => { const key = component.name || `arg${index}`; return [key, resolveAbiRefs(component, (value as Record<string, unknown>)[key], `${path}.${key}`, resolve, context)]; }));
+    const components =
+      'components' in parameter ? (parameter.components ?? []) : [];
+    if (Array.isArray(value))
+      return value.map((item, index) =>
+        resolveAbiRefs(
+          components[index]!,
+          item,
+          `${path}.${components[index]?.name || `arg${index}`}`,
+          resolve,
+          context
+        )
+      );
+    return Object.fromEntries(
+      components.map((component, index) => {
+        const key = component.name || `arg${index}`;
+        return [
+          key,
+          resolveAbiRefs(
+            component,
+            (value as Record<string, unknown>)[key],
+            `${path}.${key}`,
+            resolve,
+            context
+          ),
+        ];
+      })
+    );
   }
   return value;
 }
 
 function ownsEncode(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, '$encode'));
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.prototype.hasOwnProperty.call(value, '$encode')
+  );
 }
 
 function containsEncode(value: unknown): boolean {
   if (ownsEncode(value)) return true;
   if (Array.isArray(value)) return value.some(containsEncode);
-  return Boolean(value && typeof value === 'object' && Object.values(value as Record<string, unknown>).some(containsEncode));
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      Object.values(value as Record<string, unknown>).some(containsEncode)
+  );
 }
 
-export function mergeCallTarget(step: CallStep, chainId: number): CallStep['target'] {
+export function mergeCallTarget(
+  step: CallStep,
+  chainId: number
+): CallStep['target'] {
   return step.targetPerChain?.[String(chainId)] ?? step.target;
 }
 
@@ -161,17 +362,24 @@ export function mergeCallTarget(step: CallStep, chainId: number): CallStep['targ
  * The wrapper artifact supplies construction bytecode, but its ABI commonly
  * omits delegated functions (notably ERC1967Proxy and transparent proxies).
  */
-export function callTargetAbi(plan: DeploymentPlan, step: CallStep, chainId: number, frozen: FrozenInputs): unknown {
+export function callTargetAbi(
+  plan: DeploymentPlan,
+  step: CallStep,
+  chainId: number,
+  frozen: FrozenInputs
+): unknown {
   const target = mergeCallTarget(step, chainId);
   if (target.kind !== 'step') return undefined;
   const targetStep = plan.steps.find(
-    (candidate): candidate is DeployStep => candidate.id === target.stepId && candidate.kind === 'deploy'
+    (candidate): candidate is DeployStep =>
+      candidate.id === target.stepId && candidate.kind === 'deploy'
   );
   if (!targetStep) return undefined;
   const implementation = targetStep.wraps
     ? plan.steps.find(
         (candidate): candidate is DeployStep =>
-          candidate.id === targetStep.wraps!.stepId && candidate.kind === 'deploy'
+          candidate.id === targetStep.wraps!.stepId &&
+          candidate.kind === 'deploy'
       )
     : undefined;
   return frozen[(implementation ?? targetStep).contractId]?.abi;
@@ -180,28 +388,57 @@ export function callTargetAbi(plan: DeploymentPlan, step: CallStep, chainId: num
 // The chain matters: targetPerChain may swap between a plan contract (frozen
 // ABI is authoritative) and an arbitrary address (parsed signature).
 // Signatures compare via viem's canonical form so tuple parameters match.
-export function callAbiItem(step: CallStep, chainId: number, frozenAbi?: unknown): AbiFunction | undefined {
+export function callAbiItem(
+  step: CallStep,
+  chainId: number,
+  frozenAbi?: unknown
+): AbiFunction | undefined {
   if (!step.signature) return undefined;
   let item: AbiFunction | undefined;
   const target = mergeCallTarget(step, chainId);
   if (target.kind === 'step') {
     item = Array.isArray(frozenAbi)
       ? frozenAbi.find((entry): entry is AbiFunction => {
-          if (!entry || typeof entry !== 'object' || (entry as { type?: string }).type !== 'function') return false;
-          try { return toFunctionSignature(entry as AbiFunction) === step.signature; } catch { return false; }
+          if (
+            !entry ||
+            typeof entry !== 'object' ||
+            (entry as { type?: string }).type !== 'function'
+          )
+            return false;
+          try {
+            return toFunctionSignature(entry as AbiFunction) === step.signature;
+          } catch {
+            return false;
+          }
         })
       : undefined;
-    if (!item) throw new IgniteError(`Call signature ${step.signature} is not in the frozen ABI`, 'SIGNATURE_NOT_IN_ABI');
-    if ((step.payable ?? false) !== (item.stateMutability === 'payable')) throw new IgniteError('Call payable declaration does not match the frozen ABI', 'PAYABILITY_MISMATCH');
+    if (!item)
+      throw new IgniteError(
+        `Call signature ${step.signature} is not in the frozen ABI`,
+        'SIGNATURE_NOT_IN_ABI'
+      );
+    if ((step.payable ?? false) !== (item.stateMutability === 'payable'))
+      throw new IgniteError(
+        'Call payable declaration does not match the frozen ABI',
+        'PAYABILITY_MISMATCH'
+      );
     return item;
   }
-  try { item = parseAbiItem(`function ${step.signature}`) as AbiFunction; }
-  catch { throw new IgniteError(`Call signature ${step.signature} is invalid`, 'SIGNATURE_NOT_IN_ABI'); }
+  try {
+    item = parseAbiItem(`function ${step.signature}`) as AbiFunction;
+  } catch {
+    throw new IgniteError(
+      `Call signature ${step.signature} is invalid`,
+      'SIGNATURE_NOT_IN_ABI'
+    );
+  }
   return item;
 }
 
 export function validateDependencies(plan: DeploymentPlan): void {
-  const byId = new Map(plan.steps.map((step, index) => [step.id, { step, index }]));
+  const byId = new Map(
+    plan.steps.map((step, index) => [step.id, { step, index }])
+  );
   // Per-chain: per-chain overrides can introduce refs/targets that the first
   // chain's merge never sees, and libraries may differ per chain.
   for (const chainId of plan.chains.length ? plan.chains : [1]) {
@@ -210,49 +447,170 @@ export function validateDependencies(plan: DeploymentPlan): void {
     for (const [id, current] of byId) {
       if (current.step.kind === 'call') {
         const target = mergeCallTarget(current.step, chainId);
-        if (target.kind === 'step' && (byId.get(target.stepId)?.index ?? Infinity) >= current.index) throw new IgniteError(`Call target ${target.stepId} is not deployed yet`, 'CALL_TARGET_NOT_DEPLOYED', { stepId: target.stepId });
+        if (
+          target.kind === 'step' &&
+          (byId.get(target.stepId)?.index ?? Infinity) >= current.index
+        )
+          throw new IgniteError(
+            `Call target ${target.stepId} is not deployed yet`,
+            'CALL_TARGET_NOT_DEPLOYED',
+            { stepId: target.stepId }
+          );
         // Call ARGS resolve at execution time: any earlier step works, and a
         // later create2/plugin step resolves via its predicted address — but
         // a later plain-create step can never resolve.
-        for (const ref of collectRefs(current.step, chainId).filter((entry) => entry.path !== 'target')) {
+        for (const ref of collectRefs(current.step, chainId).filter(
+          (entry) => entry.path !== 'target'
+        )) {
           const refTarget = byId.get(ref.stepId);
-          if (!refTarget || refTarget.step.kind !== 'deploy') throw new IgniteError(`Pointer target ${ref.stepId} is not a deploy step`, 'POINTER_TARGET_NOT_DEPLOY', { stepId: ref.stepId });
-          const refStrategy = refTarget.step.strategy ?? { kind: 'create' as const };
-          if (refStrategy.kind === 'create' && refTarget.index >= current.index) throw new IgniteError(`Call argument ${ref.path} references later create step ${ref.stepId}`, 'POINTER_FORWARD_CREATE', { stepId: ref.stepId, path: ref.path });
-          if (dynamic.has(ref.stepId) && refTarget.index >= current.index) throw new IgniteError(`Call argument ${ref.path} references later dynamic step ${ref.stepId}`, 'POINTER_FORWARD_CREATE', { stepId: ref.stepId, path: ref.path });
+          if (!refTarget || refTarget.step.kind !== 'deploy')
+            throw new IgniteError(
+              `Pointer target ${ref.stepId} is not a deploy step`,
+              'POINTER_TARGET_NOT_DEPLOY',
+              { stepId: ref.stepId }
+            );
+          const refStrategy = refTarget.step.strategy ?? {
+            kind: 'create' as const,
+          };
+          if (refStrategy.kind === 'create' && refTarget.index >= current.index)
+            throw new IgniteError(
+              `Call argument ${ref.path} references later create step ${ref.stepId}`,
+              'POINTER_FORWARD_CREATE',
+              { stepId: ref.stepId, path: ref.path }
+            );
+          if (dynamic.has(ref.stepId) && refTarget.index >= current.index)
+            throw new IgniteError(
+              `Call argument ${ref.path} references later dynamic step ${ref.stepId}`,
+              'POINTER_FORWARD_CREATE',
+              { stepId: ref.stepId, path: ref.path }
+            );
         }
         continue;
       }
       const strategy = current.step.strategy ?? { kind: 'create' as const };
-      const refs = collectRefs(current.step, chainId).filter((ref) => ref.path !== 'target');
+      // `fulfilledBy` names the step whose call deploys this product. It is
+      // ordinarily a CALL step, so the deploy-step rule below does not apply;
+      // what matters is that the call happens first.
+      for (const ref of collectRefs(current.step, chainId).filter(
+        (entry) => entry.path === 'fulfilledBy'
+      )) {
+        const fulfiller = byId.get(ref.stepId);
+        if (!fulfiller)
+          throw new IgniteError(
+            `Fulfilling step ${ref.stepId} is not in this plan`,
+            'POINTER_TARGET_NOT_DEPLOY',
+            { stepId: ref.stepId }
+          );
+        if (fulfiller.index >= current.index)
+          throw new IgniteError(
+            `Factory product ${id} is fulfilled by a later step ${ref.stepId}`,
+            'POINTER_FORWARD_CREATE',
+            { stepId: ref.stepId, path: ref.path }
+          );
+      }
+      const refs = collectRefs(current.step, chainId).filter(
+        (ref) => ref.path !== 'target' && ref.path !== 'fulfilledBy'
+      );
       for (const ref of refs) {
         const target = byId.get(ref.stepId);
-        if (!target || target.step.kind !== 'deploy') throw new IgniteError(`Pointer target ${ref.stepId} is not a deploy step`, 'POINTER_TARGET_NOT_DEPLOY', { stepId: ref.stepId });
-        const targetStrategy = target.step.strategy ?? { kind: 'create' as const };
-        if (strategy.kind === 'create' && dynamic.has(ref.stepId) && target.index >= current.index)
-          throw new IgniteError(`Create step references later dynamic step ${ref.stepId}`, 'POINTER_FORWARD_CREATE', { stepId: ref.stepId, path: ref.path });
-        if (strategy.kind !== 'create' && targetStrategy.kind === 'create' && target.index >= current.index) throw new IgniteError(`Create2 input ${ref.path} references non-concrete create step ${ref.stepId} (later in this lane)`, 'CREATE2_POINTER_NOT_CONCRETE', { stepId: ref.stepId, path: ref.path });
-        if (strategy.kind === 'create' && targetStrategy.kind === 'create' && target.index >= current.index) throw new IgniteError(`Create step references later create step ${ref.stepId}`, 'POINTER_FORWARD_CREATE', { stepId: ref.stepId, path: ref.path });
-        if (strategy.kind !== 'create' && targetStrategy.kind !== 'create' && dynamic.has(id) && dynamic.has(ref.stepId) && target.index >= current.index)
-          throw new IgniteError(`Create2 input ${ref.path} references later dynamic step ${ref.stepId}`, 'CREATE2_POINTER_NOT_CONCRETE', { stepId: ref.stepId, path: ref.path });
-        if (strategy.kind !== 'create' && targetStrategy.kind !== 'create') graph.set(id, [...(graph.get(id) ?? []), ref.stepId]);
+        if (!target || target.step.kind !== 'deploy')
+          throw new IgniteError(
+            `Pointer target ${ref.stepId} is not a deploy step`,
+            'POINTER_TARGET_NOT_DEPLOY',
+            { stepId: ref.stepId }
+          );
+        const targetStrategy = target.step.strategy ?? {
+          kind: 'create' as const,
+        };
+        if (
+          strategy.kind === 'create' &&
+          dynamic.has(ref.stepId) &&
+          target.index >= current.index
+        )
+          throw new IgniteError(
+            `Create step references later dynamic step ${ref.stepId}`,
+            'POINTER_FORWARD_CREATE',
+            { stepId: ref.stepId, path: ref.path }
+          );
+        if (
+          strategy.kind !== 'create' &&
+          targetStrategy.kind === 'create' &&
+          target.index >= current.index
+        )
+          throw new IgniteError(
+            `Create2 input ${ref.path} references non-concrete create step ${ref.stepId} (later in this lane)`,
+            'CREATE2_POINTER_NOT_CONCRETE',
+            { stepId: ref.stepId, path: ref.path }
+          );
+        if (
+          strategy.kind === 'create' &&
+          targetStrategy.kind === 'create' &&
+          target.index >= current.index
+        )
+          throw new IgniteError(
+            `Create step references later create step ${ref.stepId}`,
+            'POINTER_FORWARD_CREATE',
+            { stepId: ref.stepId, path: ref.path }
+          );
+        if (
+          strategy.kind !== 'create' &&
+          targetStrategy.kind !== 'create' &&
+          dynamic.has(id) &&
+          dynamic.has(ref.stepId) &&
+          target.index >= current.index
+        )
+          throw new IgniteError(
+            `Create2 input ${ref.path} references later dynamic step ${ref.stepId}`,
+            'CREATE2_POINTER_NOT_CONCRETE',
+            { stepId: ref.stepId, path: ref.path }
+          );
+        if (strategy.kind !== 'create' && targetStrategy.kind !== 'create')
+          graph.set(id, [...(graph.get(id) ?? []), ref.stepId]);
       }
     }
-    const visiting = new Set<string>(); const visited = new Set<string>(); const stack: string[] = [];
-    const visit = (id: string) => { if (visiting.has(id)) { const cycle = [...stack.slice(stack.indexOf(id)), id]; throw new IgniteError(`Create2 prediction cycle: ${cycle.join(' -> ')}`, 'CREATE2_PREDICTION_CYCLE', { cycle }); } if (visited.has(id)) return; visiting.add(id); stack.push(id); for (const next of graph.get(id) ?? []) visit(next); stack.pop(); visiting.delete(id); visited.add(id); };
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const stack: string[] = [];
+    const visit = (id: string) => {
+      if (visiting.has(id)) {
+        const cycle = [...stack.slice(stack.indexOf(id)), id];
+        throw new IgniteError(
+          `Create2 prediction cycle: ${cycle.join(' -> ')}`,
+          'CREATE2_PREDICTION_CYCLE',
+          { cycle }
+        );
+      }
+      if (visited.has(id)) return;
+      visiting.add(id);
+      stack.push(id);
+      for (const next of graph.get(id) ?? []) visit(next);
+      stack.pop();
+      visiting.delete(id);
+      visited.add(id);
+    };
     for (const id of graph.keys()) visit(id);
   }
 }
 
 /** Deterministic inputs that cannot be committed before this chain's lane runs. */
-export function dynamicDeterministicStepIds(plan: DeploymentPlan, chainId: number): Set<string> {
+export function dynamicDeterministicStepIds(
+  plan: DeploymentPlan,
+  chainId: number
+): Set<string> {
   const byId = new Map(plan.steps.map((step) => [step.id, step]));
   const memo = new Map<string, boolean>();
   const visiting = new Set<string>();
   const dynamic = (id: string): boolean => {
-    const known = memo.get(id); if (known !== undefined) return known;
+    const known = memo.get(id);
+    if (known !== undefined) return known;
     const step = byId.get(id);
-    if (!step || step.kind !== 'deploy' || !step.strategy || step.strategy.kind === 'create') return false;
+    if (
+      !step ||
+      step.kind !== 'deploy' ||
+      !step.strategy ||
+      step.strategy.kind === 'create'
+    )
+      return false;
     // A deterministic-only cycle remains the existing prediction-cycle error;
     // it is not evidence that either input is runtime-dynamic.
     if (visiting.has(id)) return false;
@@ -260,12 +618,25 @@ export function dynamicDeterministicStepIds(plan: DeploymentPlan, chainId: numbe
     const result = collectRefs(step, chainId).some((ref) => {
       const target = byId.get(ref.stepId);
       if (!target || target.kind !== 'deploy') return false;
-      return !target.strategy || target.strategy.kind === 'create' || dynamic(target.id);
+      return (
+        !target.strategy ||
+        target.strategy.kind === 'create' ||
+        dynamic(target.id)
+      );
     });
-    visiting.delete(id); memo.set(id, result); return result;
+    visiting.delete(id);
+    memo.set(id, result);
+    return result;
   };
-  for (const step of plan.steps) if (step.kind === 'deploy' && step.strategy && step.strategy.kind !== 'create' && dynamic(step.id)) memo.set(step.id, true);
-  return new Set([...memo].flatMap(([id, value]) => value ? [id] : []));
+  for (const step of plan.steps)
+    if (
+      step.kind === 'deploy' &&
+      step.strategy &&
+      step.strategy.kind !== 'create' &&
+      dynamic(step.id)
+    )
+      memo.set(step.id, true);
+  return new Set([...memo].flatMap(([id, value]) => (value ? [id] : [])));
 }
 
 export function resolveSigner(
@@ -376,11 +747,7 @@ function coerceAbiValue(
     return value;
   }
 
-  throw argError(
-    field,
-    `uses unsupported ABI type ${parameter.type}`,
-    context
-  );
+  throw argError(field, `uses unsupported ABI type ${parameter.type}`, context);
 }
 
 function coerceTuple(
