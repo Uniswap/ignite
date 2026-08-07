@@ -79,6 +79,18 @@ const DraftDeployExtrasSchema = z.object({
       pluginId: z.string().min(1),
       params: z.record(z.string(), z.unknown()).optional(),
     }),
+    // Strings stay lax: a draft legitimately holds a half-typed address or
+    // signature. Omitting this variant made every factory draft fail the
+    // union parse and silently fall back to an empty draft on reload.
+    z.object({
+      kind: z.literal('factory'),
+      factoryContractId: z.string().optional(),
+      factoryAddress: z.string().optional(),
+      signature: z.string().optional(),
+      args: z.record(z.string(), z.unknown()).optional(),
+      output: z.string().optional(),
+      fulfilledBy: z.string().optional(),
+    }),
   ]),
   libraries: z.record(z.string(), LibraryBindingSchema).optional(),
   librariesPerChain: z
@@ -150,6 +162,17 @@ const PersistedDraftSchema = z.object({
   workflowRunHooks: z.array(z.string()).optional(),
   acknowledgeArtifactDrift: z
     .record(z.string(), z.object({ expected: z.string(), actual: z.string() }))
+    .optional(),
+  factorySetup: z
+    .object({
+      callStepId: z.string().min(1),
+      source: ContractSourceSchema.optional(),
+      address: z.string().optional(),
+      signature: z.string().optional(),
+      payable: z.boolean().optional(),
+      args: z.record(z.string(), z.unknown()).optional(),
+      products: z.record(z.string(), ContractSourceSchema).optional(),
+    })
     .optional(),
 });
 

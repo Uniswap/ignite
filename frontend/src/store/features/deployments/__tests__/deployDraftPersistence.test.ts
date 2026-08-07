@@ -7,6 +7,10 @@ import {
   seedDraft,
   selectContractType,
   toggleChain,
+  startFactoryDraft,
+  setFactorySetup,
+  setFactoryProduct,
+  applyFactorySetup,
 } from '../deployDraftSlice';
 import {
   DEPLOY_DRAFT_STORAGE_KEY,
@@ -178,5 +182,50 @@ describe('deployDraftPersistence', () => {
       },
     };
     expect(() => saveDraft(draftWithContracts(), storage)).not.toThrow();
+  });
+
+  it('round-trips a materialized factory draft', () => {
+    // The strategy union used to lack the factory variant, so a reload
+    // silently discarded the whole factory draft.
+    const storage = fakeStorage();
+    let draft = deployDraftReducer(undefined, startFactoryDraft());
+    draft = deployDraftReducer(
+      draft,
+      setFactorySetup({
+        source: contract('factory-art', 'Factory'),
+        address: `0x${'21'.repeat(20)}` as `0x${string}`,
+      })
+    );
+    draft = deployDraftReducer(
+      draft,
+      setFactorySetup({
+        signature:
+          'deploy(address owner, bytes32 salt) returns (address jar, address releaser)',
+      })
+    );
+    draft = deployDraftReducer(
+      draft,
+      setFactoryProduct({ output: 'jar', source: contract('jar-art', 'TokenJar') })
+    );
+    draft = deployDraftReducer(
+      draft,
+      setFactoryProduct({
+        output: 'releaser',
+        source: contract('rel-art', 'ExchangeReleaser'),
+      })
+    );
+    draft = deployDraftReducer(draft, applyFactorySetup());
+    expect(draft.contracts.length).toBe(2);
+
+    saveDraft(draft, storage);
+
+    expect(loadDraft(storage)).toEqual(draft);
+  });
+
+  it('still refuses a pre-materialization factory setup without contracts', () => {
+    const storage = fakeStorage();
+    const draft = deployDraftReducer(undefined, startFactoryDraft());
+    saveDraft(draft, storage);
+    expect(loadDraft(storage)).toBeUndefined();
   });
 });
