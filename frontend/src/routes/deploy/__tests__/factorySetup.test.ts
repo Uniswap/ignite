@@ -5,7 +5,9 @@ import type {
   DraftCallStep,
   FactoryDraftSetup,
 } from '../../../store/features/deployments/types';
+import { deployDraftInitialState } from '../../../store/features/deployments/deployDraftSlice';
 import { factorySetupBlocker } from '../steps/FactorySetupStep';
+import { factoryEntryAction } from '../DeployWizardPage';
 
 const SIGNATURE =
   'deploy(address owner, bytes32 salt) returns (address jar, address releaser)';
@@ -100,5 +102,41 @@ describe('factorySetupBlocker', () => {
     expect(
       factorySetupBlocker({ ...completeSetup(), address: undefined }, blank)
     ).toBe('Enter the factory address');
+  });
+});
+
+describe('factoryEntryAction', () => {
+  const empty = deployDraftInitialState;
+
+  it('starts the flow only into an empty draft', () => {
+    expect(factoryEntryAction('factory', empty)).toBe('start');
+    expect(
+      factoryEntryAction('factory', {
+        ...empty,
+        contracts: [source('a', 'A')],
+      })
+    ).toBe('none');
+    expect(
+      factoryEntryAction('factory', {
+        ...empty,
+        factorySetup: { callStepId: 'c' },
+      })
+    ).toBe('none');
+  });
+
+  it('clears an abandoned setup when entering the plain wizard', () => {
+    // Backing out of the flow before materialization must not leave "New
+    // deployment" opening onto the factory step.
+    expect(
+      factoryEntryAction(null, { ...empty, factorySetup: { callStepId: 'c' } })
+    ).toBe('clear');
+    expect(
+      factoryEntryAction(null, {
+        ...empty,
+        factorySetup: { callStepId: 'c' },
+        contracts: [source('a', 'A')],
+      })
+    ).toBe('none');
+    expect(factoryEntryAction(null, empty)).toBe('none');
   });
 });
