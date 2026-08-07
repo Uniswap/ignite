@@ -59,6 +59,38 @@ describe('ArtifactPicker version pins', () => {
     }
   });
 
+  it('omits the contract-type source section when the caller opts out', () => {
+    // In the factory flow the section reads as a classification field ("is
+    // this immutable?") and a bare proxy template is never the right answer,
+    // so the flow hides it. Everywhere else stays unchanged by default.
+    const originalDocument = globalThis.document;
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true,
+      value: { createElement: () => ({ getContext: () => null }) },
+    });
+    try {
+      const store = configureStore({
+        reducer: { compiler: compilerReducer, profiles: profilesReducer, repositories: repositoriesReducer },
+      });
+      const render = (showContractTypes?: boolean) => renderToStaticMarkup(
+        createElement(
+          Provider,
+          {
+            store,
+            children: createElement(ArtifactPicker, {
+              onSelect: () => undefined,
+              ...(showContractTypes === undefined ? {} : { showContractTypes }),
+            } as never),
+          }
+        )
+      );
+      expect(render()).toContain('Contract type');
+      expect(render(false)).not.toContain('Contract type');
+    } finally {
+      Object.defineProperty(globalThis, 'document', { configurable: true, value: originalDocument });
+    }
+  });
+
   it('carries a tag refKind into a schema-valid source pin', () => {
     const version: RepoVersionSummary = {
       url: 'https://example.test/contracts.git',

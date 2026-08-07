@@ -126,9 +126,15 @@ export function repoChoicesFor(repositories: RepoList | null): RepoChoice[] {
 export default function ArtifactPicker({
   value,
   onSelect,
+  showContractTypes = true,
 }: {
   value?: ContractSource;
   onSelect: (contract: ContractSource, abi: ArtifactData['abi']) => void;
+  // The contract-type section offers artifacts SOURCED from contract-type
+  // plugins (standard proxy templates). Callers where that reads as a
+  // classification field — the factory flow's product mapping, whose steps
+  // are plain immutable deployments — hide it rather than confuse the two.
+  showContractTypes?: boolean;
 }) {
   const dispatch = useAppDispatch();
   const repositories = useAppSelector(
@@ -223,6 +229,7 @@ export default function ArtifactPicker({
     dispatch(clearArtifactWait({ repoPath: scopeKey, ...(effectiveFramework ? { frameworkId: effectiveFramework } : {}) }));
   }, [dispatch, scopeKey, effectiveFramework]);
   useEffect(() => {
+    if (!showContractTypes) return;
     let cancelled = false;
     void apiClient.request('listContractTypes', {}).then((response) => {
       if ('data' in response && !cancelled) {
@@ -233,7 +240,7 @@ export default function ArtifactPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [showContractTypes]);
 
   const groupedArtifacts = useMemo(
     () => groupArtifactVariants(artifacts ?? []),
@@ -401,48 +408,51 @@ export default function ArtifactPicker({
           )}
         </div>
       )}
-      <section className="grid gap-2">
-        <span className="eyebrow">Contract type</span>
-        <Select
-          options={contractTypes.map((type) => ({
-            value: type.pluginId,
-            label: `${type.label} (${type.versionLabel})`,
-          }))}
-          value={contractTypeId}
-          requireSelection
-          placeholder="Select contract type"
-          onValueChange={setContractTypeId}
-        />
-        {selectedType && (
-          <div className="glass-list">
-            {selectedType.artifacts.map((artifactKey) => (
-              <button
-                key={artifactKey}
-                type="button"
-                className="list-row clickable text-left"
-                onClick={() =>
-                  void chooseContractType(selectedType, artifactKey)
-                }
-              >
-                <div className="font-medium">{artifactKey}</div>
-                <div className="mono-data text-muted">
-                  {selectedType.pluginId}
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
-        {requiresGrant.map((pluginId) => (
-          <button
-            key={pluginId}
-            type="button"
-            disabled
-            className="input-glass text-sm text-muted opacity-60 text-left"
-          >
-            {pluginId} — grant contract bytecode access to select its artifacts.
-          </button>
-        ))}
-      </section>
+      {showContractTypes && (
+        <section className="grid gap-2">
+          <span className="eyebrow">Contract type</span>
+          <Select
+            options={contractTypes.map((type) => ({
+              value: type.pluginId,
+              label: `${type.label} (${type.versionLabel})`,
+            }))}
+            value={contractTypeId}
+            requireSelection
+            placeholder="Select contract type"
+            onValueChange={setContractTypeId}
+          />
+          {selectedType && (
+            <div className="glass-list">
+              {selectedType.artifacts.map((artifactKey) => (
+                <button
+                  key={artifactKey}
+                  type="button"
+                  className="list-row clickable text-left"
+                  onClick={() =>
+                    void chooseContractType(selectedType, artifactKey)
+                  }
+                >
+                  <div className="font-medium">{artifactKey}</div>
+                  <div className="mono-data text-muted">
+                    {selectedType.pluginId}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+          {requiresGrant.map((pluginId) => (
+            <button
+              key={pluginId}
+              type="button"
+              disabled
+              className="input-glass text-sm text-muted opacity-60 text-left"
+            >
+              {pluginId} — grant contract bytecode access to select its
+              artifacts.
+            </button>
+          ))}
+        </section>
+      )}
       <AddVersionModal
         variant="add"
         open={addVersionOpen}

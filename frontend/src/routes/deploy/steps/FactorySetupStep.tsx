@@ -152,6 +152,7 @@ export default function FactorySetupStep({
             <div className="mt-2">
               <ArtifactPicker
                 value={setup.source}
+                showContractTypes={false}
                 onSelect={(contract) =>
                   dispatch(setFactorySetup({ source: contract }))
                 }
@@ -160,6 +161,7 @@ export default function FactorySetupStep({
           </details>
         ) : (
           <ArtifactPicker
+            showContractTypes={false}
             onSelect={(contract) =>
               dispatch(setFactorySetup({ source: contract }))
             }
@@ -274,6 +276,7 @@ export default function FactorySetupStep({
                     <div className="mt-2">
                       <ArtifactPicker
                         value={mapped}
+                        showContractTypes={false}
                         onSelect={(contract) =>
                           dispatch(
                             setFactoryProduct({ output, source: contract })
@@ -284,6 +287,7 @@ export default function FactorySetupStep({
                   </details>
                 ) : (
                   <ArtifactPicker
+                    showContractTypes={false}
                     onSelect={(contract) =>
                       dispatch(setFactoryProduct({ output, source: contract }))
                     }
