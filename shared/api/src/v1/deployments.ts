@@ -126,7 +126,13 @@ export type DeployStrategy =
   // product: the first broadcasts, the rest set `fulfilledBy` to it and send no
   // transaction of their own, so each product keeps a step id that later steps
   // can point at.
-  | { kind: 'factory'; target: CallTarget; targetPerChain?: Record<string, CallTarget>; signature: string; args?: ArgValues; argsPerChain?: Record<string, Partial<ArgValues>>; output?: string; fulfilledBy?: string; acknowledgeDeployed?: AckMap };
+  // A product is deployed by a factory call. `fulfilledBy` names the step that
+  // makes that call — ordinarily a plain call step, so the transaction is
+  // modelled as what it is and no product has to carry it. `output` selects
+  // which of the call's returned addresses this product is. A factory step may
+  // instead carry the call itself (target/signature/args) when it is the only
+  // product.
+  | { kind: 'factory'; target?: CallTarget; targetPerChain?: Record<string, CallTarget>; signature?: string; args?: ArgValues; argsPerChain?: Record<string, Partial<ArgValues>>; output?: string; fulfilledBy?: string; acknowledgeDeployed?: AckMap };
 export type CallTarget = { kind: 'step'; stepId: string } | { kind: 'address'; address: Hex };
 export interface CallStep {
   id: string; kind: 'call'; target: CallTarget; targetPerChain?: Record<string, CallTarget>;
@@ -237,7 +243,12 @@ export const DeployStrategySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('create') }),
   z.object({ kind: z.literal('create2'), salt: Hex32Schema, saltPerChain: z.record(ChainIdKeySchema, Hex32Schema).optional(), acknowledgeDeployed: AckMapSchema.optional() }),
   z.object({ kind: z.literal('plugin'), pluginId: z.string().min(1), params: z.record(z.string(), z.unknown()).optional(), salt: Hex32Schema.optional(), saltPerChain: z.record(ChainIdKeySchema, Hex32Schema).optional(), prepared: z.record(ChainIdKeySchema, z.object({ initcodeHash: Hex32Schema, predictedAddress: AddressSchema })).optional(), acknowledgeDeployed: AckMapSchema.optional() }),
-  z.object({ kind: z.literal('factory'), target: z.lazy(() => CallTargetSchema), targetPerChain: z.record(ChainIdKeySchema, z.lazy(() => CallTargetSchema)).optional(), signature: z.string().min(1).max(512).regex(FN_SIGNATURE, 'signature must be a canonical function signature'), args: ArgValuesSchema.optional(), argsPerChain: z.record(ChainIdKeySchema, ArgValuesSchema).optional(), output: z.string().min(1).max(128).optional(), fulfilledBy: z.string().min(1).optional(), acknowledgeDeployed: AckMapSchema.optional() }),
+  z.object({ kind: z.literal('factory'), target: z.lazy(() => CallTargetSchema).optional(), targetPerChain: z.record(ChainIdKeySchema, z.lazy(() => CallTargetSchema)).optional(), signature: z.string().min(1).max(512).regex(FN_SIGNATURE, 'signature must be a canonical function signature').optional(), args: ArgValuesSchema.optional(), argsPerChain: z.record(ChainIdKeySchema, ArgValuesSchema).optional(), output: z.string().min(1).max(128).optional(), fulfilledBy: z.string().min(1).optional(), acknowledgeDeployed: AckMapSchema.optional() })
+    // Either another step makes the call, or this step carries it itself.
+    .superRefine((strategy, ctx) => {
+      if (!strategy.fulfilledBy && (!strategy.target || !strategy.signature))
+        ctx.addIssue({ code: 'custom', message: 'a factory deployment needs either fulfilledBy or a target and signature' });
+    }),
 ]) satisfies z.ZodType<DeployStrategy>;
 export const CallTargetSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('step'), stepId: z.string().min(1) }),

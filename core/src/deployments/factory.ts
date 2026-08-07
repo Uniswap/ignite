@@ -53,7 +53,7 @@ export function isInitcodeStrategy(
 export function mergeFactoryTarget(
   strategy: FactoryStrategy,
   chainId: number
-): CallTarget {
+): CallTarget | undefined {
   return strategy.targetPerChain?.[String(chainId)] ?? strategy.target;
 }
 
@@ -89,6 +89,11 @@ export function buildFactoryCalldata(
   } = {}
 ): Hex {
   const strategy = step.strategy;
+  if (!strategy.signature)
+    throw new IgniteError(
+      `Factory step ${step.id} carries no deploy function`,
+      'SIGNATURE_NOT_IN_ABI'
+    );
   const fn = abiFunction(strategy.signature, 'Factory');
   // Reuse the shared arg pipeline so pointers, $encode and coercion behave
   // exactly as they do for constructor and call arguments.
@@ -118,6 +123,11 @@ export function resolveFactoryAddress(
   resolveRef: (stepId: string) => Hex
 ): Hex {
   const target = mergeFactoryTarget(strategy, chainId);
+  if (!target)
+    throw new IgniteError(
+      'Factory deployment carries no factory address',
+      ErrorCodes.ARG_TYPE_MISMATCH
+    );
   return target.kind === 'address' ? target.address : resolveRef(target.stepId);
 }
 
@@ -157,7 +167,9 @@ export function factoryProductOutputs(
 ): Array<{ name: string; index: number }> {
   const fn = abiFunction(signature, 'Factory');
   return fn.outputs.flatMap((output, index) =>
-    output.type === 'address' ? [{ name: output.name || `output${index}`, index }] : []
+    output.type === 'address'
+      ? [{ name: output.name || `output${index}`, index }]
+      : []
   );
 }
 
@@ -171,12 +183,21 @@ export function decodeFactoryProducts(
   result: Hex
 ): Record<string, Hex> {
   const fn = abiFunction(signature, 'Factory');
-  const decoded = decodeFunctionResult({ abi: [fn], functionName: fn.name, data: result });
+  const decoded = decodeFunctionResult({
+    abi: [fn],
+    functionName: fn.name,
+    data: result,
+  });
   const values = Array.isArray(decoded) ? decoded : [decoded];
   const products: Record<string, Hex> = {};
   fn.outputs.forEach((output, index) => {
     const value = values[index];
-    if (output.type !== 'address' || typeof value !== 'string' || !isAddress(value)) return;
+    if (
+      output.type !== 'address' ||
+      typeof value !== 'string' ||
+      !isAddress(value)
+    )
+      return;
     products[output.name || `output${index}`] = value as Hex;
   });
   return products;
@@ -192,6 +213,8 @@ export function productAddress(
 }
 
 /** A product whose transaction is another step's factory call. */
-export function fulfillingStepId(strategy: FactoryStrategy): string | undefined {
+export function fulfillingStepId(
+  strategy: FactoryStrategy
+): string | undefined {
   return strategy.fulfilledBy;
 }

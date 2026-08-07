@@ -75,28 +75,35 @@ describe('factory deployment strategy', () => {
     const step = factoryStep({
       targetPerChain: { '8453': { kind: 'address', address: other } },
     });
-    expect(resolveFactoryAddress(step.strategy, 8453, unresolvable)).toBe(other);
+    expect(resolveFactoryAddress(step.strategy, 8453, unresolvable)).toBe(
+      other
+    );
     expect(resolveFactoryAddress(step.strategy, 1, unresolvable)).toBe(FACTORY);
-    expect(mergeFactoryTarget(step.strategy, 8453).kind).toBe('address');
+    expect(mergeFactoryTarget(step.strategy, 8453)?.kind).toBe('address');
   });
 
   // A deploy function that returns addresses declares its products, and names
   // them: that is how one call is known to produce more than one contract.
   it('reads the products a deploy function declares from its ABI', () => {
     expect(
-      factoryProductOutputs('deploy(address,bytes32) returns (address jar, address releaser)')
+      factoryProductOutputs(
+        'deploy(address,bytes32) returns (address jar, address releaser)'
+      )
     ).toEqual([
       { name: 'jar', index: 0 },
       { name: 'releaser', index: 1 },
     ]);
     // Non-address returns are not products.
     expect(
-      factoryProductOutputs('deploy(bytes32) returns (address jar, uint256 fee)')
+      factoryProductOutputs(
+        'deploy(bytes32) returns (address jar, uint256 fee)'
+      )
     ).toEqual([{ name: 'jar', index: 0 }]);
   });
 
   it('decodes every product of one call and picks each step its own', () => {
-    const signature = 'deploy(address,bytes32) returns (address jar, address releaser)';
+    const signature =
+      'deploy(address,bytes32) returns (address jar, address releaser)';
     const fn = parseAbiItem(`function ${signature}`) as AbiFunction;
     const result = encodeFunctionResult({
       abi: [fn],
@@ -106,9 +113,13 @@ describe('factory deployment strategy', () => {
     // viem returns checksummed addresses, so compare case-insensitively.
     const products = decodeFactoryProducts(signature, result);
     expect(Object.keys(products)).toEqual(['jar', 'releaser']);
-    expect(productAddress(products, 'releaser')?.toLowerCase()).toBe(PRODUCT.toLowerCase());
+    expect(productAddress(products, 'releaser')?.toLowerCase()).toBe(
+      PRODUCT.toLowerCase()
+    );
     // No named output falls back to the first address returned.
-    expect(productAddress(products, undefined)?.toLowerCase()).toBe(OWNER.toLowerCase());
+    expect(productAddress(products, undefined)?.toLowerCase()).toBe(
+      OWNER.toLowerCase()
+    );
     expect(productAddress(products, 'missing')).toBeUndefined();
   });
 

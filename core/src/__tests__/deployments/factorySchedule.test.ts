@@ -49,7 +49,11 @@ function plan(): DeploymentPlan {
         id: 'deploy-releaser',
         kind: 'deploy',
         contractId: 'releaser',
-        strategy: { ...strategy, output: 'releaser', fulfilledBy: 'deploy-jar' },
+        strategy: {
+          ...strategy,
+          output: 'releaser',
+          fulfilledBy: 'deploy-jar',
+        },
       },
     ] as never,
   };
@@ -135,6 +139,108 @@ describe('factory deployments producing several contracts', () => {
       const entry = snapshot.entries[id];
       expect(entry && 'absent' in entry ? entry.reason : undefined).toMatch(
         /RPC/i
+      );
+    }
+  });
+});
+
+describe('a factory call step deploying several products', () => {
+  // The honest shape: the transaction is a call step, and every product points
+  // at it. No product carries the call, so none is privileged — selecting a
+  // "main" contract is not something the operator should have to do.
+  function callPlan(): DeploymentPlan {
+    return {
+      schemaVersion: 1,
+      contracts: [{ id: 'jar' }, { id: 'releaser' }] as never,
+      chains: [CHAIN],
+      signers: {
+        global: {
+          pluginId: 'private-key',
+          accountId: 'k',
+          address: SIGNER,
+        } as never,
+      },
+      steps: [
+        {
+          id: 'call-factory',
+          kind: 'call',
+          target: { kind: 'address', address: FACTORY },
+          signature: SIGNATURE,
+          args: { arg0: SIGNER, arg1: `0x${'11'.repeat(32)}` },
+        },
+        {
+          id: 'product-jar',
+          kind: 'deploy',
+          contractId: 'jar',
+          strategy: {
+            kind: 'factory',
+            fulfilledBy: 'call-factory',
+            output: 'jar',
+          },
+        },
+        {
+          id: 'product-releaser',
+          kind: 'deploy',
+          contractId: 'releaser',
+          strategy: {
+            kind: 'factory',
+            fulfilledBy: 'call-factory',
+            output: 'releaser',
+          },
+        },
+      ] as never,
+    };
+  }
+
+  const callSigners = new Map([
+    ['call-factory', SIGNER],
+    ['product-jar', SIGNER],
+    ['product-releaser', SIGNER],
+  ]);
+
+  it('predicts both products from the call step, with neither carrying it', async () => {
+    const calls: Array<{ to: Hex; data: Hex }> = [];
+    const snapshot = await buildChainPredictions(callPlan(), frozen, CHAIN, {
+      client: client(calls),
+      signers: callSigners,
+    });
+    expect(calls).toHaveLength(1);
+    const address = (id: string) => {
+      const entry = snapshot.entries[id];
+      return entry && 'predictedAddress' in entry
+        ? entry.predictedAddress.toLowerCase()
+        : undefined;
+    };
+    expect(address('product-jar')).toBe(JAR.toLowerCase());
+    expect(address('product-releaser')).toBe(RELEASER.toLowerCase());
+  });
+
+  it('sends only the call, and both products carry their addresses', async () => {
+    const target = callPlan();
+    const snapshot = await buildChainPredictions(target, frozen, CHAIN, {
+      client: client([]),
+      signers: callSigners,
+    });
+    const schedule = buildSchedule(target, frozen, CHAIN, {
+      signers: callSigners,
+      predictions: Object.fromEntries(
+        Object.entries(snapshot.entries).flatMap(([id, entry]) =>
+          entry && 'predictedAddress' in entry ? [[id, entry]] : []
+        )
+      ) as never,
+    });
+    expect(schedule.filter((entry) => entry.kind === 'tx')).toHaveLength(1);
+    expect(schedule.find((entry) => entry.stepId === 'call-factory')?.to).toBe(
+      FACTORY
+    );
+    for (const [id, expected] of [
+      ['product-jar', JAR],
+      ['product-releaser', RELEASER],
+    ] as const) {
+      const entry = schedule.find((item) => item.stepId === id);
+      expect(entry?.kind).not.toBe('tx');
+      expect(entry?.predictedAddress?.toLowerCase()).toBe(
+        expected.toLowerCase()
       );
     }
   });
