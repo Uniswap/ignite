@@ -114,7 +114,13 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           options={[
             { value: 'create', label: 'Create' },
             { value: 'create2', label: 'Create2' },
-            { value: 'factory', label: 'Factory (call an existing factory)' },
+            // The per-step Factory door is retired in favour of the
+            // "Deploy via factory" flow; the option is listed only while the
+            // step already carries the strategy (hydrated workflows, existing
+            // drafts) so the Select can still display and leave it.
+            ...(strategy.kind === 'factory'
+              ? [{ value: 'factory', label: 'Factory (call an existing factory)' }]
+              : []),
             ...types.map((item) => ({
               value: `plugin:${item.pluginId}`,
               label: item.label,
@@ -123,9 +129,22 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           onValueChange={selectStrategy}
         />
       </label>
-      {strategy.kind === 'factory' && (
-        <FactoryStrategyFields stepId={stepId} strategy={strategy} />
-      )}
+      {strategy.kind === 'factory' &&
+        (strategy.fulfilledBy ? (
+          <p className="text-sm text-muted">
+            Deployed by this run&apos;s factory call
+            {strategy.output ? (
+              <>
+                {' '}
+                as output <span className="mono-data">{strategy.output}</span>
+              </>
+            ) : null}
+            . The call&apos;s address and arguments live on its step; the
+            Factory step changes the function and product mapping.
+          </p>
+        ) : (
+          <FactoryStrategyFields stepId={stepId} strategy={strategy} />
+        ))}
       {strategy.kind === 'create2' && (
         <>
           <label className="grid gap-1">
@@ -243,7 +262,10 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           </label>
         );
       })}
-      {strategy.kind !== 'create' && staticChains.length > 0 && (
+      {/* Factory products are predicted by the validation-time eth_call of
+          the deploy function; the prepare endpoint deliberately rejects them
+          ("Only create2 and plugin steps can be prepared"). */}
+      {strategy.kind !== 'create' && strategy.kind !== 'factory' && staticChains.length > 0 && (
         <div className="flex gap-2 items-center">
           <button
             type="button"
@@ -264,7 +286,7 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           )}
         </div>
       )}
-      {strategy.kind !== 'create' && dynamicChains.length > 0 && (
+      {strategy.kind !== 'create' && strategy.kind !== 'factory' && dynamicChains.length > 0 && (
         <p className="text-xs text-muted">
           Salt is mined during the run against live addresses on:{' '}
           {dynamicChainNames.join(', ')}. Flags and a provisional address appear
