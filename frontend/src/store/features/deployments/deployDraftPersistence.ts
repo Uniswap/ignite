@@ -170,7 +170,6 @@ const PersistedDraftSchema = z.object({
       address: z.string().optional(),
       signature: z.string().optional(),
       payable: z.boolean().optional(),
-      args: z.record(z.string(), z.unknown()).optional(),
       products: z.record(z.string(), ContractSourceSchema).optional(),
     })
     .optional(),

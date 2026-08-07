@@ -501,10 +501,6 @@ describe('deploy-via-factory flow', () => {
     );
     state = deployDraftReducer(
       state,
-      setFactorySetup({ args: { owner: FACTORY_ADDRESS, salt: `0x${'11'.repeat(32)}` } })
-    );
-    state = deployDraftReducer(
-      state,
       setFactoryProduct({ output: 'jar', source: jarArtifact })
     );
     state = deployDraftReducer(
@@ -529,17 +525,16 @@ describe('deploy-via-factory flow', () => {
     expect(deployDraftReducer(active, startFactoryDraft())).toEqual(active);
   });
 
-  it('a new factory source clears function, args and product mappings', () => {
+  it('a new factory source clears the function and product mappings', () => {
     const state = deployDraftReducer(
       setupState(),
       setFactorySetup({ source: contract('other-art', 'OtherFactory') })
     );
     expect(state.factorySetup?.signature).toBeUndefined();
-    expect(state.factorySetup?.args).toBeUndefined();
     expect(state.factorySetup?.products).toBeUndefined();
   });
 
-  it('a new deploy function clears args and product mappings', () => {
+  it('a new deploy function clears the product mappings', () => {
     const state = deployDraftReducer(
       setupState(),
       setFactorySetup({
@@ -547,7 +542,6 @@ describe('deploy-via-factory flow', () => {
         payable: true,
       })
     );
-    expect(state.factorySetup?.args).toBeUndefined();
     expect(state.factorySetup?.products).toBeUndefined();
     expect(state.factorySetup?.payable).toBe(true);
   });
@@ -566,8 +560,10 @@ describe('deploy-via-factory flow', () => {
       kind: 'call',
       target: { kind: 'address', address: FACTORY_ADDRESS },
       signature: SIGNATURE,
-      args: { owner: FACTORY_ADDRESS },
     });
+    // Arguments are the call step's business: they are filled on its card in
+    // Steps, where the full editor (pointers, signer fill, per-chain) lives.
+    expect(state.steps[0].args).toBeUndefined();
     expect(state.contracts.map((entry) => entry.id)).toEqual([
       'jar-art:jar',
       'rel-art:releaser',
@@ -587,7 +583,6 @@ describe('deploy-via-factory flow', () => {
       output: 'releaser',
     });
     // The call step is the single source of truth from here on.
-    expect(state.factorySetup?.args).toBeUndefined();
     expect(state.factorySetup?.address).toBeUndefined();
   });
 
@@ -657,6 +652,10 @@ describe('deploy-via-factory flow', () => {
   it('a post-generation function change rewrites the call and drops stale args', () => {
     let state = deployDraftReducer(setupState(), applyFactorySetup());
     const callId = state.factorySetup!.callStepId;
+    state = deployDraftReducer(
+      state,
+      setArg({ stepId: callId, key: 'owner', value: FACTORY_ADDRESS })
+    );
     state = deployDraftReducer(
       state,
       setFactorySetup({

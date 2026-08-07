@@ -582,11 +582,9 @@ const deployDraftSlice = createSlice({
       if (patch.source && patch.source.id !== setup.source?.id) {
         delete setup.signature;
         delete setup.payable;
-        delete setup.args;
         delete setup.products;
       }
       if (patch.signature !== undefined && patch.signature !== setup.signature) {
-        delete setup.args;
         delete setup.products;
         // Post-generation the call step carries the committed structure:
         // switch its function immediately and drop args keyed to the old
@@ -635,6 +633,8 @@ const deployDraftSlice = createSlice({
       if (mappings.some((entry) => entry === undefined)) return;
       const callId = setup.callStepId;
       if (!state.steps.some((step) => step.id === callId && step.kind === 'call')) {
+        // Created argument-less on purpose: the call's arguments are filled
+        // on its step card in Steps, where the full editor lives.
         state.steps.unshift({
           id: callId,
           kind: 'call',
@@ -643,9 +643,6 @@ const deployDraftSlice = createSlice({
             : null,
           signature: setup.signature,
           ...(setup.payable ? { payable: true } : {}),
-          ...(setup.args && Object.keys(setup.args).length
-            ? { args: cloneJson(setup.args) }
-            : {}),
         });
       }
       const generated = state.steps.filter((step) => {
@@ -690,10 +687,9 @@ const deployDraftSlice = createSlice({
           strategy: { kind: 'factory', fulfilledBy: callId, output: entry.output },
         };
       }
-      // The call step owns address and args from here; stale staging would
-      // shadow operator edits on the next apply.
+      // The call step owns the address from here; stale staging would shadow
+      // operator edits on the next apply.
       delete setup.address;
-      delete setup.args;
     },
     toggleChain(state, action: PayloadAction<number>) {
       const chainId = action.payload;

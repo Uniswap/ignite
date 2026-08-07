@@ -3,10 +3,8 @@ import { Loader2 } from 'lucide-react';
 import type { Hex } from '@ignite/api';
 import ArtifactPicker from '../../../components/ArtifactPicker';
 import Select from '../../../components/Select';
-import AbiArgField, { type AbiInput } from '../components/AbiArgField';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import {
-  setArg,
   setCallStepField,
   setFactoryProduct,
   setFactorySetup,
@@ -22,7 +20,6 @@ import {
 import {
   deployCandidates,
   factoryCallSignature,
-  parsedFactoryFunction,
   productsOf,
 } from '../../../utils/factorySignatures';
 
@@ -78,17 +75,12 @@ export default function FactorySetupStep({
     ? factoryArtifacts[setup.source.id]?.abi
     : undefined;
   const candidates = useMemo(() => deployCandidates(factoryAbi), [factoryAbi]);
-  const fn = useMemo(
-    () => parsedFactoryFunction(setup.signature),
-    [setup.signature]
-  );
   const outputs = useMemo(() => productsOf(setup.signature), [setup.signature]);
   const factoryEntry = setup.source
     ? factoryEntries[setup.source.id]
     : undefined;
   const address =
     call?.target?.kind === 'address' ? call.target.address : setup.address;
-  const args = call ? call.args : setup.args;
   const setAddress = (value: string) => {
     if (call) {
       dispatch(
@@ -104,13 +96,6 @@ export default function FactorySetupStep({
         setFactorySetup({ address: (value || undefined) as Hex | undefined })
       );
     }
-  };
-  const setArgValue = (key: string, value: unknown) => {
-    if (call) dispatch(setArg({ stepId: call.id, key, value }));
-    else
-      dispatch(
-        setFactorySetup({ args: { ...(setup.args ?? {}), [key]: value } })
-      );
   };
 
   return (
@@ -296,24 +281,10 @@ export default function FactorySetupStep({
               </div>
             );
           })}
-        </section>
-      )}
-
-      {fn && (fn.inputs ?? []).length > 0 && (
-        <section className="grid gap-3">
-          <span className="eyebrow">Arguments</span>
-          {(fn.inputs as unknown as AbiInput[]).map((input, index) => {
-            const key = input.name || `arg${index}`;
-            return (
-              <AbiArgField
-                key={key}
-                input={input}
-                fieldKey={key}
-                value={args?.[key]}
-                onChange={(value) => setArgValue(key, value)}
-              />
-            );
-          })}
+          <span className="text-xs text-muted">
+            The call&apos;s arguments are filled on its Factory call card in
+            Steps, with pointers, signer fill and per-chain overrides.
+          </span>
         </section>
       )}
     </section>

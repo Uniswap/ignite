@@ -97,10 +97,11 @@ export interface DraftDeployExtras {
 
 // The "Deploy via factory" flow's composer state. Structure (which factory,
 // which function, which artifact each output becomes) lives here for the
-// whole session; address and args are only STAGED here until the call step
-// exists — afterwards the generated call step is the single source of truth,
-// or edits made on its card and edits made in the setup step would silently
-// overwrite each other.
+// whole session; the address is only STAGED here until the call step exists —
+// afterwards the generated call step is the single source of truth, or edits
+// made on its card and edits made in the setup step would silently overwrite
+// each other. The call's arguments never live here at all: they are filled on
+// the call step's card in Steps, which has the full argument editor.
 export interface FactoryDraftSetup {
   // Minted once when the flow starts so re-applying the setup reconciles the
   // same call step instead of accumulating new ones.
@@ -110,7 +111,6 @@ export interface FactoryDraftSetup {
   address?: Hex;
   signature?: string;
   payable?: boolean;
-  args?: Record<string, unknown>;
   // Output name -> the artifact deployed under that name.
   products?: Record<string, DraftContract>;
 }
