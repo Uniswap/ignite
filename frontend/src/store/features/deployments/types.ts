@@ -62,8 +62,9 @@ export interface DraftDeployExtras {
     | { kind: 'create' }
     | { kind: 'create2'; salt?: Hex32; saltPerChain?: Record<string, Hex32> }
     | { kind: 'plugin'; pluginId: string; params?: Record<string, unknown> }
-    // Deploys by calling an already-deployed factory. The product address is
-    // predicted by the factory's own helper, or by raw CREATE2 as a fallback.
+    // Deploys by calling an already-deployed factory. Product addresses come
+    // from an eth_call of the deploy function itself, so no predict helper or
+    // salt reconstruction is involved.
     | {
         kind: 'factory';
         // The factory's own contract, whose ABI drives the wizard, and the
@@ -92,6 +93,26 @@ export interface DraftDeployExtras {
   >;
   acknowledged?: AckMap;
   needsPrepare?: boolean;
+}
+
+// The "Deploy via factory" flow's composer state. Structure (which factory,
+// which function, which artifact each output becomes) lives here for the
+// whole session; address and args are only STAGED here until the call step
+// exists — afterwards the generated call step is the single source of truth,
+// or edits made on its card and edits made in the setup step would silently
+// overwrite each other.
+export interface FactoryDraftSetup {
+  // Minted once when the flow starts so re-applying the setup reconciles the
+  // same call step instead of accumulating new ones.
+  callStepId: string;
+  // The factory's own artifact. Never deployed; its ABI drives the pickers.
+  source?: DraftContract;
+  address?: Hex;
+  signature?: string;
+  payable?: boolean;
+  args?: Record<string, unknown>;
+  // Output name -> the artifact deployed under that name.
+  products?: Record<string, DraftContract>;
 }
 
 export interface DraftRpcSelection {
@@ -130,6 +151,7 @@ export interface DeployDraftState {
   workflowRunHooks?: string[];
   acknowledgeArtifactDrift?: ArtifactDriftAcknowledgements;
   contractTypeSelectionPending?: boolean;
+  factorySetup?: FactoryDraftSetup;
 }
 
 export type GasOverrideKey = keyof GasOverrides;

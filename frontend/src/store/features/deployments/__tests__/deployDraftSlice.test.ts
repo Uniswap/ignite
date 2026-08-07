@@ -24,6 +24,10 @@ import {
   setStrategy,
   setStepSigner,
   storePrepared,
+  startFactoryDraft,
+  setFactorySetup,
+  setFactoryProduct,
+  applyFactorySetup,
 } from '../deployDraftSlice';
 import { contractSourceId } from '../../../../utils/contractSourceId';
 
@@ -472,5 +476,260 @@ describe('deployDraftSlice', () => {
 
     const cleared = deployDraftReducer(state, draftLaunched(launchedKey));
     expect(cleared).toEqual(deployDraftInitialState);
+  });
+});
+
+describe('deploy-via-factory flow', () => {
+  const FACTORY_ADDRESS = '0x2179a60856E37dfeAacA0ab043B931fE224b27B6';
+  const SIGNATURE =
+    'deploy(address owner, bytes32 salt) returns (address jar, address releaser)';
+  const jarArtifact = contract('jar-art', 'TokenJar');
+  const releaserArtifact = contract('rel-art', 'ExchangeReleaser');
+
+  function setupState() {
+    let state = deployDraftReducer(undefined, startFactoryDraft());
+    state = deployDraftReducer(
+      state,
+      setFactorySetup({
+        source: contract('factory-art', 'Factory'),
+        address: FACTORY_ADDRESS as `0x${string}`,
+      })
+    );
+    state = deployDraftReducer(
+      state,
+      setFactorySetup({ signature: SIGNATURE, payable: false })
+    );
+    state = deployDraftReducer(
+      state,
+      setFactorySetup({ args: { owner: FACTORY_ADDRESS, salt: `0x${'11'.repeat(32)}` } })
+    );
+    state = deployDraftReducer(
+      state,
+      setFactoryProduct({ output: 'jar', source: jarArtifact })
+    );
+    state = deployDraftReducer(
+      state,
+      setFactoryProduct({ output: 'releaser', source: releaserArtifact })
+    );
+    return state;
+  }
+
+  it('startFactoryDraft seeds an empty draft with a minted call step id', () => {
+    const state = deployDraftReducer(undefined, startFactoryDraft());
+    expect(state.contracts).toEqual([]);
+    expect(state.steps).toEqual([]);
+    expect(state.factorySetup?.callStepId).toMatch(/^call-factory-/);
+  });
+
+  it('startFactoryDraft never clobbers an active draft', () => {
+    const active = deployDraftReducer(
+      undefined,
+      seedDraft([contract('token', 'Token')])
+    );
+    expect(deployDraftReducer(active, startFactoryDraft())).toEqual(active);
+  });
+
+  it('a new factory source clears function, args and product mappings', () => {
+    const state = deployDraftReducer(
+      setupState(),
+      setFactorySetup({ source: contract('other-art', 'OtherFactory') })
+    );
+    expect(state.factorySetup?.signature).toBeUndefined();
+    expect(state.factorySetup?.args).toBeUndefined();
+    expect(state.factorySetup?.products).toBeUndefined();
+  });
+
+  it('a new deploy function clears args and product mappings', () => {
+    const state = deployDraftReducer(
+      setupState(),
+      setFactorySetup({
+        signature: 'deployOne(bytes32 salt) returns (address jar)',
+        payable: true,
+      })
+    );
+    expect(state.factorySetup?.args).toBeUndefined();
+    expect(state.factorySetup?.products).toBeUndefined();
+    expect(state.factorySetup?.payable).toBe(true);
+  });
+
+  it('applyFactorySetup generates the canonical call-plus-products shape', () => {
+    const state = deployDraftReducer(setupState(), applyFactorySetup());
+    const callId = state.factorySetup!.callStepId;
+
+    expect(state.steps.map((step) => step.kind)).toEqual([
+      'call',
+      'deploy',
+      'deploy',
+    ]);
+    expect(state.steps[0]).toMatchObject({
+      id: callId,
+      kind: 'call',
+      target: { kind: 'address', address: FACTORY_ADDRESS },
+      signature: SIGNATURE,
+      args: { owner: FACTORY_ADDRESS },
+    });
+    expect(state.contracts.map((entry) => entry.id)).toEqual([
+      'jar-art:jar',
+      'rel-art:releaser',
+    ]);
+    expect(state.steps[1]).toMatchObject({
+      kind: 'deploy',
+      contractId: 'jar-art:jar',
+    });
+    expect(state.deployExtras[state.steps[1].id].strategy).toEqual({
+      kind: 'factory',
+      fulfilledBy: callId,
+      output: 'jar',
+    });
+    expect(state.deployExtras[state.steps[2].id].strategy).toEqual({
+      kind: 'factory',
+      fulfilledBy: callId,
+      output: 'releaser',
+    });
+    // The call step is the single source of truth from here on.
+    expect(state.factorySetup?.args).toBeUndefined();
+    expect(state.factorySetup?.address).toBeUndefined();
+  });
+
+  it('two outputs may share one artifact without colliding', () => {
+    let state = setupState();
+    state = deployDraftReducer(
+      state,
+      setFactoryProduct({ output: 'releaser', source: jarArtifact })
+    );
+    state = deployDraftReducer(state, applyFactorySetup());
+    expect(state.contracts.map((entry) => entry.id)).toEqual([
+      'jar-art:jar',
+      'jar-art:releaser',
+    ]);
+  });
+
+  it('applyFactorySetup fails closed while an output is unmapped', () => {
+    let state = deployDraftReducer(undefined, startFactoryDraft());
+    state = deployDraftReducer(
+      state,
+      setFactorySetup({
+        address: FACTORY_ADDRESS as `0x${string}`,
+        signature: SIGNATURE,
+      })
+    );
+    state = deployDraftReducer(
+      state,
+      setFactoryProduct({ output: 'jar', source: jarArtifact })
+    );
+    const applied = deployDraftReducer(state, applyFactorySetup());
+    expect(applied.steps).toEqual([]);
+    expect(applied.contracts).toEqual([]);
+  });
+
+  it('remapping an output replaces only that product on re-apply', () => {
+    let state = deployDraftReducer(setupState(), applyFactorySetup());
+    const keptId = state.steps[2].id;
+    state = deployDraftReducer(
+      state,
+      setFactoryProduct({ output: 'jar', source: contract('jar2-art', 'Jar2') })
+    );
+    state = deployDraftReducer(state, applyFactorySetup());
+
+    expect(state.contracts.map((entry) => entry.id)).toEqual([
+      'rel-art:releaser',
+      'jar2-art:jar',
+    ]);
+    expect(
+      state.steps.filter((step) => step.kind === 'deploy').map((step) => step.id)
+    ).toContain(keptId);
+    expect(state.deployExtras['deploy-jar-art:jar']).toBeUndefined();
+  });
+
+  it('re-apply preserves operator edits to the generated call step', () => {
+    let state = deployDraftReducer(setupState(), applyFactorySetup());
+    const callId = state.factorySetup!.callStepId;
+    state = deployDraftReducer(
+      state,
+      setArg({ stepId: callId, key: 'salt', value: `0x${'22'.repeat(32)}` })
+    );
+    state = deployDraftReducer(state, applyFactorySetup());
+    const call = state.steps[0];
+    expect(call.kind).toBe('call');
+    expect(call.args?.salt).toBe(`0x${'22'.repeat(32)}`);
+  });
+
+  it('a post-generation function change rewrites the call and drops stale args', () => {
+    let state = deployDraftReducer(setupState(), applyFactorySetup());
+    const callId = state.factorySetup!.callStepId;
+    state = deployDraftReducer(
+      state,
+      setFactorySetup({
+        signature: 'deployOne(bytes32 salt) returns (address jar)',
+        payable: false,
+      })
+    );
+    const call = state.steps.find((step) => step.id === callId);
+    expect(call?.kind === 'call' && call.signature).toBe(
+      'deployOne(bytes32 salt) returns (address jar)'
+    );
+    expect(call?.args).toBeUndefined();
+    // The old products only leave once the new mapping is applied.
+    state = deployDraftReducer(
+      state,
+      setFactoryProduct({ output: 'jar', source: jarArtifact })
+    );
+    state = deployDraftReducer(state, applyFactorySetup());
+    expect(state.contracts.map((entry) => entry.id)).toEqual(['jar-art:jar']);
+    expect(state.steps).toHaveLength(2);
+  });
+
+  it('removing a product clears references later steps held to it', () => {
+    let state = deployDraftReducer(setupState(), applyFactorySetup());
+    state = deployDraftReducer(state, addCallStep(2));
+    const laterCall = state.steps[3];
+    state = deployDraftReducer(
+      state,
+      setArg({
+        stepId: laterCall.id,
+        key: 'jar',
+        value: { $ref: { kind: 'step', stepId: 'deploy-jar-art:jar' } },
+      })
+    );
+    state = deployDraftReducer(
+      state,
+      setFactorySetup({
+        signature: 'deployOne(bytes32 salt) returns (address releaser)',
+      })
+    );
+    state = deployDraftReducer(
+      state,
+      setFactoryProduct({ output: 'releaser', source: releaserArtifact })
+    );
+    state = deployDraftReducer(state, applyFactorySetup());
+    const survivor = state.steps.find((step) => step.id === laterCall.id);
+    expect(survivor?.args?.jar).toBeUndefined();
+  });
+
+  it('adding plain contracts to an empty draft abandons the factory setup', () => {
+    let state = deployDraftReducer(undefined, startFactoryDraft());
+    state = deployDraftReducer(state, addContracts([contract('token', 'Token')]));
+    expect(state.factorySetup).toBeUndefined();
+    expect(state.contracts).toHaveLength(1);
+  });
+
+  it('a product cannot move above the call that deploys it', () => {
+    const state = deployDraftReducer(setupState(), applyFactorySetup());
+    const moved = deployDraftReducer(
+      state,
+      moveStep({ fromIndex: 1, toIndex: 0 })
+    );
+    expect(moved.steps.map((step) => step.id)).toEqual(
+      state.steps.map((step) => step.id)
+    );
+  });
+
+  it('the fulfilling call cannot be removed while products depend on it', () => {
+    const state = deployDraftReducer(setupState(), applyFactorySetup());
+    const callId = state.factorySetup!.callStepId;
+    const kept = deployDraftReducer(state, removeCallStep(callId));
+    expect(kept.steps.map((step) => step.id)).toEqual(
+      state.steps.map((step) => step.id)
+    );
   });
 });
