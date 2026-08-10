@@ -223,6 +223,16 @@ describe('a factory prediction that fails', () => {
     expect(degraded?.degraded).toContain('execution reverted');
   });
 
+  it('does not claim addresses are predicted when every prediction failed', async () => {
+    // The checklist message sits above the per-step rows, so announcing
+    // predicted addresses over a list that is entirely "unavailable"
+    // contradicts itself.
+    const result = await validatePlan(factoryPlan(), { '1': 'rpc-1' }, revertingDeps());
+    const item = result.report.chains['1'].create2!;
+    expect(item.details!.predicted).toEqual({});
+    expect(item.message).toBe('Factory product addresses could not be predicted');
+  });
+
   it('reports the revert reason alongside a create2 step (mixed branch)', async () => {
     const mixed: DeploymentPlan = {
       schemaVersion: 1,

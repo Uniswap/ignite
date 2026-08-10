@@ -971,10 +971,18 @@ async function validateCreate2(
     if (!Object.keys(predicted).length && !degradedSteps.length)
       return { item: success('No create2 steps') };
     return {
-      item: success('Factory product addresses are predicted', {
-        predicted,
-        ...(degradedSteps.length ? { provisionalSteps: degradedSteps } : {}),
-      }),
+      item: success(
+        // The row sits directly above the per-step rows it summarises, so when
+        // every prediction failed it would otherwise announce predicted
+        // addresses over a list that reads "unavailable" all the way down.
+        Object.keys(predicted).length
+          ? 'Factory product addresses are predicted'
+          : 'Factory product addresses could not be predicted',
+        {
+          predicted,
+          ...(degradedSteps.length ? { provisionalSteps: degradedSteps } : {}),
+        }
+      ),
     };
   }
   if (freezeError || !rpcUrl)
