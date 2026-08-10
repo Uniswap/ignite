@@ -16,6 +16,7 @@ import type {
   FrozenInputs,
   RpcBinding,
   PredictedEntryInfo,
+  ProvisionalStepInfo,
   RpcSelection,
   ValidationItem,
   ValidationReport,
@@ -956,15 +957,24 @@ async function validateCreate2(
     // predicted addresses are still the review's address picture — the plain
     // early return used to drop them whenever no create2/plugin step existed.
     const predicted: Record<string, PredictedEntryInfo> = {};
+    // An absent prediction computed a reason and then threw it away, so a
+    // failed factory call rendered as nothing at all — indistinguishable from
+    // "this feature does not exist". Carry the reason through `degraded`.
+    const degradedSteps: ProvisionalStepInfo[] = [];
     for (const step of plan.steps) {
       if (step.kind !== 'deploy' || !isFactoryStrategy(step.strategy)) continue;
       const entry = snapshot?.entries[step.id];
       if (hasPredicted(entry)) predicted[step.id] = { ...entry, provisional: true };
+      else if (entry && 'absent' in entry)
+        degradedSteps.push({ stepId: step.id, degraded: entry.reason });
     }
-    if (!Object.keys(predicted).length)
+    if (!Object.keys(predicted).length && !degradedSteps.length)
       return { item: success('No create2 steps') };
     return {
-      item: success('Factory product addresses are predicted', { predicted }),
+      item: success('Factory product addresses are predicted', {
+        predicted,
+        ...(degradedSteps.length ? { provisionalSteps: degradedSteps } : {}),
+      }),
     };
   }
   if (freezeError || !rpcUrl)
@@ -1094,12 +1104,22 @@ async function validateCreate2(
           ),
         };
     }
-    const provisionalSteps = deterministic.filter((step) => snapshot.dynamic.has(step.id)).map((step) => {
+    // Factory steps are in neither `deterministic` nor, ordinarily,
+    // `snapshot.dynamic` — so an absent factory prediction reached no list at
+    // all and vanished from review. Collect them explicitly.
+    const factoryDegraded: ProvisionalStepInfo[] = plan.steps.flatMap((step) => {
+      if (step.kind !== 'deploy' || !isFactoryStrategy(step.strategy)) return [];
+      const entry = snapshot.entries[step.id];
+      return entry && 'absent' in entry
+        ? [{ stepId: step.id, degraded: entry.reason }]
+        : [];
+    });
+    const provisionalSteps = [...deterministic.filter((step) => snapshot.dynamic.has(step.id)).map((step) => {
       const entry = snapshot.entries[step.id];
       return hasPredicted(entry)
         ? { stepId: step.id, predictedAddress: entry.predictedAddress, ...(entry.notes?.length ? { note: entry.notes.join('; ') } : {}) }
         : { stepId: step.id, degraded: entry && 'reason' in entry ? entry.reason : 'prediction unavailable' };
-    });
+    }), ...factoryDegraded];
     const reviewPredicted: Record<string, PredictedEntryInfo> = Object.fromEntries(Object.entries(snapshot.entries).flatMap(([id, entry]) => hasPredicted(entry) ? [[id, { ...entry, ...(entry.provisional ? { provisional: true } : {}) }]] : []));
     // Review shows the whole address picture: plain creates are nonce-derived
     // facts-to-be, so they carry the provisional marker with a create kind

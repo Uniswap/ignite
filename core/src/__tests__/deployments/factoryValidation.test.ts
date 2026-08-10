@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { encodeFunctionResult, parseAbiItem, type AbiFunction } from 'viem';
-import type { DeploymentPlan, FrozenInputs } from '@ignite/api';
+import {
+  CREATE2_PROXY_ADDRESS,
+  CREATE2_PROXY_RUNTIME_CODE,
+  type DeploymentPlan,
+  type FrozenInputs,
+} from '@ignite/api';
 import { validatePlan } from '../../deployments/validation.js';
 
 const FACTORY = '0x2179a60856E37dfeAacA0ab043B931fE224b27B6';
@@ -177,5 +182,86 @@ describe('validating the canonical factory flow plan', () => {
       ok: false,
       code: 'MISSING_ARGUMENT',
     });
+  });
+});
+
+describe('a factory prediction that fails', () => {
+  // buildChainPredictions computes a `reason` for an absent entry and
+  // validateCreate2 used to drop it on both paths it can take: the
+  // factory-only early return, and the branch a plan also containing a
+  // create2/plugin step falls into. Both must carry the reason through
+  // `degraded` instead of erasing it.
+  function revertingDeps(): ReturnType<typeof deps> {
+    const d = deps();
+    d.createClient = vi.fn(() => ({
+      estimateGas: vi.fn(async () => 100n),
+      getBalance: vi.fn(async () => 10_000n),
+      estimateFeesPerGas: vi.fn(async () => ({
+        maxFeePerGas: 10n,
+        maxPriorityFeePerGas: 1n,
+      })),
+      getTransactionCount: vi.fn(async () => 0),
+      getBlockNumber: vi.fn(async () => 1),
+      getCode: vi.fn(async ({ address }: { address: string }) =>
+        address.toLowerCase() === CREATE2_PROXY_ADDRESS.toLowerCase()
+          ? CREATE2_PROXY_RUNTIME_CODE
+          : '0x'
+      ),
+      call: vi.fn(async () => {
+        throw new Error('execution reverted: not authorized');
+      }),
+    }));
+    return d;
+  }
+
+  it('reports the revert reason instead of dropping the step (factory-only branch)', async () => {
+    const result = await validatePlan(factoryPlan(), { '1': 'rpc-1' }, revertingDeps());
+    const details = result.report.chains['1'].create2!.details!;
+    const degraded = (
+      details.provisionalSteps as { stepId: string; degraded?: string }[]
+    ).find((entry) => entry.stepId === 'product-jar');
+    expect(degraded?.degraded).toContain('execution reverted');
+  });
+
+  it('reports the revert reason alongside a create2 step (mixed branch)', async () => {
+    const mixed: DeploymentPlan = {
+      schemaVersion: 1,
+      chains: [1],
+      contracts: [
+        contract('jar', 'TokenJar'),
+        contract('releaser', 'ExchangeReleaser'),
+      ],
+      signers: {
+        global: { pluginId: 'key', accountId: 'account', address: SIGNER },
+      },
+      steps: [
+        {
+          id: 'jar',
+          kind: 'deploy',
+          contractId: 'jar',
+          strategy: { kind: 'create2', salt: `0x${'11'.repeat(32)}` },
+        },
+        {
+          id: 'call-factory',
+          kind: 'call',
+          target: { kind: 'address', address: FACTORY },
+          signature: SIGNATURE,
+          args: { owner: SIGNER, salt: `0x${'22'.repeat(32)}` },
+        },
+        {
+          id: 'product-releaser',
+          kind: 'deploy',
+          contractId: 'releaser',
+          strategy: { kind: 'factory', fulfilledBy: 'call-factory', output: 'releaser' },
+        },
+      ],
+    };
+
+    const result = await validatePlan(mixed, { '1': 'rpc-1' }, revertingDeps());
+    const details = result.report.chains['1'].create2!.details!;
+    const degraded = (
+      details.provisionalSteps as { stepId: string; degraded?: string }[]
+    ).find((entry) => entry.stepId === 'product-releaser');
+    expect(degraded?.degraded).toContain('execution reverted');
   });
 });
