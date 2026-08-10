@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { keccak256, stringToHex } from 'viem';
 import type { DeploymentTypeInfo, ValidationReport } from '@ignite/api';
-import { ApiError } from '@ignite/api/client';
 import Select from '../../../components/Select';
 import FactoryStrategyFields from './FactoryStrategyFields';
 import { apiClient } from '../../../store/api/client';
@@ -17,14 +16,11 @@ import { draftToPlanFragment } from '../planFromDraft';
 import { replaceIdsForDisplay } from '../../../utils/displayText';
 import { partitionDeterministicChains } from '../pointerEligibility';
 import { stepPredictionRows } from '../reviewPredictions';
+import { apiErrorMessage } from '../../../utils/apiError';
 
-export function apiErrorMessage(reason: unknown): string {
-  return reason instanceof ApiError
-    ? (reason.body.message ?? reason.message)
-    : reason instanceof Error
-      ? reason.message
-      : String(reason);
-}
+// It moved to utils so useValidationReport can share it without a hook
+// depending on a leaf component; re-exported here to keep this import path.
+export { apiErrorMessage };
 
 export default function StrategySection({ stepId, report }: { stepId: string; report?: ValidationReport | null }) {
   const dispatch = useAppDispatch();

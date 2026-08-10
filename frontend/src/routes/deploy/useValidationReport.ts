@@ -10,6 +10,7 @@ import { apiClient } from '../../store/api/client';
 import { useAppDispatch, useAppSelector } from '../../store';
 import { workflowRunRequestFromDraft } from '../../store/features/deployments/workflowDraft';
 import { triggerToast } from '../../store/middleware/toastListener';
+import { apiErrorMessage } from '../../utils/apiError';
 
 export function bounceOutOfSyncWorkflowRun(
   cause: unknown,
@@ -135,7 +136,12 @@ export function useValidationReport(plan: DeploymentPlan | undefined) {
           bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)
         )
           return;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        // The background path is now the only thing that reports this 409, so
+        // the banner has to carry the server's sentence — which names the
+        // workflow and says to install or update it. `cause.message` is the
+        // transport's placeholder 'Request failed', leaving the user staring
+        // at a blanked checklist with no hint that Re-validate is the way out.
+        setError(apiErrorMessage(cause));
       } finally {
         // Clearing it for a superseded request would un-gate Review's Launch
         // button while the newest request is still in flight.
