@@ -1,7 +1,10 @@
 // @ts-expect-error Vitest is supplied by the repository test command via npx.
 import { describe, expect, it } from 'vitest';
 import type { ValidationReport } from '@ignite/api';
-import { reviewPredictedAddresses, stepPredictionRows } from '../reviewPredictions';
+import {
+  reviewPredictedAddresses,
+  stepPredictionRows,
+} from '../reviewPredictions';
 
 describe('reviewPredictedAddresses', () => {
   it('marks provisional predicted entries for the ReviewStep marker', () => {
@@ -101,7 +104,10 @@ describe('reviewPredictedAddresses', () => {
             details: {
               predicted: {},
               provisionalSteps: [
-                { stepId: 'jar', degraded: 'execution reverted: not authorized' },
+                {
+                  stepId: 'jar',
+                  degraded: 'execution reverted: not authorized',
+                },
               ],
             },
           },
@@ -128,8 +134,14 @@ describe('stepPredictionRows', () => {
           create2: {
             details: {
               predicted: {
-                jar: { predictedAddress: '0x0000000000000000000000000000000000000001' },
-                other: { predictedAddress: '0x0000000000000000000000000000000000000002' },
+                jar: {
+                  predictedAddress:
+                    '0x0000000000000000000000000000000000000001',
+                },
+                other: {
+                  predictedAddress:
+                    '0x0000000000000000000000000000000000000002',
+                },
               },
             },
           },
@@ -138,7 +150,10 @@ describe('stepPredictionRows', () => {
           create2: {
             details: {
               predicted: {
-                jar: { predictedAddress: '0x0000000000000000000000000000000000000003' },
+                jar: {
+                  predictedAddress:
+                    '0x0000000000000000000000000000000000000003',
+                },
               },
             },
           },

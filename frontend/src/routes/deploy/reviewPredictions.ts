@@ -91,5 +91,7 @@ export function stepPredictionRows(
   report: ValidationReport | null | undefined,
   stepId: string
 ): ReviewPredictedAddress[] {
-  return reviewPredictedAddresses(report).filter((row) => row.stepId === stepId);
+  return reviewPredictedAddresses(report).filter(
+    (row) => row.stepId === stepId
+  );
 }
