@@ -6,8 +6,7 @@ import type {
 } from '@ignite/api';
 import { sanitizeDisplayText } from '@ignite/api';
 import { Loader2, RefreshCw, Rocket } from 'lucide-react';
-import { type NavigateFunction, useNavigate } from 'react-router-dom';
-import { ApiError } from '@ignite/api/client';
+import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../../../store/api/client';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import { verifierPluginLabel } from '../../../store/features/plugins/pluginsSlice';
@@ -26,10 +25,12 @@ import { explorersApi } from '../../../store/api/explorersApi';
 import { decodeUrlEncodingForDisplay, replaceIdsForDisplay } from '../../../utils/displayText';
 import { openPermissionsModal } from '../../../store/features/plugins/pluginsSlice';
 import { reviewPredictedAddresses } from '../reviewPredictions';
-import { triggerToast } from '../../../store/middleware/toastListener';
 import InstallPluginDialog from '../../../components/plugins/InstallPluginDialog';
 import { selectWorkflowDocument } from '../../../store/features/workflows/workflowsSlice';
-import { useValidationReport } from '../useValidationReport';
+import {
+  bounceOutOfSyncWorkflowRun,
+  useValidationReport,
+} from '../useValidationReport';
 
 function validationGreen(report: ValidationReport | null): boolean {
   return Boolean(
@@ -41,28 +42,8 @@ function validationGreen(report: ValidationReport | null): boolean {
   );
 }
 
-export function bounceOutOfSyncWorkflowRun(
-  cause: unknown,
-  dispatch: (action: ReturnType<typeof triggerToast>) => unknown,
-  navigate: NavigateFunction
-): boolean {
-  if (
-    !(cause instanceof ApiError) ||
-    cause.status !== 409 ||
-    cause.body.code !== 'WORKFLOW_OUT_OF_SYNC'
-  )
-    return false;
-  dispatch(
-    triggerToast({
-      title: 'Workflow is out of sync',
-      description: 'Install or update it first.',
-      variant: 'error',
-      duration: 8000,
-    })
-  );
-  navigate('/workflows', { replace: true });
-  return true;
-}
+// Lives with the validation hook now, but callers still import it from here.
+export { bounceOutOfSyncWorkflowRun };
 
 interface ReviewStepProps {
   plan: DeploymentPlan;

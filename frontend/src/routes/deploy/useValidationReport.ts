@@ -4,11 +4,35 @@ import type {
   DeploymentPlan,
   ValidationReport,
 } from '@ignite/api';
-import { useNavigate } from 'react-router-dom';
+import { type NavigateFunction, useNavigate } from 'react-router-dom';
+import { ApiError } from '@ignite/api/client';
 import { apiClient } from '../../store/api/client';
 import { useAppDispatch, useAppSelector } from '../../store';
 import { workflowRunRequestFromDraft } from '../../store/features/deployments/workflowDraft';
-import { bounceOutOfSyncWorkflowRun } from './steps/ReviewStep';
+import { triggerToast } from '../../store/middleware/toastListener';
+
+export function bounceOutOfSyncWorkflowRun(
+  cause: unknown,
+  dispatch: (action: ReturnType<typeof triggerToast>) => unknown,
+  navigate: NavigateFunction
+): boolean {
+  if (
+    !(cause instanceof ApiError) ||
+    cause.status !== 409 ||
+    cause.body.code !== 'WORKFLOW_OUT_OF_SYNC'
+  )
+    return false;
+  dispatch(
+    triggerToast({
+      title: 'Workflow is out of sync',
+      description: 'Install or update it first.',
+      variant: 'error',
+      duration: 8000,
+    })
+  );
+  navigate('/workflows', { replace: true });
+  return true;
+}
 
 export function useValidationReport(plan: DeploymentPlan | undefined) {
   const dispatch = useAppDispatch();
