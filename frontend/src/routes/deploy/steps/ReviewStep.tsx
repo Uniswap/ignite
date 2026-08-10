@@ -47,6 +47,7 @@ export { bounceOutOfSyncWorkflowRun };
 
 interface ReviewStepProps {
   plan: DeploymentPlan;
+  validation: ReturnType<typeof useValidationReport>;
 }
 
 export function workflowDefaultRunName(
@@ -77,7 +78,7 @@ export function workflowStepLabels(
   );
 }
 
-export default function ReviewStep({ plan }: ReviewStepProps) {
+export default function ReviewStep({ plan, validation }: ReviewStepProps) {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const draft = useAppSelector((state) => state.deployDraft);
@@ -93,6 +94,8 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
         )
       : undefined
   );
+  // The wizard owns the hook so the steps page and Review read one report;
+  // calling it here too would run a second validate request per edit.
   const {
     report,
     loading,
@@ -104,7 +107,7 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
     workflowRequest,
     rpcSelection,
     revalidate,
-  } = useValidationReport(plan);
+  } = validation;
   const [launching, setLaunching] = useState(false);
   const [pluginId, setPluginId] = useState<string | null>(null);
   const defaultName = workflowDefaultRunName(draft.contracts);

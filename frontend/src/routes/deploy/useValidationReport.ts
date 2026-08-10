@@ -129,8 +129,12 @@ export function useValidationReport(plan: DeploymentPlan | undefined) {
     workflowRequest,
   ]);
 
+  // Until now this only ran on Review, where editing is already finished. It
+  // now also runs while the user edits steps, so an undebounced effect would
+  // fire a full simulation, balance read, and gas estimate per keystroke.
   useEffect(() => {
-    void validate();
+    const timer = setTimeout(() => void validate(), 500);
+    return () => clearTimeout(timer);
   }, [validate]);
 
   return {

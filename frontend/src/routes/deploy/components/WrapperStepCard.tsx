@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { toFunctionSignature, type AbiFunction } from 'viem';
-import type { ContractTypeInfo } from '@ignite/api';
+import type { ContractTypeInfo, ValidationReport } from '@ignite/api';
 import { ApiError } from '@ignite/api/client';
 import Select from '../../../components/Select';
 import { apiClient } from '../../../store/api/client';
@@ -20,7 +20,7 @@ type AbiFunctionLike = { type?: string; name?: string; inputs?: AbiInput[]; stat
 type Encode = { $encode: { contractId: string; fn: string; args?: Record<string, unknown> } };
 const isEncode = (value: unknown): value is Encode => Boolean(value && typeof value === 'object' && '$encode' in value);
 
-export default function WrapperStepCard({ step, implementationAbi, onMove }: { step: DraftDeployStep; implementationAbi?: unknown[]; onMove: (delta: number) => void }) {
+export default function WrapperStepCard({ step, implementationAbi, onMove, report }: { step: DraftDeployStep; implementationAbi?: unknown[]; onMove: (delta: number) => void; report?: ValidationReport | null }) {
   const dispatch = useAppDispatch();
   const draft = useAppSelector((state) => state.deployDraft);
   const chains = useAppSelector((state) => state.chains.chains);
@@ -92,7 +92,7 @@ export default function WrapperStepCard({ step, implementationAbi, onMove }: { s
     {initializerArg && <section className="grid gap-3"><label className="grid gap-1"><span className="eyebrow">Initializer</span><Select value={selected} options={[{ value: '', label: 'No initialization (empty calldata)' }, ...functions.map((item) => ({ value: item.signature, label: item.signature }))]} onValueChange={setInitializer} /></label>{selectedFunction?.item.inputs?.map((input, index) => { const key = input.name || `arg${index}`; const global = isEncode(step.args?.[initializerArg]) ? step.args![initializerArg] as Encode : undefined; return <div key={key} className="grid gap-2"><AbiArgField input={input} fieldKey={key} value={global?.$encode.args?.[key]} eligibleSteps={pointerSteps} signerOptions={signerOptions} onChange={(value) => setInitializerArg(key, value)} />{draft.chains.length > 1 && <details className="text-xs"><summary className="text-muted cursor-pointer">Per-chain override</summary>{draft.chains.map((chainId) => { const override = step.argsPerChain?.[String(chainId)]?.[initializerArg]; return <div key={chainId} className="mt-2 grid gap-1"><AbiArgField input={input} fieldKey={key} value={isEncode(override) ? override.$encode.args?.[key] : undefined} eligibleSteps={pointerSteps} signerOptions={signerOptions.filter((option) => option.chainId === chainId)} onChange={(value) => setInitializerArg(key, value, chainId)} />{override !== undefined && <button type="button" className="btn btn-sm btn-secondary justify-self-start" onClick={() => dispatch(setChainArgOverride({ stepId: step.id, chainId, key: initializerArg, value: undefined }))}>Use global</button>}</div>; })}</details>}</div>; })}</section>}
     {initializerArg && !selected && (implementationAbi as AbiFunctionLike[] | undefined)?.some((item) => item.type === 'function' && item.name === 'initialize') && <label className="flex gap-2 text-sm text-warn"><input type="checkbox" checked={step.acknowledgeUninitialized === true} onChange={(event) => dispatch(setAcknowledgeUninitialized({ stepId: step.id, acknowledged: event.target.checked }))} />I understand that anyone may initialize this proxy after deployment; deterministic deployments can be front-run.</label>}
     <label className="flex gap-2 text-sm text-warn"><input type="checkbox" checked={step.acknowledgeUnverifiedBytecode === true} onChange={(event) => dispatch(setAcknowledgeUnverifiedBytecode({ stepId: step.id, acknowledged: event.target.checked }))} />I understand this wrapper may use plugin-supplied bytecode that is not reproduced from its claimed sources.</label>
-    <StrategySection stepId={step.id} />
+    <StrategySection stepId={step.id} report={report} />
     <AdvancedStepSection>{selectedFunction?.payable && <label className="grid gap-1"><span className="eyebrow">Value (native units)</span><input className="input-glass" value={step.value ?? ''} onChange={(event) => dispatch(setValue({ stepId: step.id, value: event.target.value || undefined }))} /></label>}<PerChainTransactionOverrides stepId={step.id} showValue={Boolean(selectedFunction?.payable)} /></AdvancedStepSection>
     <StepSignerSection stepId={step.id} />
   </article>;

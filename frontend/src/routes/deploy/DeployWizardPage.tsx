@@ -39,6 +39,7 @@ import { cloneJson } from '../../utils/cloneJson';
 import PromoteWorkflowDialog from '../../components/PromoteWorkflowDialog';
 import { triggerToast } from '../../store/middleware/toastListener';
 import { useDeploymentArtifacts } from './useDeploymentArtifacts';
+import { useValidationReport } from './useValidationReport';
 
 const STEPS = [
   { id: 'contracts', label: 'Contracts' },
@@ -278,6 +279,9 @@ export default function DeployWizardPage() {
       };
     }
   }, [draft, chains]);
+  // Owned here rather than in Review so the steps page and Review share one
+  // report — a second call site would mean a second validate request per edit.
+  const validation = useValidationReport(plan ?? undefined);
   const chainName = (chainId: number) =>
     chains.find((chain) => chain.chainId === chainId)?.name ??
     `Chain ${chainId}`;
@@ -439,8 +443,8 @@ export default function DeployWizardPage() {
         {step === 1 && <ChainsStep />}
         {step === 2 && <ExplorersStep />}
         {step === 3 && <SignersStep />}
-        {step === 4 && <StepsStep artifacts={artifacts} />}
-        {step === 5 && plan && <ReviewStep plan={plan} />}
+        {step === 4 && <StepsStep artifacts={artifacts} report={validation.lastGoodReport} />}
+        {step === 5 && plan && <ReviewStep plan={plan} validation={validation} />}
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { keccak256, stringToHex } from 'viem';
-import type { DeploymentTypeInfo } from '@ignite/api';
+import type { DeploymentTypeInfo, ValidationReport } from '@ignite/api';
 import { ApiError } from '@ignite/api/client';
 import Select from '../../../components/Select';
 import FactoryStrategyFields from './FactoryStrategyFields';
@@ -16,6 +16,7 @@ import {
 import { draftToPlanFragment } from '../planFromDraft';
 import { replaceIdsForDisplay } from '../../../utils/displayText';
 import { partitionDeterministicChains } from '../pointerEligibility';
+import { stepPredictionRows } from '../reviewPredictions';
 
 export function apiErrorMessage(reason: unknown): string {
   return reason instanceof ApiError
@@ -25,7 +26,7 @@ export function apiErrorMessage(reason: unknown): string {
       : String(reason);
 }
 
-export default function StrategySection({ stepId }: { stepId: string }) {
+export default function StrategySection({ stepId, report }: { stepId: string; report?: ValidationReport | null }) {
   const dispatch = useAppDispatch();
   const draft = useAppSelector((state) => state.deployDraft);
   const chains = useAppSelector((state) => state.chains.chains);
@@ -104,6 +105,7 @@ export default function StrategySection({ stepId }: { stepId: string }) {
   const staticPrepared = Object.entries(extras?.prepared ?? {}).filter(
     ([chainId]) => staticChains.includes(Number(chainId))
   );
+  const predictionRows = stepPredictionRows(report, stepId);
   return (
     <section className="grid gap-3">
       <label className="grid gap-1">
@@ -303,6 +305,20 @@ export default function StrategySection({ stepId }: { stepId: string }) {
             {chainId}: {result.predictedAddress}
           </p>
         ))}
+      {predictionRows.length > 0 && (
+        <div className="grid gap-1">
+          {/* Distinct from the prepared rows above: those are a mined salt
+              committed into the strategy, these are provisional review data
+              that can still change. Merging them would read as a commitment. */}
+          <span className="eyebrow">Predicted address</span>
+          {predictionRows.map((row) => (
+            <p key={`${row.stepId}-${row.chainId}`} className="text-xs mono-data">
+              {row.chainId}:{' '}
+              {row.address ?? `unavailable — ${row.unavailableReason}`}
+            </p>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
