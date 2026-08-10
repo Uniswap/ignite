@@ -90,4 +90,32 @@ describe('reviewPredictedAddresses', () => {
       },
     ]);
   });
+
+  it('emits a row carrying the reason when a prediction was unavailable', () => {
+    // A missing row is indistinguishable from "no such feature" — which is how
+    // this was originally reported. Always render something.
+    const report = {
+      chains: {
+        '1': {
+          create2: {
+            details: {
+              predicted: {},
+              provisionalSteps: [
+                { stepId: 'jar', degraded: 'execution reverted: not authorized' },
+              ],
+            },
+          },
+        },
+      },
+    } as unknown as ValidationReport;
+
+    expect(reviewPredictedAddresses(report)).toEqual([
+      {
+        chainId: '1',
+        stepId: 'jar',
+        provisional: true,
+        unavailableReason: 'execution reverted: not authorized',
+      },
+    ]);
+  });
 });
