@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
-  DeploymentHookInfo,
   DeploymentPlan,
   ValidationItem,
   ValidationReport,
@@ -25,12 +24,12 @@ import { runSnapshotReceived } from '../../../store/features/deployments/deploym
 import ValidationChecklist from '../components/ValidationChecklist';
 import { explorersApi } from '../../../store/api/explorersApi';
 import { decodeUrlEncodingForDisplay, replaceIdsForDisplay } from '../../../utils/displayText';
-import { workflowRunRequestFromDraft } from '../../../store/features/deployments/workflowDraft';
 import { openPermissionsModal } from '../../../store/features/plugins/pluginsSlice';
 import { reviewPredictedAddresses } from '../reviewPredictions';
 import { triggerToast } from '../../../store/middleware/toastListener';
 import InstallPluginDialog from '../../../components/plugins/InstallPluginDialog';
 import { selectWorkflowDocument } from '../../../store/features/workflows/workflowsSlice';
+import { useValidationReport } from '../useValidationReport';
 
 function validationGreen(report: ValidationReport | null): boolean {
   return Boolean(
@@ -113,14 +112,19 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
         )
       : undefined
   );
-  const [report, setReport] = useState<ValidationReport | null>(null);
-  const [loading, setLoading] = useState(false);
+  const {
+    report,
+    loading,
+    error,
+    setError,
+    deploymentHooks,
+    hooksLoaded,
+    installedHookIds,
+    workflowRequest,
+    rpcSelection,
+    revalidate,
+  } = useValidationReport(plan);
   const [launching, setLaunching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [deploymentHooks, setDeploymentHooks] = useState<DeploymentHookInfo[]>(
-    []
-  );
-  const [hooksLoaded, setHooksLoaded] = useState(false);
   const [pluginId, setPluginId] = useState<string | null>(null);
   const defaultName = workflowDefaultRunName(draft.contracts);
   const stepLabels = useMemo(
@@ -131,49 +135,10 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
     () => new Set(draft.steps.filter((step) => step.kind === 'deploy' && step.wraps).map((step) => step.id)),
     [draft.steps]
   );
-  const rpcSelection = useMemo(
-    () =>
-      Object.fromEntries(
-        Object.entries(draft.rpcSelection).map(([chainId, rpc]) => [
-          chainId,
-          rpc.endpointId,
-        ])
-      ),
-    [draft.rpcSelection]
-  );
-
   useEffect(() => {
     if (!draft.idempotencyKey) dispatch(mintIdempotencyKey());
   }, [dispatch, draft.idempotencyKey]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void apiClient
-      .request('listDeploymentHooks', {})
-      .then((response) => {
-        if ('data' in response && !cancelled)
-          setDeploymentHooks(response.data.deploymentHooks);
-      })
-      .catch(() => {
-        // Validation remains authoritative and will surface selected hook
-        // warnings; a transient discovery failure must not strand Review.
-      })
-      .finally(() => {
-        if (!cancelled) setHooksLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const installedHookIds = useMemo(
-    () => deploymentHooks.map((hook) => hook.pluginId),
-    [deploymentHooks]
-  );
-  const workflowRequest = useMemo(
-    () => workflowRunRequestFromDraft(draft, installedHookIds),
-    [draft, installedHookIds]
-  );
   const selectedHooks = workflowRequest?.hooks ?? [];
   const selectedPlugin = draft.workflowRequiredPlugins?.find(
     (plugin) => plugin.id === pluginId
@@ -191,36 +156,6 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
       }
     });
   }, [dispatch, draft.explorerSelection, explorers]);
-
-  const validate = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await apiClient.request('validateDeployment', {
-        body: {
-          plan,
-          rpcSelection,
-          explorerSelection: draft.explorerSelection,
-          ...(workflowRequest ? { workflow: workflowRequest } : {}),
-        },
-      });
-      if (!('data' in response)) throw new Error(response.message);
-      setReport({
-        chains: response.data.chains,
-        ...(response.data.run ? { run: response.data.run } : {}),
-      });
-    } catch (cause) {
-      setReport(null);
-      if (bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)) return;
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, [dispatch, draft.explorerSelection, navigate, plan, rpcSelection, workflowRequest]);
-
-  useEffect(() => {
-    void validate();
-  }, [validate]);
 
   const launch = async () => {
     if (!draft.idempotencyKey || !validationGreen(report)) return;
@@ -311,7 +246,7 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
           type="button"
           className="btn btn-sm btn-secondary"
           disabled={loading}
-          onClick={() => void validate()}
+          onClick={() => void revalidate()}
         >
           <RefreshCw size={14} /> Re-validate
         </button>
