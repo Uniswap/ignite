@@ -291,8 +291,8 @@ export default function StrategySection({ stepId, report }: { stepId: string; re
       {strategy.kind !== 'create' && strategy.kind !== 'factory' && dynamicChains.length > 0 && (
         <p className="text-xs text-muted">
           Salt is mined during the run against live addresses on:{' '}
-          {dynamicChainNames.join(', ')}. Flags and a provisional address appear
-          in validation.
+          {dynamicChainNames.join(', ')}. The predicted address below is
+          provisional until then; validation carries the flags.
         </p>
       )}
       {error && (
@@ -300,22 +300,36 @@ export default function StrategySection({ stepId, report }: { stepId: string; re
           {replaceIdsForDisplay(error, stepName ? { [stepId]: stepName } : {})}
         </p>
       )}
-      {staticPrepared.map(([chainId, result]) => (
-          <p key={chainId} className="text-xs mono-data">
-            {chainId}: {result.predictedAddress}
-          </p>
-        ))}
+      {/* Both lists are labelled, because a re-mined step shows the same chain
+          in each: `prepared` is the salt already committed into the strategy,
+          `predictionRows` is what validation recomputes from the current draft.
+          When those disagree the pair is the drift signal, so neither may be
+          filtered out and neither may sit unlabelled. */}
+      {staticPrepared.length > 0 && (
+        <div className="grid gap-1">
+          <span className="eyebrow">Committed address</span>
+          {staticPrepared.map(([chainId, result]) => (
+            <p key={chainId} className="text-xs mono-data">
+              {chainId}: {result.predictedAddress}
+            </p>
+          ))}
+        </div>
+      )}
       {predictionRows.length > 0 && (
         <div className="grid gap-1">
-          {/* Distinct from the prepared rows above: those are a mined salt
-              committed into the strategy, these are provisional review data
-              that can still change. Merging them would read as a commitment. */}
-          <span className="eyebrow">Predicted address</span>
+          <span className="eyebrow">Predicted address (from validation)</span>
           {predictionRows.map((row) => (
-            <p key={`${row.stepId}-${row.chainId}`} className="text-xs mono-data">
-              {row.chainId}:{' '}
-              {row.address ?? `unavailable — ${row.unavailableReason}`}
-            </p>
+            <div key={`${row.stepId}-${row.chainId}`} className="flex gap-2 items-center text-xs">
+              <span className={row.address ? 'mono-data' : 'text-muted'}>
+                {row.chainId}:{' '}
+                {row.address ?? `unavailable — ${row.unavailableReason}`}
+              </span>
+              {row.provisional && (
+                <span className="chip">
+                  {row.provisionalLabel ?? 'provisional'}
+                </span>
+              )}
+            </div>
           ))}
         </div>
       )}

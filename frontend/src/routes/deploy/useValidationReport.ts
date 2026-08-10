@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DeploymentHookInfo,
   DeploymentPlan,
@@ -45,6 +45,7 @@ export function useValidationReport(plan: DeploymentPlan | undefined) {
     []
   );
   const [hooksLoaded, setHooksLoaded] = useState(false);
+  const requestSeq = useRef(0);
   // Kept alongside `report` rather than replacing it: Review clears `report` on
   // a failed validate, which would blank rows that were correct a moment ago
   // for consumers that validate while the draft is still being edited.
@@ -95,6 +96,11 @@ export function useValidationReport(plan: DeploymentPlan | undefined) {
     // The wizard mounts this hook before the plan exists on early steps; there
     // is nothing to validate until it does.
     if (!plan) return;
+    // Requests now overlap, because the effect refires on every draft edit. A
+    // predicted create2 address is a function of the init-code hash, so an
+    // earlier response landing last would not merely be stale — it would show
+    // an address for constructor args the user has already replaced.
+    const ticket = ++requestSeq.current;
     setLoading(true);
     setError(null);
     try {
@@ -106,6 +112,7 @@ export function useValidationReport(plan: DeploymentPlan | undefined) {
           ...(workflowRequest ? { workflow: workflowRequest } : {}),
         },
       });
+      if (ticket !== requestSeq.current) return;
       if (!('data' in response)) throw new Error(response.message);
       const next = {
         chains: response.data.chains,
@@ -114,11 +121,14 @@ export function useValidationReport(plan: DeploymentPlan | undefined) {
       setReport(next);
       setLastGoodReport(next);
     } catch (cause) {
+      if (ticket !== requestSeq.current) return;
       setReport(null);
       if (bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)) return;
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoading(false);
+      // Clearing it for a superseded request would un-gate Review's Launch
+      // button while the newest request is still in flight.
+      if (ticket === requestSeq.current) setLoading(false);
     }
   }, [
     dispatch,
