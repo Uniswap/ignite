@@ -92,60 +92,77 @@ export function useValidationReport(plan: DeploymentPlan | undefined) {
     [draft, installedHookIds]
   );
 
-  const validate = useCallback(async () => {
-    // The wizard mounts this hook before the plan exists on early steps; there
-    // is nothing to validate until it does.
-    if (!plan) return;
-    // Requests now overlap, because the effect refires on every draft edit. A
-    // predicted create2 address is a function of the init-code hash, so an
-    // earlier response landing last would not merely be stale — it would show
-    // an address for constructor args the user has already replaced.
-    const ticket = ++requestSeq.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await apiClient.request('validateDeployment', {
-        body: {
-          plan,
-          rpcSelection,
-          explorerSelection: draft.explorerSelection,
-          ...(workflowRequest ? { workflow: workflowRequest } : {}),
-        },
-      });
-      if (ticket !== requestSeq.current) return;
-      if (!('data' in response)) throw new Error(response.message);
-      const next = {
-        chains: response.data.chains,
-        ...(response.data.run ? { run: response.data.run } : {}),
-      };
-      setReport(next);
-      setLastGoodReport(next);
-    } catch (cause) {
-      if (ticket !== requestSeq.current) return;
-      setReport(null);
-      if (bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)) return;
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      // Clearing it for a superseded request would un-gate Review's Launch
-      // button while the newest request is still in flight.
-      if (ticket === requestSeq.current) setLoading(false);
-    }
-  }, [
-    dispatch,
-    draft.explorerSelection,
-    navigate,
-    plan,
-    rpcSelection,
-    workflowRequest,
-  ]);
+  const validate = useCallback(
+    async (bounceWhenOutOfSync: boolean) => {
+      // The wizard mounts this hook before the plan exists on early steps;
+      // there is nothing to validate until it does.
+      if (!plan) return;
+      // Requests now overlap, because the effect refires on every draft edit.
+      // A predicted create2 address is a function of the init-code hash, so an
+      // earlier response landing last would not merely be stale — it would
+      // show an address for constructor args the user has already replaced.
+      const ticket = ++requestSeq.current;
+      setLoading(true);
+      setError(null);
+      try {
+        const response = await apiClient.request('validateDeployment', {
+          body: {
+            plan,
+            rpcSelection,
+            explorerSelection: draft.explorerSelection,
+            ...(workflowRequest ? { workflow: workflowRequest } : {}),
+          },
+        });
+        if (ticket !== requestSeq.current) return;
+        if (!('data' in response)) throw new Error(response.message);
+        const next = {
+          chains: response.data.chains,
+          ...(response.data.run ? { run: response.data.run } : {}),
+        };
+        setReport(next);
+        setLastGoodReport(next);
+      } catch (cause) {
+        if (ticket !== requestSeq.current) return;
+        setReport(null);
+        // The bounce navigates away, so only a user-initiated re-validate may
+        // trigger it. The debounced effect below runs from wizard mount, and a
+        // draft rehydrated after an on-disk docHash drift carries the new hash
+        // while `installedWorkflows` still holds the old one — validation then
+        // answers 409 WORKFLOW_OUT_OF_SYNC and would eject the user to
+        // /workflows half a second after the wizard loaded, untouched.
+        if (
+          bounceWhenOutOfSync &&
+          bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)
+        )
+          return;
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        // Clearing it for a superseded request would un-gate Review's Launch
+        // button while the newest request is still in flight.
+        if (ticket === requestSeq.current) setLoading(false);
+      }
+    },
+    [
+      dispatch,
+      draft.explorerSelection,
+      navigate,
+      plan,
+      rpcSelection,
+      workflowRequest,
+    ]
+  );
 
   // Until now this only ran on Review, where editing is already finished. It
   // now also runs while the user edits steps, so an undebounced effect would
   // fire a full simulation, balance read, and gas estimate per keystroke.
   useEffect(() => {
-    const timer = setTimeout(() => void validate(), 500);
+    const timer = setTimeout(() => void validate(false), 500);
     return () => clearTimeout(timer);
   }, [validate]);
+
+  // The re-validate button is a deliberate user action on a settled page, so
+  // it keeps the pre-hook behaviour of bouncing an out-of-sync workflow.
+  const revalidate = useCallback(() => validate(true), [validate]);
 
   return {
     report,
@@ -161,6 +178,6 @@ export function useValidationReport(plan: DeploymentPlan | undefined) {
     installedHookIds,
     workflowRequest,
     rpcSelection,
-    revalidate: validate,
+    revalidate,
   };
 }
