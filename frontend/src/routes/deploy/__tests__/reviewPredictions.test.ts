@@ -1,7 +1,7 @@
 // @ts-expect-error Vitest is supplied by the repository test command via npx.
 import { describe, expect, it } from 'vitest';
 import type { ValidationReport } from '@ignite/api';
-import { reviewPredictedAddresses } from '../reviewPredictions';
+import { reviewPredictedAddresses, stepPredictionRows } from '../reviewPredictions';
 
 describe('reviewPredictedAddresses', () => {
   it('marks provisional predicted entries for the ReviewStep marker', () => {
@@ -117,5 +117,52 @@ describe('reviewPredictedAddresses', () => {
         unavailableReason: 'execution reverted: not authorized',
       },
     ]);
+  });
+});
+
+describe('stepPredictionRows', () => {
+  it('returns only the rows for the requested step, across chains', () => {
+    const report = {
+      chains: {
+        '1': {
+          create2: {
+            details: {
+              predicted: {
+                jar: { predictedAddress: '0x0000000000000000000000000000000000000001' },
+                other: { predictedAddress: '0x0000000000000000000000000000000000000002' },
+              },
+            },
+          },
+        },
+        '10': {
+          create2: {
+            details: {
+              predicted: {
+                jar: { predictedAddress: '0x0000000000000000000000000000000000000003' },
+              },
+            },
+          },
+        },
+      },
+    } as unknown as ValidationReport;
+
+    expect(stepPredictionRows(report, 'jar')).toEqual([
+      {
+        chainId: '1',
+        stepId: 'jar',
+        address: '0x0000000000000000000000000000000000000001',
+        provisional: false,
+      },
+      {
+        chainId: '10',
+        stepId: 'jar',
+        address: '0x0000000000000000000000000000000000000003',
+        provisional: false,
+      },
+    ]);
+  });
+
+  it('returns an empty array when there is no report yet', () => {
+    expect(stepPredictionRows(null, 'jar')).toEqual([]);
   });
 });

@@ -82,3 +82,14 @@ export function reviewPredictedAddresses(
     }
   );
 }
+
+/**
+ * Rows for a single step, for the wizard's per-step address preview. The steps
+ * page shows the same report Review does — it is simply rendered earlier.
+ */
+export function stepPredictionRows(
+  report: ValidationReport | null | undefined,
+  stepId: string
+): ReviewPredictedAddress[] {
+  return reviewPredictedAddresses(report).filter((row) => row.stepId === stepId);
+}
