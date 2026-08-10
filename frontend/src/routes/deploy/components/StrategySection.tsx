@@ -321,13 +321,10 @@ export default function StrategySection({ stepId, report }: { stepId: string; re
           {predictionRows.map((row) => (
             <div key={`${row.stepId}-${row.chainId}`} className="flex gap-2 items-center text-xs">
               <span className={row.address ? 'mono-data' : 'text-muted'}>
-                {row.chainId}:{' '}
-                {row.address ?? `unavailable — ${row.unavailableReason}`}
+                {row.chainId}: {row.address ?? row.unavailableLabel}
               </span>
-              {row.provisional && (
-                <span className="chip">
-                  {row.provisionalLabel ?? 'provisional'}
-                </span>
+              {row.provisionalLabel && (
+                <span className="chip">{row.provisionalLabel}</span>
               )}
             </div>
           ))}

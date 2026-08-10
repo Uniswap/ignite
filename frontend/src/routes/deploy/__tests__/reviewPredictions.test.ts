@@ -121,8 +121,29 @@ describe('reviewPredictedAddresses', () => {
         stepId: 'jar',
         provisional: true,
         unavailableReason: 'execution reverted: not authorized',
+        unavailableLabel: 'unavailable — execution reverted: not authorized',
       },
     ]);
+  });
+
+  it('leaves an unavailable row without a provisional chip label', () => {
+    // "Provisional" promises the address will firm up. There is no address
+    // here, so the chip has nothing to say and must not be rendered.
+    const report = {
+      chains: {
+        '1': {
+          create2: {
+            details: {
+              provisionalSteps: [{ stepId: 'jar', degraded: 'no RPC' }],
+            },
+          },
+        },
+      },
+    } as unknown as ValidationReport;
+
+    expect(
+      reviewPredictedAddresses(report)[0]?.provisionalLabel
+    ).toBeUndefined();
   });
 });
 

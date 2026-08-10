@@ -423,9 +423,8 @@ export default function ReviewStep({ plan, validation }: ReviewStepProps) {
               chainId,
               stepId,
               address,
-              provisional,
               provisionalLabel,
-              unavailableReason,
+              unavailableLabel,
             }) => {
               const contractId = draft.steps.find(
                 (step) => step.id === stepId && step.kind === 'deploy'
@@ -443,17 +442,13 @@ export default function ReviewStep({ plan, validation }: ReviewStepProps) {
                     {chains.find((chain) => String(chain.chainId) === chainId)
                       ?.name ?? `Chain ${chainId}`}
                   </span>
-                  {provisional && (
-                    <span className="chip">
-                      {provisionalLabel ?? 'provisional'}
-                    </span>
+                  {provisionalLabel && (
+                    <span className="chip">{provisionalLabel}</span>
                   )}
                   <span
-                    className={
-                      unavailableReason ? 'text-muted ml-auto' : 'mono-data ml-auto'
-                    }
+                    className={address ? 'mono-data ml-auto' : 'text-muted ml-auto'}
                   >
-                    {address ?? `unavailable — ${unavailableReason}`}
+                    {address ?? unavailableLabel}
                   </span>
                 </div>
               );

@@ -11,9 +11,14 @@ export interface ReviewPredictedAddress {
   address?: string;
   provisional: boolean;
   // What the provisional chip should say: plain creates are nonce previews,
-  // dynamic deterministic steps are mined during the run.
+  // dynamic deterministic steps are mined during the run. Render sites key the
+  // chip off this rather than off `provisional`, because "provisional" claims
+  // an address will firm up and a row with no address has none to firm up.
   provisionalLabel?: string;
   unavailableReason?: string;
+  // The stand-in shown where the address would go. Computed here because two
+  // render sites composed the same sentence independently and could drift.
+  unavailableLabel?: string;
 }
 
 /** Narrows the open validation details record at the UI boundary. */
@@ -65,7 +70,9 @@ export function reviewPredictedAddresses(
             );
       const predictedIds = new Set(predictedRows.map((row) => row.stepId));
       // A step whose prediction failed has a reason but no address. Emitting a
-      // row keeps the section visible instead of silently shrinking it.
+      // row keeps the section visible instead of silently shrinking it. It
+      // carries no `provisionalLabel`: there is no address here that a later
+      // run will settle, so a "provisional" chip would misdescribe the row.
       const unavailableRows = provisionalInfos.flatMap((entry) =>
         entry.degraded && !predictedIds.has(entry.stepId)
           ? [
@@ -74,6 +81,7 @@ export function reviewPredictedAddresses(
                 stepId: entry.stepId,
                 provisional: true,
                 unavailableReason: entry.degraded,
+                unavailableLabel: `unavailable — ${entry.degraded}`,
               },
             ]
           : []
