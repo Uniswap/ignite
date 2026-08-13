@@ -26,6 +26,7 @@ import { VersionStore, type VersionRecord } from '../repos/VersionStore.js';
 import { ProfileManager } from '../filesystem/ProfileManager.js';
 import { WorkflowInstallService, WorkflowInstallServiceError, deriveWorkflowRequiredRoles, getWorkflowPluginReadiness, type RequiredRole } from '../workflows/WorkflowInstallService.js';
 import { InstalledWorkflowStore } from '../workflows/InstalledWorkflowStore.js';
+import { LocalWorkflowStore } from '../workflows/LocalWorkflowStore.js';
 import { JobManager } from '../jobs/JobManager.js';
 import {
   WorkflowHttpError,
@@ -68,6 +69,7 @@ export interface WorkflowHandlerDeps {
   getProfileId: () => Promise<string>;
   installService?: Pick<WorkflowInstallService, 'start'>;
   installedWorkflows: Pick<InstalledWorkflowStore, 'read'>;
+  localWorkflows: Pick<LocalWorkflowStore, 'list' | 'read' | 'write'>;
   jobs: Pick<JobManager, 'list'>;
   pluginStatus: (id: string, version: string, roles: ReadonlySet<RequiredRole>) => Promise<WorkflowPluginReadiness>;
 }
@@ -83,6 +85,7 @@ export function createWorkflowHandlers(deps?: Partial<WorkflowHandlerDeps>) {
     versionStore: deps?.versionStore ?? new VersionStore(),
     getProfileId: deps?.getProfileId ?? (async () => (await ProfileManager.getInstance()).getCurrentProfile()),
     installedWorkflows: deps?.installedWorkflows ?? new InstalledWorkflowStore(),
+    localWorkflows: deps?.localWorkflows ?? new LocalWorkflowStore(),
     jobs: deps?.jobs ?? JobManager.getInstance(),
     pluginStatus: deps?.pluginStatus ?? getWorkflowPluginReadiness,
   };
@@ -191,6 +194,43 @@ export function createWorkflowHandlers(deps?: Partial<WorkflowHandlerDeps>) {
           await writeFile(relPath(request.params.name), raw);
           return hash(raw);
         });
+        return reply.status(200).send({ data: { docHash } });
+      } catch (error) {
+        if (error && typeof error === 'object' && 'issues' in error) return fail(reply, new WorkflowHttpError(400, 'WORKFLOW_INVALID', error instanceof Error ? error.message : String(error)));
+        return fail(reply, error);
+      }
+    },
+
+    listLocalWorkflows: async (
+      _request: FastifyRequest,
+      reply: FastifyReply
+    ): Promise<IApiResponse<{ workflows: WorkflowSummary[]; truncated: boolean }>> => {
+      try {
+        return reply.status(200).send({ data: await d.localWorkflows.list(await d.getProfileId()) });
+      } catch (error) { return fail(reply, error); }
+    },
+
+    getLocalWorkflow: async (
+      request: FastifyRequest<{ Params: { name: string } }>,
+      reply: FastifyReply
+    ): Promise<IApiResponse<{ document: WorkflowDocument; raw: string; docHash: string }>> => {
+      try {
+        return reply.status(200).send({ data: await d.localWorkflows.read(await d.getProfileId(), request.params.name) });
+      } catch (error) { return fail(reply, error); }
+    },
+
+    putLocalWorkflow: async (
+      request: FastifyRequest<{ Params: { name: string }; Body: { document: unknown; baseDocHash?: string } }>,
+      reply: FastifyReply
+    ): Promise<IApiResponse<{ docHash: string }>> => {
+      try {
+        validateName(request.params.name);
+        const document = makeWorkflowDocumentSchema({ allowFileUrls: d.devMode() }).parse(request.body.document);
+        const missing = validateWorkflowClosure(document);
+        if (missing.length > 0) throw new WorkflowHttpError(400, 'WORKFLOW_CLOSURE_INVALID', `Missing required plugin ids: ${missing.join(', ')}`);
+        const raw = `${JSON.stringify(document, null, 2)}\n`;
+        if (Buffer.byteLength(raw) > MAX_WORKFLOW_BYTES) throw new WorkflowHttpError(400, 'WORKFLOW_TOO_LARGE', 'Workflow exceeds 512 KiB');
+        const docHash = await d.localWorkflows.write(await d.getProfileId(), request.params.name, document, request.body.baseDocHash);
         return reply.status(200).send({ data: { docHash } });
       } catch (error) {
         if (error && typeof error === 'object' && 'issues' in error) return fail(reply, new WorkflowHttpError(400, 'WORKFLOW_INVALID', error instanceof Error ? error.message : String(error)));

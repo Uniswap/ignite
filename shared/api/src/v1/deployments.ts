@@ -480,6 +480,7 @@ export type ArtifactDriftAcknowledgements = Record<string, { expected: string; a
 export interface WorkflowRunRequest {
   repoPathOrUrl: string;
   name: string;
+  local?: true;
   hooks: string[];
   resolutions?: ExternalResolution[];
   acknowledgeArtifactDrift?: ArtifactDriftAcknowledgements;
@@ -741,6 +742,7 @@ export const ArtifactDriftAcknowledgementsSchema = z.record(z.string().min(1), z
 export const WorkflowRunRequestSchema = z.object({
   repoPathOrUrl: z.string().min(1),
   name: z.string().min(1),
+  local: z.literal(true).optional(),
   hooks: z.array(z.string().min(1)).max(16),
   resolutions: z.array(ExternalResolutionSchema).max(4096).optional(),
   acknowledgeArtifactDrift: ArtifactDriftAcknowledgementsSchema.optional(),

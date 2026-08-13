@@ -141,6 +141,10 @@ export class FileSystem {
     );
   }
 
+  getProfileLocalWorkflowsPath(profileId: string): string {
+    return path.join(this.getProfilePath(profileId), 'workflows', 'local');
+  }
+
   // === Archive Paths ===
 
   getArchivedProfilesPath(): string {

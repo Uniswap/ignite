@@ -119,6 +119,28 @@ describe('WorkflowPromotionService', () => {
     expect(document.requiredPlugins).toContainEqual({ id: 'proxy-plugin', version: '1.2.3' });
   });
 
+  it('copies a local workflow into a repository through the promotion preview and apply flow', async () => {
+    const localDocument: WorkflowDocument = {
+      schemaVersion: 1,
+      sources: [{ id: 'contract', repo: { url: 'https://example.test/repo.git', commit: SHA }, frameworkId: 'foundry', sourcePath: 'src/Contract.sol', contractName: 'Contract', artifactPath: 'out/Contract.json' }],
+      steps: [{ id: 'deploy', kind: 'deploy', contractId: 'contract' }],
+      requiredPlugins: [{ id: 'foundry', version: '1' }],
+      outputs: { hooks: [] },
+    };
+    const localWorkflows = {
+      read: async (_profile: string, name: string) => {
+        if (name !== 'local-release') throw Object.assign(new Error('missing'), { code: 'WORKFLOW_NOT_FOUND' });
+        return { document: localDocument, raw: JSON.stringify(localDocument), docHash: HASH };
+      },
+      write: async () => HASH,
+    };
+    const service = makeService({ localWorkflows });
+    const target = { kind: 'repo' as const, repoPathOrUrl: '/target', name: 'release' };
+    const preview = await service.promote({ mode: 'preview', target, source: { kind: 'local', name: 'local-release' } }, 'p1');
+    await service.promote({ mode: 'apply', previewId: preview.previewId, target, source: { kind: 'local', name: 'local-release' }, hooks: [] }, 'p1');
+    expect(JSON.parse(files.get('ignite/workflows/release.json')!)).toEqual(localDocument);
+  });
+
   it('mints opaque source ids, remaps every contract reference, skips pinned inspection, and warns for local-only commits', async () => {
     const inspectSource = vi.fn();
     const source = { repoPathOrUrl: 'https://example.test/repo.git', frameworkId: 'foundry', sourcePath: 'src/C.sol', contractName: 'C', artifactPath: 'out/C.json' };

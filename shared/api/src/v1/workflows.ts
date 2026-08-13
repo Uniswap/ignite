@@ -94,6 +94,10 @@ export interface WorkflowSummary {
   hooks?: string[];
 }
 
+export type WorkflowPromotionTarget =
+  | { kind: 'repo'; repoPathOrUrl: string; name: string }
+  | { kind: 'local'; name: string };
+
 export type WorkflowSourceReadiness = { id: string; status: 'ready' | 'cloning' | 'compiling' } | { id: string; status: 'failed'; reason: string; code?: 'ARTIFACT_NOT_FOUND' | 'FRAMEWORK_MISSING' | 'LIFECYCLE_FAILED'; artifactPath?: string };
 export type WorkflowPluginReadiness =
   | { id: string; status: 'installed'; installedVersion: string }
@@ -130,8 +134,8 @@ export interface InstalledWorkflowsFile { schemaVersion: 1; records: InstalledWo
 
 export interface WorkflowPromotionSourcePreview { sourceId: string; origin: string; commit: string; tagChoices: string[]; dirty: boolean; error?: string }
 export type WorkflowPromoteRequest =
-  | { mode: 'preview'; target: { repoPathOrUrl: string; name: string }; plan?: DeploymentPlan; runId?: string }
-  | { mode: 'apply'; previewId: string; target: { repoPathOrUrl: string; name: string }; plan?: DeploymentPlan; runId?: string; tagChoiceBySourceId?: Record<string, string>; overwrite?: boolean; hooks: string[]; adoptRunIds?: string[] };
+  | { mode: 'preview'; target: WorkflowPromotionTarget; plan?: DeploymentPlan; runId?: string; source?: { kind: 'local'; name: string } }
+  | { mode: 'apply'; previewId: string; target: WorkflowPromotionTarget; plan?: DeploymentPlan; runId?: string; source?: { kind: 'local'; name: string }; tagChoiceBySourceId?: Record<string, string>; overwrite?: boolean; hooks: string[]; adoptRunIds?: string[] };
 export type WorkflowPromoteData =
   | { mode: 'preview'; previewId: string; sources: WorkflowPromotionSourcePreview[]; nameCollision: boolean }
   | { mode: 'apply'; workflow: WorkflowSummary; docHash: string; warnings?: string[] };
@@ -332,11 +336,14 @@ const WorkflowPutBodySchema = z.object({ document: z.unknown(), baseDocHash: z.s
 const WorkflowInstallBodySchema = z.object({ repoPathOrUrl: z.string().min(1), name: z.string().regex(WorkflowNamePattern), expectedDocHash: z.string().regex(SHA256_HEX) }).strict();
 const WorkflowApproveOriginsBodySchema = z.object({ origins: z.array(z.string().min(1)).min(1).max(64) }).strict();
 const WorkflowApproveOriginsResponseSchema = createApiResponseSchema<{ origins: string[] }>('WorkflowApproveOriginsResponseSchema')(z.object({ origins: z.array(z.string()) }).strict());
-const PromotionTargetSchema = z.object({ repoPathOrUrl: z.string().min(1), name: z.string().regex(WorkflowNamePattern) }).strict();
+const PromotionTargetSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('repo'), repoPathOrUrl: z.string().min(1), name: z.string().regex(WorkflowNamePattern) }).strict(),
+  z.object({ kind: z.literal('local'), name: z.string().regex(WorkflowNamePattern) }).strict(),
+]) satisfies z.ZodType<WorkflowPromotionTarget>;
 const RunIdSchema = z.string().regex(RUN_ID_PATTERN);
-const PromotionSelectionShape = { target: PromotionTargetSchema, plan: DeploymentPlanSchema.optional(), runId: RunIdSchema.optional() };
-const exactlyOnePromotionInput = (value: { plan?: unknown; runId?: string }, ctx: z.RefinementCtx) => {
-  if ((value.plan === undefined) === (value.runId === undefined)) ctx.addIssue({ code: 'custom', message: 'exactly one of plan or runId is required' });
+const PromotionSelectionShape = { target: PromotionTargetSchema, plan: DeploymentPlanSchema.optional(), runId: RunIdSchema.optional(), source: z.object({ kind: z.literal('local'), name: z.string().regex(WorkflowNamePattern) }).strict().optional() };
+const exactlyOnePromotionInput = (value: { plan?: unknown; runId?: string; source?: unknown }, ctx: z.RefinementCtx) => {
+  if ([value.plan, value.runId, value.source].filter((input) => input !== undefined).length !== 1) ctx.addIssue({ code: 'custom', message: 'exactly one of plan, runId, or source is required' });
 };
 const PromotionPreviewRequestSchema = z.object({ mode: z.literal('preview'), ...PromotionSelectionShape }).strict().superRefine(exactlyOnePromotionInput);
 const PromotionApplyRequestSchema = z.object({
@@ -405,6 +412,9 @@ export const workflowRoutes = {
   getWorkflowsStatus: { method: 'GET' as const, path: `${V1_BASE_PATH}/repos/workflows/status`, schema: { tags: ['repos'], querystring: WorkflowPathQuerySchema, response: { 200: WorkflowStatusResponseSchema } } },
   getWorkflow: { method: 'GET' as const, path: `${V1_BASE_PATH}/repos/workflows/:name`, schema: { tags: ['repos'], params: WorkflowNameParamsSchema, querystring: WorkflowPathQuerySchema, response: { 200: WorkflowGetResponseSchema } } },
   putWorkflow: { method: 'PUT' as const, path: `${V1_BASE_PATH}/repos/workflows/:name`, schema: { tags: ['repos'], params: WorkflowNameParamsSchema, querystring: WorkflowPathQuerySchema, body: WorkflowPutBodySchema, response: { 200: WorkflowPutResponseSchema } } },
+  listLocalWorkflows: { method: 'GET' as const, path: `${V1_BASE_PATH}/workflows/local`, schema: { tags: ['workflows'], response: { 200: WorkflowListResponseSchema } } },
+  getLocalWorkflow: { method: 'GET' as const, path: `${V1_BASE_PATH}/workflows/local/:name`, schema: { tags: ['workflows'], params: WorkflowNameParamsSchema, response: { 200: WorkflowGetResponseSchema } } },
+  putLocalWorkflow: { method: 'PUT' as const, path: `${V1_BASE_PATH}/workflows/local/:name`, schema: { tags: ['workflows'], params: WorkflowNameParamsSchema, body: WorkflowPutBodySchema, response: { 200: WorkflowPutResponseSchema } } },
   installWorkflow: { method: 'POST' as const, path: `${V1_BASE_PATH}/workflows/install`, schema: { tags: ['workflows'], body: WorkflowInstallBodySchema, response: { 200: JobStartedResponseSchema } } },
   approveWorkflowOrigins: { method: 'POST' as const, path: `${V1_BASE_PATH}/workflows/approve-origins`, schema: { tags: ['workflows'], body: WorkflowApproveOriginsBodySchema, response: { 200: WorkflowApproveOriginsResponseSchema } } },
   promoteWorkflow: { method: 'POST' as const, path: `${V1_BASE_PATH}/workflows/promote`, schema: { tags: ['workflows'], body: WorkflowPromoteRequestSchema, response: { 200: WorkflowPromoteResponseSchema } } },
