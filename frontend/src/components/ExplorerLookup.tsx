@@ -25,11 +25,14 @@ export function explorerLookupOptions(
     if (!chain) continue;
     const seen = new Set<string>();
     for (const explorer of chain.explorers ?? []) {
-      // Only EIP3091 explorers have a known /address/ page layout — the same
-      // restriction explorerAddressUrl applies for run links.
-      if (explorer.standard !== 'EIP3091') continue;
-      const base = explorer.url.replace(/\/+$/, '');
-      if (!/^https?:\/\//.test(base) || seen.has(base)) continue;
+      // EIP3091 explorers have a known /address/ page layout. An absent
+      // standard is accepted too: custom chains save their user-entered
+      // explorer without one (ChainModal), and excluding it would hide the
+      // lookup on exactly the chains that only exist by the user's own hand.
+      if (explorer.standard !== undefined && explorer.standard !== 'EIP3091')
+        continue;
+      const base = explorer.url.trim().replace(/\/+$/, '');
+      if (!/^https?:\/\//i.test(base) || seen.has(base)) continue;
       seen.add(base);
       options.push({
         chainId,
@@ -92,7 +95,7 @@ export default function ExplorerLookupSuffix({
         </button>
       )}
       menuClassName="glass-overlay"
-      menuStyle={{ padding: 8, minWidth: 200 }}
+      menuStyle={{ padding: 8, minWidth: 200, maxWidth: 360, overflowY: 'auto' }}
     >
       {({ close }) => (
         <div className="flex flex-col gap-1">
@@ -103,10 +106,11 @@ export default function ExplorerLookupSuffix({
               target="_blank"
               rel="noreferrer"
               className="btn btn-secondary flex items-center justify-start gap-2 w-full text-sm"
+              title={option.label}
               onClick={close}
             >
-              <ExternalLink size={14} />
-              {option.label}
+              <ExternalLink size={14} className="shrink-0" />
+              <span className="truncate">{option.label}</span>
             </a>
           ))}
         </div>

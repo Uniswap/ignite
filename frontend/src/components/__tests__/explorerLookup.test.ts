@@ -29,7 +29,7 @@ const MAINNET = chain({
       url: 'https://eth.blockscout.com',
       standard: 'EIP3091',
     },
-    { name: 'Otterscan', url: 'https://otter.example' },
+    { name: 'Otterscan', url: 'https://otter.example', standard: 'none' },
   ],
 });
 const BASE = chain({
@@ -57,11 +57,21 @@ describe('explorerLookupOptions', () => {
     ]);
   });
 
-  it('skips explorers without the EIP3091 standard', () => {
+  it('skips explorers declaring a non-EIP3091 standard', () => {
     const options = explorerLookupOptions([MAINNET], [1]);
     expect(
       options.some((option) => option.label.includes('Otterscan'))
     ).toBe(false);
+  });
+
+  it('accepts explorers without a standard (custom chains save none)', () => {
+    const custom = chain({
+      chainId: 31337,
+      name: 'Local',
+      source: 'custom',
+      explorers: [{ name: 'explorer', url: 'https://scan.local.example' }],
+    });
+    expect(explorerLookupOptions([custom], [31337])).toHaveLength(1);
   });
 
   it('dedupes explorers sharing a URL and skips non-http URLs', () => {
@@ -69,7 +79,7 @@ describe('explorerLookupOptions', () => {
       chainId: 10,
       name: 'Optimism',
       explorers: [
-        { name: 'A', url: 'https://scan.example//', standard: 'EIP3091' },
+        { name: 'A', url: ' https://scan.example// ', standard: 'EIP3091' },
         { name: 'B', url: 'https://scan.example', standard: 'EIP3091' },
         { name: 'C', url: 'ftp://scan.example', standard: 'EIP3091' },
       ],
