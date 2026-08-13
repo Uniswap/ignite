@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createPublicClient, http, type Hex } from 'viem';
+import type { SimulatedLog, StorageSlotChange } from '@ignite/api';
 import type { ScheduleEntry } from './schedule.js';
 import { ownerLabels } from '../system/orphanSweep.js';
 
@@ -21,9 +22,14 @@ export interface ForkRunner {
         status: 'ok' | 'reverted';
         reason?: string;
         createdAddress?: Hex;
+        logs: SimulatedLog[];
       }
     > & { probes?: Record<string, Hex> }
   >;
+  storageSlotChanges(schedule: ScheduleEntry[], stepId: string): Promise<{
+    target?: Hex;
+    storage: Record<string, StorageSlotChange[]>;
+  }>;
 }
 
 export interface ForkDocker {
@@ -74,8 +80,41 @@ function hex(value: bigint): Hex {
   return `0x${value.toString(16)}` as Hex;
 }
 
+function word(value: unknown): Hex {
+  const raw = typeof value === 'string' && /^0x[0-9a-fA-F]*$/.test(value)
+    ? value.slice(2)
+    : '';
+  return `0x${raw.padStart(64, '0').slice(-64)}` as Hex;
+}
+
+export function storageDiff(trace: unknown): Record<string, StorageSlotChange[]> {
+  if (!trace || typeof trace !== 'object') return {};
+  const root = trace as { pre?: unknown; post?: unknown };
+  const pre = root.pre && typeof root.pre === 'object' ? root.pre as Record<string, unknown> : {};
+  const post = root.post && typeof root.post === 'object' ? root.post as Record<string, unknown> : {};
+  const result: Record<string, StorageSlotChange[]> = {};
+  for (const address of new Set([...Object.keys(pre), ...Object.keys(post)])) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) continue;
+    const before = (pre[address] as { storage?: unknown } | undefined)?.storage;
+    const after = (post[address] as { storage?: unknown } | undefined)?.storage;
+    const beforeSlots = before && typeof before === 'object' ? before as Record<string, unknown> : {};
+    const afterSlots = after && typeof after === 'object' ? after as Record<string, unknown> : {};
+    const slots = [...new Set([...Object.keys(beforeSlots), ...Object.keys(afterSlots)])]
+      .filter((slot) => /^0x[0-9a-fA-F]{1,64}$/.test(slot))
+      .sort()
+      .map((slot) => ({ slot: word(slot), before: word(beforeSlots[slot]), after: word(afterSlots[slot]) }))
+      .filter((change) => change.before.toLowerCase() !== change.after.toLowerCase());
+    result[address as Hex] = slots;
+  }
+  return result;
+}
+
+export function storageTraceTarget(entry: ScheduleEntry): Hex | undefined {
+  return entry.address ?? entry.predictedAddress ?? entry.to ?? undefined;
+}
+
 export async function makeForkRunner(
-  opts: { rpcUrl: string; chainId: number },
+  opts: { rpcUrl: string; chainId: number; forkBlockNumber?: number },
   deps?: { docker?: ForkDocker }
 ): Promise<ForkRunner | undefined> {
   const rawDocker = new Docker();
@@ -107,7 +146,7 @@ export async function makeForkRunner(
       // The foundry image's default entrypoint wraps Cmd; override it or the
       // shell invocation never runs (container exits, RPC never comes up).
       Entrypoint: ['sh', '-c'],
-      Cmd: ['anvil --fork-url "$(cat /run/ignite-fork-url)" --host 0.0.0.0 --port 8545'],
+      Cmd: [`anvil --fork-url "$(cat /run/ignite-fork-url)" --host 0.0.0.0 --port 8545${opts.forkBlockNumber === undefined ? '' : ` --fork-block-number ${opts.forkBlockNumber}`}`],
       HostConfig: {
         AutoRemove: true,
         PortBindings: { '8545/tcp': [{ HostPort: '' }] },
@@ -122,6 +161,18 @@ export async function makeForkRunner(
     const url = `http://127.0.0.1:${await portOf(container)}`;
     await waitForRpc(url);
     const owned = container;
+    const cleanup = async () => {
+      try {
+        await owned.stop({ t: 1 });
+      } catch {
+        // A failed stop can leave a running container behind despite
+        // AutoRemove, so force removal just as setup-error cleanup does.
+        await owned.remove({ force: true, v: true }).catch(() => {});
+      } finally {
+        release();
+        if (urlFile) await fs.rm(urlFile, { force: true }).catch(() => {});
+      }
+    };
     return {
       async run(schedule, probes) {
         const client = createPublicClient({ transport: http(url) });
@@ -133,6 +184,7 @@ export async function makeForkRunner(
             status: 'ok' | 'reverted';
             reason?: string;
             createdAddress?: Hex;
+            logs: SimulatedLog[];
           }
         > = {};
         try {
@@ -177,6 +229,11 @@ export async function makeForkRunner(
               ...(receipt.contractAddress
                 ? { createdAddress: receipt.contractAddress }
                 : {}),
+              logs: receipt.logs.map((log) => ({
+                address: log.address,
+                topics: [...log.topics],
+                data: log.data,
+              })),
             };
           }
           const probeResults: Record<string, Hex> = {};
@@ -188,12 +245,45 @@ export async function makeForkRunner(
           }
           return Object.assign(receipts, Object.keys(probeResults).length ? { probes: probeResults } : {});
         } finally {
-          try {
-            await owned.stop({ t: 1 });
-          } finally {
-            release();
-            if (urlFile) await fs.rm(urlFile, { force: true }).catch(() => {});
+          await cleanup();
+        }
+      },
+      async storageSlotChanges(schedule, stepId) {
+        const client = createPublicClient({ transport: http(url) });
+        const deadline = Date.now() + 120_000;
+        try {
+          const targetIndex = schedule.findIndex((entry) => entry.stepId === stepId);
+          if (targetIndex < 0 || schedule[targetIndex]?.kind !== 'tx')
+            throw new Error(`Storage changes are unavailable for ${stepId}`);
+          const rpc = client as unknown as {
+            request(args: { method: string; params: unknown[] }): Promise<unknown>;
+          };
+          let targetHash: Hex | undefined;
+          for (const entry of schedule.slice(0, targetIndex + 1)) {
+            if (entry.kind === 'existing') continue;
+            if (!entry.from || !entry.data || entry.value === undefined)
+              throw new Error(`Schedule entry ${entry.stepId} is incomplete`);
+            await rpc.request({ method: 'anvil_impersonateAccount', params: [entry.from] });
+            // Deliberately mirrors run(): replay must use the same funding.
+            await rpc.request({ method: 'anvil_setBalance', params: [entry.from, hex(10n ** 24n)] });
+            const hash = (await rpc.request({
+              method: 'eth_sendTransaction',
+              params: [{ from: entry.from, ...(entry.to ? { to: entry.to } : {}), data: entry.data, value: hex(entry.value) }],
+            })) as Hex;
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) throw new Error('Fork storage replay timed out');
+            await client.waitForTransactionReceipt({ hash, timeout: remaining });
+            if (entry.stepId === stepId) targetHash = hash;
           }
+          if (!targetHash) throw new Error(`Storage replay did not send ${stepId}`);
+          const trace = await rpc.request({
+            method: 'debug_traceTransaction',
+            params: [targetHash, { tracer: 'prestateTracer', tracerConfig: { diffMode: true } }],
+          });
+          const target = storageTraceTarget(schedule[targetIndex]!);
+          return { ...(target ? { target } : {}), storage: storageDiff(trace) };
+        } finally {
+          await cleanup();
         }
       },
     };

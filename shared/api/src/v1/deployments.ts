@@ -442,6 +442,59 @@ export interface ValidationItem {
   details?: Record<string, unknown>;
 }
 
+export interface SimulatedLog {
+  address: Hex;
+  topics: Hex[];
+  data: Hex;
+}
+
+export interface SimulationStepResult {
+  gasUsed?: string;
+  status: 'ok' | 'reverted' | 'skipped-existing' | 'unestimable';
+  reason?: string;
+  // An absent field means the estimate-only tier was used. Simulating tiers
+  // always include it, including when no events were emitted.
+  logs?: SimulatedLog[];
+}
+
+export interface SimulationDetails {
+  tier: 'simulateV1' | 'fork' | 'estimate';
+  baseBlock?: number;
+  perStep: Record<string, SimulationStepResult>;
+  warnings: string[];
+  fallthrough: string[];
+  probes?: Record<string, Hex>;
+}
+
+export interface StorageSlotChange {
+  slot: Hex32;
+  before: Hex32;
+  after: Hex32;
+}
+
+export interface StorageSlotChangesRequest {
+  plan: DeploymentPlan;
+  rpcSelection: RpcSelection;
+  chainId: number;
+  stepId: string;
+  // The review simulation's chain snapshot. Omit to retain the prior
+  // latest-block behavior for older clients.
+  baseBlock?: number;
+}
+
+export interface StorageSlotChangesData {
+  target?: Hex;
+  storage: Record<string, StorageSlotChange[]>;
+}
+
+export interface EventSignatureQuery {
+  topic0: Hex32;
+}
+
+export interface EventSignatureData {
+  signature?: string;
+}
+
 export interface ChainChecklist {
   rpc: ValidationItem;
   signers: ValidationItem;
@@ -1258,6 +1311,43 @@ export const ValidateDeploymentResponseSchema =
     }),
   );
 
+export const StorageSlotChangesRequestSchema =
+  createRequestSchema<StorageSlotChangesRequest>(
+    'StorageSlotChangesRequestSchema',
+  )(
+    z.object({
+      plan: DeploymentPlanSchema,
+      rpcSelection: RpcSelectionSchema,
+      chainId: z.number().int().positive(),
+      stepId: z.string().min(1),
+      baseBlock: z.number().int().nonnegative().optional(),
+    }).superRefine((request, ctx) => {
+      if (!request.plan.chains.includes(request.chainId))
+        ctx.addIssue({ code: 'custom', message: 'chainId must be included in plan.chains', path: ['chainId'] });
+      if (!request.plan.steps.some((step) => step.id === request.stepId))
+        ctx.addIssue({ code: 'custom', message: 'stepId must name a plan step', path: ['stepId'] });
+    }),
+  );
+
+export const StorageSlotChangesResponseSchema =
+  createApiResponseSchema<StorageSlotChangesData>(
+    'StorageSlotChangesResponseSchema',
+  )(
+    z.object({
+      target: AddressSchema.optional(),
+      storage: z.record(
+        z.string().regex(HEX_ADDRESS),
+        z.array(z.object({ slot: Hex32Schema, before: Hex32Schema, after: Hex32Schema })),
+      ),
+    }),
+  );
+
+export const EventSignatureQuerySchema = z.object({ topic0: Hex32Schema });
+export const EventSignatureResponseSchema =
+  createApiResponseSchema<EventSignatureData>('EventSignatureResponseSchema')(
+    z.object({ signature: z.string().min(1).optional() }),
+  );
+
 export const CreateRunRequestSchema = createRequestSchema<CreateRunRequest>(
   "CreateRunRequestSchema",
 )(
@@ -1424,6 +1514,24 @@ export const deploymentRoutes = {
       tags: ["deployments"],
       body: ValidateDeploymentRequestSchema,
       response: { 200: ValidateDeploymentResponseSchema },
+    },
+  },
+  getStorageSlotChanges: {
+    method: 'POST' as const,
+    path: `${V1_BASE_PATH}/deployments/storage-slot-changes`,
+    schema: {
+      tags: ['deployments'],
+      body: StorageSlotChangesRequestSchema,
+      response: { 200: StorageSlotChangesResponseSchema },
+    },
+  },
+  lookupEventSignature: {
+    method: 'GET' as const,
+    path: `${V1_BASE_PATH}/deployments/event-signature`,
+    querystring: EventSignatureQuerySchema,
+    schema: {
+      tags: ['deployments'],
+      response: { 200: EventSignatureResponseSchema },
     },
   },
   createDeploymentRun: {

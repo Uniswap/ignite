@@ -38,7 +38,7 @@ describe('simulateChain', () => {
       blocks: [
         {
           calls: [
-            { status: 'success', gasUsed: '10' },
+            { status: 'success', gasUsed: '10', logs: [{ address: A, topics: [`0x${'11'.repeat(32)}`], data: '0x1234' }] },
             { status: 'success', gasUsed: '11' },
             { status: 'success', gasUsed: '12' },
           ],
@@ -71,7 +71,7 @@ describe('simulateChain', () => {
       tier: 'simulateV1',
       baseBlock: 99,
       perStep: {
-        one: { gasUsed: '10' },
+        one: { gasUsed: '10', logs: [{ address: A, topics: [`0x${'11'.repeat(32)}`], data: '0x1234' }] },
         two: { gasUsed: '11' },
         three: { gasUsed: '12' },
       },
@@ -88,8 +88,9 @@ describe('simulateChain', () => {
   it('falls through unsupported simulateV1 to the fork runner', async () => {
     const fork = {
       run: vi.fn(async () => ({
-        one: { status: 'ok' as const, gasUsed: '42' },
+        one: { status: 'ok' as const, gasUsed: '42', logs: [{ address: A, topics: [], data: '0x' as Hex }] },
       })),
+      storageSlotChanges: vi.fn(),
     };
     const outcome = await simulateChain({
       chainId: 1,
@@ -111,7 +112,7 @@ describe('simulateChain', () => {
     });
     expect(outcome).toMatchObject({
       tier: 'fork',
-      perStep: { one: { status: 'ok', gasUsed: '42' } },
+      perStep: { one: { status: 'ok', gasUsed: '42', logs: [{ address: A, topics: [], data: '0x' }] } },
     });
     expect(outcome.fallthrough[0]).toContain(
       'SIMULATION_SIMULATEV1_UNAVAILABLE'
@@ -172,8 +173,9 @@ describe('simulateChain', () => {
         },
         getFork: async () => ({
           run: async () => ({
-            one: { status: 'ok', gasUsed: '1', createdAddress: B },
+            one: { status: 'ok', gasUsed: '1', createdAddress: B, logs: [] },
           }),
+          storageSlotChanges: async () => ({ storage: {} }),
         }),
       })
     ).rejects.toMatchObject({ code: 'SIMULATION_ADDRESS_DIVERGENCE' });

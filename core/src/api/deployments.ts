@@ -13,6 +13,10 @@ import type {
   RunRecord,
   ValidateDeploymentData,
   ValidateDeploymentRequest,
+  StorageSlotChangesData,
+  StorageSlotChangesRequest,
+  EventSignatureData,
+  EventSignatureQuery,
   WorkflowDocument,
   WorkflowRunBinding,
   WorkflowRunRequest,
@@ -40,10 +44,13 @@ import { sendCaughtError } from './utils/errors.js';
 import { RepoService } from '../repos/RepoService.js';
 import { WorkflowHttpError, readWorkflowDocument } from './workflows.js';
 import { InstalledWorkflowStore } from '../workflows/InstalledWorkflowStore.js';
+import { storageSlotChanges } from '../deployments/validation.js';
+import { lookupEventSignature } from '../deployments/eventSignatures.js';
 
 type ProfileSource = { getCurrentProfile(): string };
 type RunIdParams = { runId: string };
 type ResolveLaneParams = { runId: string; chainId: string };
+let storageTraceInFlight = false;
 export interface DeploymentHandlerDeps {
   engine: Pick<DeployEngine, 'launch' | 'resolveLane' | 'resume' | 'abort'>;
   getProfileManager: () => Promise<ProfileSource>;
@@ -73,6 +80,15 @@ export interface DeploymentHandlerDeps {
   deploymentTypes: Pick<DeploymentTypeService, 'prepare'>;
   readWorkflow: (repoPathOrUrl: string, name: string) => Promise<{ document: WorkflowDocument; raw: string; docHash: string }>;
   installedWorkflows: Pick<InstalledWorkflowStore, 'get'>;
+  storageSlotChanges: (
+    plan: StorageSlotChangesRequest['plan'],
+    rpcSelection: StorageSlotChangesRequest['rpcSelection'],
+    chainId: number,
+    stepId: string,
+    baseBlock?: number,
+    opts?: { profileId?: string },
+  ) => Promise<StorageSlotChangesData>;
+  lookupEventSignature: (topic0: EventSignatureQuery['topic0']) => Promise<string | undefined>;
 }
 
 export function createDeploymentHandlers(
@@ -110,6 +126,11 @@ export function createDeploymentHandlers(
     readWorkflow:
       deps?.readWorkflow ?? ((repoPathOrUrl, name) => readWorkflowDocument(RepoService.getInstance(), repoPathOrUrl, name, process.env.NODE_ENV === 'development')),
     installedWorkflows: deps?.installedWorkflows ?? new InstalledWorkflowStore(),
+    storageSlotChanges:
+      deps?.storageSlotChanges ??
+      ((plan, rpcSelection, chainId, stepId, baseBlock, opts) =>
+        storageSlotChanges(plan, rpcSelection, chainId, stepId, baseBlock, opts)),
+    lookupEventSignature: deps?.lookupEventSignature ?? lookupEventSignature,
   };
   const profileId = async () =>
     (await d.getProfileManager()).getCurrentProfile();
@@ -132,7 +153,8 @@ export function createDeploymentHandlers(
           ? 500
           : error.code === ErrorCodes.DEPLOYMENT_RUN_NOT_FOUND
             ? 404
-            : error.code === ErrorCodes.STALE_RESOLVE
+          : error.code === ErrorCodes.STALE_RESOLVE ||
+              error.code === ErrorCodes.DEPLOYMENT_STORAGE_TRACE_BUSY
               ? 409
               : 400;
       return reply
@@ -197,6 +219,49 @@ export function createDeploymentHandlers(
               ...(result.report.run ? { run: result.report.run } : {}),
             },
           });
+      } catch (error) {
+        return deploymentError(reply, error);
+      }
+    },
+    getStorageSlotChanges: async (
+      request: FastifyRequest<{ Body: StorageSlotChangesRequest }>,
+      reply: FastifyReply,
+    ): Promise<IApiResponse<StorageSlotChangesData>> => {
+      let ownsStorageTrace = false;
+      try {
+        if (storageTraceInFlight)
+          throw new IgniteError(
+            'A storage trace is already running. Try again after it finishes.',
+            ErrorCodes.DEPLOYMENT_STORAGE_TRACE_BUSY,
+          );
+        storageTraceInFlight = true;
+        ownsStorageTrace = true;
+        const body = request.body;
+        const data = await d.storageSlotChanges(
+          body.plan,
+          body.rpcSelection,
+          body.chainId,
+          body.stepId,
+          body.baseBlock,
+          { profileId: await profileId() },
+        );
+        return reply.status(200).send({ data });
+      } catch (error) {
+        return deploymentError(reply, error instanceof IgniteError ? error : new IgniteError(
+          error instanceof Error ? error.message : String(error),
+          ErrorCodes.DEPLOYMENT_VALIDATION_FAILED,
+        ));
+      } finally {
+        if (ownsStorageTrace) storageTraceInFlight = false;
+      }
+    },
+    lookupEventSignature: async (
+      request: FastifyRequest<{ Querystring: EventSignatureQuery }>,
+      reply: FastifyReply,
+    ): Promise<IApiResponse<EventSignatureData>> => {
+      try {
+        const signature = await d.lookupEventSignature(request.query.topic0);
+        return reply.status(200).send({ data: signature ? { signature } : {} });
       } catch (error) {
         return deploymentError(reply, error);
       }

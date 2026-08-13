@@ -72,7 +72,7 @@ function createAllTypedApiActions<T extends Record<string, unknown>>(
   const actions = {} as CreateTypedApiActions<T>;
 
   for (const endpoint in routes) {
-    actions[endpoint as keyof T] = createTypedApiAction(
+    (actions as Record<keyof T, unknown>)[endpoint as keyof T] = createTypedApiAction(
       endpoint as keyof typeof v1Routes
     );
   }

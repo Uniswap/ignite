@@ -359,4 +359,52 @@ describe('deployment route handlers', () => {
     );
     expect(res.statusCode).toBe(404);
   });
+
+  it('returns an on-demand storage trace for the requested chain step', async () => {
+    const storageSlotChanges = vi.fn(async () => ({
+      target: '0x0000000000000000000000000000000000000002' as Hex,
+      storage: { '0x0000000000000000000000000000000000000002': [] },
+    }));
+    const handlers = createDeploymentHandlers({
+      engine: { launch: vi.fn(), resolveLane: vi.fn(), resume: vi.fn(), abort: vi.fn() } as never,
+      getProfileManager: async () => ({ getCurrentProfile: () => 'one' }),
+      storageSlotChanges,
+    });
+    const res = reply();
+    await handlers.getStorageSlotChanges(request({ plan, rpcSelection: { '1': 'rpc' }, chainId: 1, stepId: 's', baseBlock: 123 }) as never, res);
+    expect(res.statusCode).toBe(200);
+    expect(storageSlotChanges).toHaveBeenCalledWith(plan, { '1': 'rpc' }, 1, 's', 123, { profileId: 'one' });
+  });
+
+  it('rejects a second concurrent storage trace while the first is running', async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const handlers = createDeploymentHandlers({
+      engine: { launch: vi.fn(), resolveLane: vi.fn(), resume: vi.fn(), abort: vi.fn() } as never,
+      getProfileManager: async () => ({ getCurrentProfile: () => 'one' }),
+      storageSlotChanges: vi.fn(async () => { await pending; return { storage: {} }; }),
+    });
+    const body = { plan, rpcSelection: { '1': 'rpc' }, chainId: 1, stepId: 's' };
+    const first = handlers.getStorageSlotChanges(request(body) as never, reply());
+    await Promise.resolve();
+    const secondReply = reply();
+    await handlers.getStorageSlotChanges(request(body) as never, secondReply);
+    expect(secondReply.statusCode).toBe(409);
+    expect(secondReply.body).toMatchObject({ code: ErrorCodes.DEPLOYMENT_STORAGE_TRACE_BUSY });
+    finish();
+    await first;
+  });
+
+  it('returns a cached event signature lookup result', async () => {
+    const handlers = createDeploymentHandlers({
+      engine: { launch: vi.fn(), resolveLane: vi.fn(), resume: vi.fn(), abort: vi.fn() } as never,
+      getProfileManager: async () => ({ getCurrentProfile: () => 'one' }),
+      lookupEventSignature: vi.fn(async () => 'Ping(uint256)'),
+    });
+    const res = reply();
+    const topic0 = `0x${'11'.repeat(32)}`;
+    await handlers.lookupEventSignature(request(undefined, undefined, { topic0 }) as never, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ data: { signature: 'Ping(uint256)' } });
+  });
 });

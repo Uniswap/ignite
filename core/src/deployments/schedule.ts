@@ -9,7 +9,7 @@ export interface ScheduleEntry { stepId: string; kind: 'tx' | 'existing'; from?:
 export type Predictions = Record<string, { predictedAddress: Hex; initcodeHash: Hex32; salt: Hex32 }>;
 export type ProvisionalPrediction = { predictedAddress: Hex; initcodeHash: Hex32; salt: Hex32; provisional?: true; notes?: string[] } | { absent: true; reason: string; provisional: true };
 export type ChainPredictions = { predictions: Predictions; entries: Record<string, ProvisionalPrediction>; createAddresses: Map<string, Hex>; baseNonces: Map<Hex, number>; nonceError?: string; confirmedExisting: Set<string>; dynamic: Set<string> };
-type SnapshotClient = { getTransactionCount?(args: { address: Hex; blockTag?: 'latest' }): Promise<number | bigint>; getCode?(args: { address: Hex }): Promise<Hex | undefined> };
+type SnapshotClient = { getTransactionCount?(args: { address: Hex; blockTag?: 'latest'; blockNumber?: bigint }): Promise<number | bigint>; getCode?(args: { address: Hex; blockNumber?: bigint }): Promise<Hex | undefined> };
 export function hasPredicted(entry: ProvisionalPrediction | undefined): entry is Exclude<ProvisionalPrediction, { absent: true }> { return Boolean(entry && 'predictedAddress' in entry); }
 const provisionalCache = new Map<string, { expires: number; value: Promise<{ salt: Hex32; predictedAddress: Hex; notes: string[] }> }>();
 export function clearProvisionalPredictionCache(): void { provisionalCache.clear(); }
@@ -68,7 +68,7 @@ export function predictPlanAddresses(plan: DeploymentPlan, frozen: FrozenInputs,
 }
 
 /** One review-time view: static commitments plus disposable dynamic estimates. */
-export async function buildChainPredictions(plan: DeploymentPlan, frozen: FrozenInputs, chainId: number, deps: { client?: SnapshotClient; signers?: Map<string, Hex>; deploymentTypes?: Pick<DeploymentTypeService, 'prepare'> }): Promise<ChainPredictions> {
+export async function buildChainPredictions(plan: DeploymentPlan, frozen: FrozenInputs, chainId: number, deps: { client?: SnapshotClient; signers?: Map<string, Hex>; deploymentTypes?: Pick<DeploymentTypeService, 'prepare'>; blockNumber?: bigint }): Promise<ChainPredictions> {
   validateDependencies(plan);
   const dynamic = dynamicDeterministicStepIds(plan, chainId);
   const predictions = predictPlanAddresses(plan, frozen, chainId);
@@ -83,7 +83,7 @@ export async function buildChainPredictions(plan: DeploymentPlan, frozen: Frozen
   const addresses = [...new Set([...signers.values()].map((address) => address.toLowerCase() as Hex))];
   if (!deps.client?.getTransactionCount && addresses.length) nonceError = 'nonce read is unavailable';
   else await Promise.all(addresses.map(async (address) => {
-    try { baseNonces.set(address, Number(await deps.client!.getTransactionCount!({ address, blockTag: 'latest' }))); }
+    try { baseNonces.set(address, Number(await deps.client!.getTransactionCount!({ address, ...(deps.blockNumber === undefined ? { blockTag: 'latest' } : { blockNumber: deps.blockNumber }) }))); }
     catch (error) { nonceError ??= error instanceof Error ? error.message : String(error); }
   }));
   const confirmedExisting = new Set<string>();
@@ -91,7 +91,7 @@ export async function buildChainPredictions(plan: DeploymentPlan, frozen: Frozen
     if (step.kind !== 'deploy' || dynamic.has(step.id) || !step.strategy || step.strategy.kind === 'create') continue;
     const current = predictions[step.id];
     if (!current || !ackIsFresh(step.strategy, chainId, current)) continue;
-    const code = await deps.client.getCode({ address: current.predictedAddress }).catch(() => undefined);
+    const code = await deps.client.getCode({ address: current.predictedAddress, ...(deps.blockNumber === undefined ? {} : { blockNumber: deps.blockNumber }) }).catch(() => undefined);
     if (code && code !== '0x') confirmedExisting.add(step.id);
   }
   const createAddresses = nonceError ? new Map<string, Hex>() : computeCreateAddresses(plan, frozen, chainId, signers, baseNonces, confirmedExisting);
