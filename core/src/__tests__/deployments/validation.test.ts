@@ -6,7 +6,7 @@ import {
   type FrozenInputs,
   type RepoContractSource,
 } from '@ignite/api';
-import { validatePlan } from '../../deployments/validation.js';
+import { storageSlotChanges, validatePlan } from '../../deployments/validation.js';
 import { initcodeHashOf, predictCreate2Address } from '../../deployments/create2.js';
 import { buildChainPredictions, buildInitcode, clearProvisionalPredictionCache } from '../../deployments/schedule.js';
 import { DeploymentTypeService } from '../../deployments/DeploymentTypeService.js';
@@ -674,5 +674,22 @@ describe('validatePlan', () => {
       const result = await validate(ack);
       expect(result.report.chains['1'].inputs).toMatchObject({ ok: false, blocking: true, code: 'WORKFLOW_ARTIFACT_DRIFT' });
     }
+  });
+});
+
+describe('storageSlotChanges', () => {
+  it('rebuilds the schedule and delegates the requested step to a fork fake', async () => {
+    const trace = vi.fn(async () => ({ storage: { [ADDRESS]: [] } }));
+    const runner = { run: vi.fn(), storageSlotChanges: trace };
+    await expect(storageSlotChanges(plan(), { '1': 'rpc-1' }, 1, 'deploy-token', {
+      freezeContractTypes: vi.fn(async () => ({})),
+      freezeInputs: vi.fn(async () => frozen),
+      resolveRpcEndpoint: vi.fn(async () => ({ id: 'rpc-1', url: 'https://rpc.example/secret' })),
+      listAccounts: vi.fn(async () => [{ pluginId: 'key', name: 'Key', state: 'ok', accounts: [{ id: 'account', address: ADDRESS }] }]),
+      createClient: vi.fn(() => ({ estimateGas: async () => 0n, getBalance: async () => 0n, estimateFeesPerGas: async () => ({}), getTransactionCount: async () => 0, getCode: async () => '0x' as `0x${string}` })),
+      deploymentTypes: { prepare: vi.fn(), list: vi.fn(), validate: vi.fn() },
+      makeForkRunner: vi.fn(async () => runner),
+    })).resolves.toEqual({ storage: { [ADDRESS]: [] } });
+    expect(trace).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ stepId: 'deploy-token' })]), 'deploy-token');
   });
 });

@@ -22,6 +22,7 @@ import type {
   Hex32,
   WorkflowDocument,
   WorkflowRunBinding,
+  StorageSlotChangesData,
 } from '@ignite/api';
 import { CREATE2_PROXY_ADDRESS, CREATE2_PROXY_RUNTIME_HASH } from '@ignite/api';
 import { ArtifactFreezeService } from './ArtifactFreezeService.js';
@@ -37,7 +38,7 @@ import {
   callAbiItem,
   callTargetAbi,
 } from './resolver.js';
-import { ackIsFresh, buildChainPredictions, buildInitcode, buildRuntimeCode, hasPredicted, type ChainPredictions } from './schedule.js';
+import { ackIsFresh, buildChainPredictions, buildInitcode, buildRuntimeCode, buildSchedule, hasPredicted, type ChainPredictions } from './schedule.js';
 import {
   simulateChain,
   type SimulationOutcome,
@@ -425,6 +426,47 @@ function defaultDeps(): ValidationDeps {
       return (await trust.getGrant(pluginId)).trust === 'untrusted' ? 'untrusted' : 'ready';
     },
   };
+}
+
+// Storage traces are deliberately fork-only and run independently from the
+// review simulation. Rebuilding the same frozen inputs, signer map, nonce
+// snapshot, and schedule keeps the requested transaction deterministic.
+export async function storageSlotChanges(
+  plan: DeploymentPlan,
+  rpcSelection: RpcSelection,
+  chainId: number,
+  stepId: string,
+  overrides?: Partial<ValidationDeps>,
+): Promise<StorageSlotChangesData> {
+  if (!plan.chains.includes(chainId)) throw new Error(`Chain ${chainId} is not in this plan`);
+  if (!plan.steps.some((step) => step.id === stepId)) throw new Error(`Step ${stepId} is not in this plan`);
+  const deps: ValidationDeps = { ...defaultDeps(), ...overrides };
+  const endpointId = rpcSelection[String(chainId)];
+  const endpoint = endpointId ? await deps.resolveRpcEndpoint(chainId, endpointId) : undefined;
+  if (!endpoint?.url) throw new Error(`No RPC endpoint is selected for chain ${chainId}`);
+  const contractTypes = await deps.freezeContractTypes(plan.contracts);
+  const frozen = await deps.freezeInputs(deps.profileId ?? 'default', plan.contracts, contractTypes);
+  const signerResults = validateSigners(plan, chainId, await deps.listAccounts(), undefined);
+  if (!signerResults.item.ok) throw new Error(signerResults.item.message);
+  const client = deps.createClient(endpoint.url);
+  const predictions = await buildChainPredictions(plan, frozen, chainId, {
+    client,
+    signers: signerResults.signers,
+    deploymentTypes: deps.deploymentTypes,
+  });
+  if (predictions.nonceError) throw new Error(`Storage replay cannot read account nonces: ${predictions.nonceError}`);
+  const schedulePredictions = Object.fromEntries(
+    Object.entries(predictions.entries).flatMap(([id, entry]) => hasPredicted(entry) ? [[id, entry]] : []),
+  );
+  const schedule = buildSchedule(plan, frozen, chainId, {
+    signers: signerResults.signers,
+    createAddresses: predictions.createAddresses,
+    confirmedExisting: predictions.confirmedExisting,
+    predictions: schedulePredictions,
+  });
+  const fork = await deps.makeForkRunner({ rpcUrl: endpoint.url, chainId });
+  if (!fork) throw new Error('Storage slot changes require Docker and the foundry image');
+  return fork.storageSlotChanges(schedule, stepId);
 }
 
 function validateFrozenInputs(

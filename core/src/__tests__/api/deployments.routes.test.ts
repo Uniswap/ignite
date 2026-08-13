@@ -359,4 +359,33 @@ describe('deployment route handlers', () => {
     );
     expect(res.statusCode).toBe(404);
   });
+
+  it('returns an on-demand storage trace for the requested chain step', async () => {
+    const storageSlotChanges = vi.fn(async () => ({
+      target: '0x0000000000000000000000000000000000000002' as Hex,
+      storage: { '0x0000000000000000000000000000000000000002': [] },
+    }));
+    const handlers = createDeploymentHandlers({
+      engine: { launch: vi.fn(), resolveLane: vi.fn(), resume: vi.fn(), abort: vi.fn() } as never,
+      getProfileManager: async () => ({ getCurrentProfile: () => 'one' }),
+      storageSlotChanges,
+    });
+    const res = reply();
+    await handlers.getStorageSlotChanges(request({ plan, rpcSelection: { '1': 'rpc' }, chainId: 1, stepId: 's' }) as never, res);
+    expect(res.statusCode).toBe(200);
+    expect(storageSlotChanges).toHaveBeenCalledWith(plan, { '1': 'rpc' }, 1, 's', { profileId: 'one' });
+  });
+
+  it('returns a cached event signature lookup result', async () => {
+    const handlers = createDeploymentHandlers({
+      engine: { launch: vi.fn(), resolveLane: vi.fn(), resume: vi.fn(), abort: vi.fn() } as never,
+      getProfileManager: async () => ({ getCurrentProfile: () => 'one' }),
+      lookupEventSignature: vi.fn(async () => 'Ping(uint256)'),
+    });
+    const res = reply();
+    const topic0 = `0x${'11'.repeat(32)}`;
+    await handlers.lookupEventSignature(request(undefined, undefined, { topic0 }) as never, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ data: { signature: 'Ping(uint256)' } });
+  });
 });

@@ -1,4 +1,4 @@
-import type { DeploymentPlan, FrozenInputs, Hex } from '@ignite/api';
+import type { DeploymentPlan, FrozenInputs, Hex, SimulatedLog } from '@ignite/api';
 import { collectRefs } from './resolver.js';
 import {
   ackIsFresh,
@@ -21,6 +21,7 @@ export interface SimulationOutcome {
       gasUsed?: string;
       status: 'ok' | 'reverted' | 'skipped-existing' | 'unestimable';
       reason?: string;
+      logs?: SimulatedLog[];
     }
   >;
   warnings: string[];
@@ -98,6 +99,23 @@ function resultStatus(result: Record<string, unknown> | undefined): {
 function resultData(result: Record<string, unknown> | undefined): Hex | undefined {
   const value = result?.returnData ?? result?.data ?? result?.output;
   return typeof value === 'string' && /^0x(?:[0-9a-fA-F]{2})*$/.test(value) ? value as Hex : undefined;
+}
+
+function resultLogs(result: Record<string, unknown> | undefined): SimulatedLog[] {
+  if (!Array.isArray(result?.logs)) return [];
+  return result.logs.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const log = entry as Record<string, unknown>;
+    if (
+      typeof log.address !== 'string' ||
+      !/^0x[0-9a-fA-F]{40}$/.test(log.address) ||
+      typeof log.data !== 'string' ||
+      !/^0x(?:[0-9a-fA-F]{2})*$/.test(log.data) ||
+      !Array.isArray(log.topics) ||
+      !log.topics.every((topic) => typeof topic === 'string' && /^0x(?:[0-9a-fA-F]{2})*$/.test(topic))
+    ) return [];
+    return [{ address: log.address as Hex, data: log.data as Hex, topics: log.topics as Hex[] }];
+  });
 }
 
 function dependsOnPlainCreate(
@@ -259,7 +277,7 @@ export async function simulateChain(args: {
         })
       );
       txs.forEach((entry, index) => {
-        entries[entry.stepId] = resultStatus(results[index]);
+        entries[entry.stepId] = { ...resultStatus(results[index]), logs: resultLogs(results[index]) };
       });
       const probes = Object.fromEntries((args.probes ?? []).flatMap((probe, index) => {
         const data = resultData(results[txs.length + index]);
@@ -299,6 +317,7 @@ export async function simulateChain(args: {
                 status: receipt.status,
                 gasUsed: receipt.gasUsed,
                 ...(receipt.reason ? { reason: receipt.reason } : {}),
+                logs: receipt.logs,
               }
             : { status: 'reverted', reason: 'Fork did not return a receipt' };
         }
