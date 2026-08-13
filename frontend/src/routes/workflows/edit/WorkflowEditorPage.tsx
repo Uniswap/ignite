@@ -354,6 +354,7 @@ export default function WorkflowEditorPage() {
                 )
               }
               removingSourceIds={removingSourceId ? [removingSourceId] : []}
+              contextualBookSourceKey={`repo:${repoPathOrUrl}`}
               onRemove={() => {
                 setRemovingSourceId(source.id);
                 setPendingRemove(cascadeRemoveSource(draft, source.id));

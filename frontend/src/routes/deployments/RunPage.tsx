@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Ban, Loader2, Save } from 'lucide-react';
+import { ArrowLeft, Ban, ExternalLink, Loader2, Save } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   ResolveAction,
@@ -29,6 +29,12 @@ import { getRepoName } from '../../utils/repo';
 import PromoteWorkflowDialog from '../../components/PromoteWorkflowDialog';
 import { decodeUrlEncodingForDisplay } from '../../utils/displayText';
 import { verificationsApi } from '../../store/api/verificationsApi';
+import SaveRunAddressesDialog from '../addressBook/SaveRunAddressesDialog';
+import {
+  addressBookCandidatesFromRun,
+  type RunAddressCandidate,
+} from '../addressBook/runAddressBook';
+import { explorerAddressUrl } from './explorerLinks';
 
 const TERMINAL_VERIFICATION_STATUSES = new Set([
   'verified',
@@ -110,6 +116,7 @@ export default function RunPage() {
   const [abortOpen, setAbortOpen] = useState(false);
   const [skipChainId, setSkipChainId] = useState<number | null>(null);
   const [promoteOpen, setPromoteOpen] = useState(false);
+  const [saveCandidates, setSaveCandidates] = useState<RunAddressCandidate[]>();
   const autoOpenedPause = useRef<string | undefined>(undefined);
   const pluginRows = useAppSelector((state) => state.plugins.rows);
   const verificationRunId = run?.id;
@@ -200,6 +207,10 @@ export default function RunPage() {
     [verificationTasks]
   );
   const tasksLoaded = verificationTasks !== undefined;
+  const addressCandidates = useMemo(
+    () => (run ? addressBookCandidatesFromRun(run) : []),
+    [run]
+  );
 
   if (loading && !run)
     return (
@@ -349,6 +360,15 @@ export default function RunPage() {
         >
           <Save size={15} /> Save as workflow
         </button>
+        {addressCandidates.length > 0 && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setSaveCandidates(addressCandidates)}
+          >
+            <Save size={15} /> Save addresses to address book
+          </button>
+        )}
         {!['completed', 'failed', 'aborted'].includes(run.status) && (
           <button
             type="button"
@@ -362,8 +382,88 @@ export default function RunPage() {
       {error && <div className="card-milky p-3 text-err">{error}</div>}
       {run.bookResolutions && Object.keys(run.bookResolutions).length > 0 && (
         <section className="card-milky p-4 grid gap-3">
-          <div><h2 className="font-semibold">Book addresses</h2><p className="text-sm text-muted">Frozen when this run was launched.</p></div>
-          <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-muted"><tr><th className="py-1 pr-3">Chain</th><th className="py-1 pr-3">Entry</th><th className="py-1 pr-3">Address</th><th className="py-1 pr-3">Source</th><th className="py-1">Book hash</th></tr></thead><tbody>{Object.entries(run.bookResolutions).flatMap(([chainId, items]) => items.map((item) => <tr key={`${chainId}-${item.stepId}-${item.argPath}`}><td className="py-1 pr-3">{chainId}</td><td className="py-1 pr-3">{item.entry}</td><td className="py-1 pr-3 mono-data">{item.address}</td><td className="py-1 pr-3">{item.source}</td><td className="py-1 mono-data">{item.bookHash.slice(0, 12)}</td></tr>))}</tbody></table></div>
+          <div>
+            <h2 className="font-semibold">Book addresses</h2>
+            <p className="text-sm text-muted">
+              Frozen when this run was launched.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left text-muted">
+                <tr>
+                  <th className="py-1 pr-3">Chain</th>
+                  <th className="py-1 pr-3">Entry</th>
+                  <th className="py-1 pr-3">Address</th>
+                  <th className="py-1 pr-3">Source</th>
+                  <th className="py-1">Book hash</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(run.bookResolutions).flatMap(
+                  ([chainId, items]) =>
+                    items.map((item) => {
+                      const href = explorerAddressUrl(
+                        chains.chains.find(
+                          (chain) => chain.chainId === Number(chainId)
+                        ),
+                        run.explorerTargets?.[chainId] ?? [],
+                        item.address
+                      );
+                      return (
+                        <tr key={`${chainId}-${item.stepId}-${item.argPath}`}>
+                          <td className="py-1 pr-3">{chainId}</td>
+                          <td className="py-1 pr-3">{item.entry}</td>
+                          <td className="py-1 pr-3 mono-data">
+                            {item.address}
+                            {href && (
+                              <a
+                                href={href}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="btn btn-sm btn-secondary-borderless ml-1"
+                                aria-label={`Open ${item.entry} on chain ${chainId} explorer`}
+                              >
+                                <ExternalLink size={12} />
+                              </a>
+                            )}
+                          </td>
+                          <td className="py-1 pr-3">
+                            {item.source === 'repo'
+                              ? `repo ${run.workflow ? getRepoName(run.workflow.repoPathOrUrl) : ''}`.trim()
+                              : 'local'}
+                          </td>
+                          <td className="py-1 mono-data">
+                            {item.bookHash.slice(0, 12)}
+                          </td>
+                        </tr>
+                      );
+                    })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+      {addressCandidates.length > 0 && (
+        <section className="card-milky p-4 grid gap-2">
+          <h2 className="font-semibold">Completed deployments</h2>
+          {addressCandidates.map((candidate) => (
+            <div key={candidate.stepId} className="flex items-center gap-3">
+              <span className="mono-data flex-1">{candidate.name}</span>
+              <span className="text-xs text-muted">
+                {Object.keys(candidate.resolutions).length} chain
+                {Object.keys(candidate.resolutions).length === 1 ? '' : 's'}
+              </span>
+              <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                onClick={() => setSaveCandidates([candidate])}
+              >
+                Add to address book
+              </button>
+            </div>
+          ))}
         </section>
       )}
       <div className="grid gap-4">
@@ -441,6 +541,13 @@ export default function RunPage() {
         input={{ runId: run.id }}
         hooks={run.workflow?.hooks ?? []}
         onPromoted={() => navigate('/workflows')}
+      />
+      <SaveRunAddressesDialog
+        open={Boolean(saveCandidates)}
+        onOpenChange={(open) => {
+          if (!open) setSaveCandidates(undefined);
+        }}
+        candidates={saveCandidates ?? []}
       />
       {editChainId !== null &&
         (() => {

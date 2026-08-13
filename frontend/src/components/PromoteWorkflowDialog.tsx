@@ -4,6 +4,7 @@ import { AlertTriangle, Loader2, Save, X } from 'lucide-react';
 import {
   WorkflowNamePattern,
   type DeploymentPlan,
+  type WorkflowPromotionBookChoice,
   type WorkflowPromoteData,
   type WorkflowPromoteRequest,
 } from '@ignite/api';
@@ -40,6 +41,7 @@ export function promotionApplyRequest(
     tagChoiceBySourceId?: Record<string, string>;
     overwrite?: boolean;
     adopt?: boolean;
+    bookChoices?: Record<string, WorkflowPromotionBookChoice>;
   }
 ): WorkflowPromoteRequest {
   return {
@@ -53,6 +55,9 @@ export function promotionApplyRequest(
       ? { tagChoiceBySourceId: options.tagChoiceBySourceId }
       : {}),
     ...(options.overwrite ? { overwrite: true } : {}),
+    ...(options.bookChoices && Object.keys(options.bookChoices).length
+      ? { bookChoices: options.bookChoices }
+      : {}),
     ...('runId' in input && options.adopt
       ? { adoptRunIds: [input.runId] }
       : {}),
@@ -91,6 +96,9 @@ export default function PromoteWorkflowDialog({
   const [preview, setPreview] =
     useState<Extract<WorkflowPromoteData, { mode: 'preview' }>>();
   const [tagChoices, setTagChoices] = useState<Record<string, string>>({});
+  const [bookChoices, setBookChoices] = useState<
+    Record<string, WorkflowPromotionBookChoice>
+  >({});
   const [adopt, setAdopt] = useState('runId' in input);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
@@ -99,6 +107,7 @@ export default function PromoteWorkflowDialog({
   const resetPreview = () => {
     setPreview(undefined);
     setTagChoices({});
+    setBookChoices({});
     setError(undefined);
   };
   const previewBlocked = !repoPathOrUrl || !promotionNameValid(name);
@@ -108,6 +117,9 @@ export default function PromoteWorkflowDialog({
       (source) =>
         source.error ||
         (source.tagChoices.length > 1 && !tagChoices[source.sourceId])
+    ) ||
+    preview.referencedEntries.some(
+      (entry) => entry.conflict && !bookChoices[entry.name]
     );
 
   const requestPreview = async () => {
@@ -121,6 +133,7 @@ export default function PromoteWorkflowDialog({
       if (!('data' in response) || response.data.mode !== 'preview')
         throw new Error('Invalid promotion preview response');
       setPreview(response.data);
+      setBookChoices({});
       setTagChoices(
         Object.fromEntries(
           response.data.sources.flatMap((source) =>
@@ -152,7 +165,13 @@ export default function PromoteWorkflowDialog({
           name,
           input,
           preview.previewId,
-          { hooks, tagChoiceBySourceId: tagChoices, overwrite, adopt }
+          {
+            hooks,
+            tagChoiceBySourceId: tagChoices,
+            bookChoices,
+            overwrite,
+            adopt,
+          }
         ),
       });
       if (!('data' in response) || response.data.mode !== 'apply')
@@ -172,7 +191,9 @@ export default function PromoteWorkflowDialog({
           triggerToast({
             title: 'Promotion preview is stale',
             description:
-              'Repository state changed. Review the refreshed preview before applying.',
+              cause.body.code === 'PROMOTION_BOOK_CONFLICT'
+                ? 'The target address book changed. Review the refreshed entries before applying.'
+                : 'Repository state changed. Review the refreshed preview before applying.',
             variant: 'warning',
             duration: 7000,
           })
@@ -345,6 +366,109 @@ export default function PromoteWorkflowDialog({
                       </div>
                     ))}
                   </div>
+                  {preview.referencedEntries.length > 0 && (
+                    <section className="grid gap-2">
+                      <h3 className="font-semibold">
+                        Referenced address book entries
+                      </h3>
+                      <div className="glass-list">
+                        {preview.referencedEntries.map((entry) => {
+                          const choice = bookChoices[entry.name];
+                          return (
+                            <div
+                              key={entry.name}
+                              className="list-row grid gap-2"
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium mono-data flex-1">
+                                  {entry.name}
+                                </span>
+                                <span className="chip">
+                                  {entry.source === 'repo'
+                                    ? 'repo book'
+                                    : 'local book'}
+                                </span>
+                                {entry.conflict && (
+                                  <span className="chip chip-warn">
+                                    address conflict
+                                  </span>
+                                )}
+                              </div>
+                              {Object.entries(entry.resolutions).map(
+                                ([chainId, address]) => (
+                                  <div
+                                    key={chainId}
+                                    className="text-xs mono-data text-muted"
+                                  >
+                                    Chain {chainId}: {address}
+                                  </div>
+                                )
+                              )}
+                              {entry.conflict && (
+                                <div className="grid gap-2">
+                                  <label className="flex items-start gap-2 text-sm">
+                                    <input
+                                      type="radio"
+                                      name={`book-${entry.name}`}
+                                      checked={choice?.action === 'keep-repo'}
+                                      onChange={() =>
+                                        setBookChoices((current) => ({
+                                          ...current,
+                                          [entry.name]: { action: 'keep-repo' },
+                                        }))
+                                      }
+                                    />
+                                    <span>
+                                      Keep the repo entry. The promoted pointer
+                                      will retarget to the repo address.
+                                    </span>
+                                  </label>
+                                  <label className="flex items-start gap-2 text-sm">
+                                    <input
+                                      type="radio"
+                                      name={`book-${entry.name}`}
+                                      checked={
+                                        choice?.action === 'copy-under-new-name'
+                                      }
+                                      onChange={() =>
+                                        setBookChoices((current) => ({
+                                          ...current,
+                                          [entry.name]: {
+                                            action: 'copy-under-new-name',
+                                            name: `${entry.name}-2`,
+                                          },
+                                        }))
+                                      }
+                                    />
+                                    <span>
+                                      Copy this entry and rewrite the promoted
+                                      pointer.
+                                    </span>
+                                  </label>
+                                  {choice?.action === 'copy-under-new-name' && (
+                                    <input
+                                      className="input-glass mono-data"
+                                      aria-label={`New name for ${entry.name}`}
+                                      value={choice.name}
+                                      onChange={(event) =>
+                                        setBookChoices((current) => ({
+                                          ...current,
+                                          [entry.name]: {
+                                            action: 'copy-under-new-name',
+                                            name: event.target.value.toLowerCase(),
+                                          },
+                                        }))
+                                      }
+                                    />
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  )}
                 </section>
               )}
               {'runId' in input && preview && (

@@ -7,7 +7,7 @@ import type {
   BookResolutions,
 } from '@ignite/api';
 import { sanitizeDisplayText } from '@ignite/api';
-import { Loader2, RefreshCw, Rocket } from 'lucide-react';
+import { ExternalLink, Loader2, RefreshCw, Rocket } from 'lucide-react';
 import { type NavigateFunction, useNavigate } from 'react-router-dom';
 import { ApiError } from '@ignite/api/client';
 import { apiClient } from '../../../store/api/client';
@@ -25,13 +25,18 @@ import {
 import { runSnapshotReceived } from '../../../store/features/deployments/deploymentsSlice';
 import ValidationChecklist from '../components/ValidationChecklist';
 import { explorersApi } from '../../../store/api/explorersApi';
-import { decodeUrlEncodingForDisplay, replaceIdsForDisplay } from '../../../utils/displayText';
+import {
+  decodeUrlEncodingForDisplay,
+  replaceIdsForDisplay,
+} from '../../../utils/displayText';
 import { workflowRunRequestFromDraft } from '../../../store/features/deployments/workflowDraft';
 import { openPermissionsModal } from '../../../store/features/plugins/pluginsSlice';
 import { reviewPredictedAddresses } from '../reviewPredictions';
 import { triggerToast } from '../../../store/middleware/toastListener';
 import InstallPluginDialog from '../../../components/plugins/InstallPluginDialog';
 import { selectWorkflowDocument } from '../../../store/features/workflows/workflowsSlice';
+import { explorerAddressUrl } from '../../deployments/explorerLinks';
+import { getRepoName } from '../../../utils/repo';
 
 function validationGreen(report: ValidationReport | null): boolean {
   return Boolean(
@@ -52,7 +57,7 @@ export function bounceOutOfSyncWorkflowRun(
     !(cause instanceof ApiError) ||
     cause.status !== 409 ||
     cause.body.code !== 'WORKFLOW_OUT_OF_SYNC'
-)
+  )
     return false;
   dispatch(
     triggerToast({
@@ -66,9 +71,24 @@ export function bounceOutOfSyncWorkflowRun(
   return true;
 }
 
-function bounceOutOfSyncBook(cause: unknown, dispatch: (action: ReturnType<typeof triggerToast>) => unknown): boolean {
-  if (!(cause instanceof ApiError) || cause.status !== 409 || cause.body.code !== 'BOOK_OUT_OF_SYNC') return false;
-  dispatch(triggerToast({ title: 'Address book changed', description: 'The address book changed after review. Re-validating now.', variant: 'warning', duration: 8000 }));
+function bounceOutOfSyncBook(
+  cause: unknown,
+  dispatch: (action: ReturnType<typeof triggerToast>) => unknown
+): boolean {
+  if (
+    !(cause instanceof ApiError) ||
+    cause.status !== 409 ||
+    cause.body.code !== 'BOOK_OUT_OF_SYNC'
+  )
+    return false;
+  dispatch(
+    triggerToast({
+      title: 'Address book changed',
+      description: 'The address book changed after review. Re-validating now.',
+      variant: 'warning',
+      duration: 8000,
+    })
+  );
   return true;
 }
 
@@ -137,7 +157,12 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
     [draft.contracts, plan]
   );
   const wrapperStepIds = useMemo(
-    () => new Set(draft.steps.filter((step) => step.kind === 'deploy' && step.wraps).map((step) => step.id)),
+    () =>
+      new Set(
+        draft.steps
+          .filter((step) => step.kind === 'deploy' && step.wraps)
+          .map((step) => step.id)
+      ),
     [draft.steps]
   );
   const rpcSelection = useMemo(
@@ -229,7 +254,14 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [dispatch, draft.explorerSelection, navigate, plan, rpcSelection, workflowRequest]);
+  }, [
+    dispatch,
+    draft.explorerSelection,
+    navigate,
+    plan,
+    rpcSelection,
+    workflowRequest,
+  ]);
 
   useEffect(() => {
     void validate();
@@ -241,7 +273,9 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
       draft.workflowRef &&
       draft.workflowRef.docHash !== currentWorkflowDocument?.docHash
     ) {
-      setError('The workflow changed on disk. Reload its draft before launching.');
+      setError(
+        'The workflow changed on disk. Reload its draft before launching.'
+      );
       return;
     }
     const launchedKey = draft.idempotencyKey;
@@ -265,17 +299,17 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
       navigate(`/deployments/${response.data.run.id}`, { replace: true });
     } catch (cause) {
       if (bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)) return;
-      if (bounceOutOfSyncBook(cause, dispatch)) { await validate(); return; }
+      if (bounceOutOfSyncBook(cause, dispatch)) {
+        await validate();
+        return;
+      }
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLaunching(false);
     }
   };
 
-  const acknowledge = (
-    chainId: number,
-    item: ValidationItem
-  ) => {
+  const acknowledge = (chainId: number, item: ValidationItem) => {
     if (item.code === 'UNINITIALIZED_PROXY_ACK_REQUIRED') {
       const stepId = item.details?.stepId;
       if (typeof stepId === 'string') {
@@ -342,7 +376,75 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
           }
         />
       </label>
-      {bookResolutions && Object.keys(bookResolutions).length > 0 && <div className="card-milky p-4 grid gap-3"><div><h3 className="font-semibold">Book addresses</h3><p className="text-sm text-muted">These addresses are frozen into the launch plan.</p></div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-muted"><tr><th className="py-1 pr-3">Chain</th><th className="py-1 pr-3">Entry</th><th className="py-1 pr-3">Address</th><th className="py-1 pr-3">Source</th><th className="py-1">Book hash</th></tr></thead><tbody>{Object.entries(bookResolutions).flatMap(([chainId, items]) => items.map((item) => <tr key={`${chainId}-${item.stepId}-${item.argPath}`}><td className="py-1 pr-3">{chainId}</td><td className="py-1 pr-3">{item.entry}</td><td className="py-1 pr-3 mono-data">{item.address}</td><td className="py-1 pr-3">{item.source === 'repo' ? <span className="chip chip-info">from repo book</span> : 'local'}</td><td className="py-1 mono-data">{item.bookHash.slice(0, 12)}</td></tr>))}</tbody></table></div></div>}
+      {bookResolutions && Object.keys(bookResolutions).length > 0 && (
+        <div className="card-milky p-4 grid gap-3">
+          <div>
+            <h3 className="font-semibold">Book addresses</h3>
+            <p className="text-sm text-muted">
+              These addresses are frozen into the launch plan.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left text-muted">
+                <tr>
+                  <th className="py-1 pr-3">Chain</th>
+                  <th className="py-1 pr-3">Entry</th>
+                  <th className="py-1 pr-3">Address</th>
+                  <th className="py-1 pr-3">Source</th>
+                  <th className="py-1">Book hash</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(bookResolutions).flatMap(([chainId, items]) =>
+                  items.map((item) => {
+                    const href = explorerAddressUrl(
+                      chains.find((chain) => chain.chainId === Number(chainId)),
+                      [],
+                      item.address
+                    );
+                    return (
+                      <tr key={`${chainId}-${item.stepId}-${item.argPath}`}>
+                        <td className="py-1 pr-3">{chainId}</td>
+                        <td className="py-1 pr-3">{item.entry}</td>
+                        <td className="py-1 pr-3 mono-data">
+                          {item.address}
+                          {href && (
+                            <a
+                              href={href}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="btn btn-sm btn-secondary-borderless ml-1"
+                              aria-label={`Open ${item.entry} on chain ${chainId} explorer`}
+                            >
+                              <ExternalLink size={12} />
+                            </a>
+                          )}
+                        </td>
+                        <td className="py-1 pr-3">
+                          {item.source === 'repo' ? (
+                            <span className="chip chip-info">
+                              from repo book
+                              {draft.workflowRef
+                                ? ` · ${getRepoName(draft.workflowRef.repoPathOrUrl)}`
+                                : ''}
+                            </span>
+                          ) : (
+                            'local'
+                          )}
+                        </td>
+                        <td className="py-1 mono-data">
+                          {item.bookHash.slice(0, 12)}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
       {draft.workflowRef && (
         <section className="card-milky p-4 grid gap-3">
           <div>
@@ -528,7 +630,10 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
                   key={`${stepId}-${chainId}`}
                   className="list-row flex gap-3"
                 >
-                  <span className="font-medium">{name}{wrapperStepIds.has(stepId) && ' (wrapper)'}</span>
+                  <span className="font-medium">
+                    {name}
+                    {wrapperStepIds.has(stepId) && ' (wrapper)'}
+                  </span>
                   <span className="text-muted">
                     {chains.find((chain) => String(chain.chainId) === chainId)
                       ?.name ?? `Chain ${chainId}`}

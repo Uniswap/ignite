@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen } from 'lucide-react';
-import type { AddressBookView, BookPointer } from '@ignite/api';
+import { BookOpen, ExternalLink } from 'lucide-react';
+import type { AddressBookView, BookPointer, ChainInfo } from '@ignite/api';
 import Dropdown from '../../../components/Dropdown';
 import { apiClient } from '../../../store/api/client';
 import Switch from '../../../components/Switch';
 import PointerValue, { type PointerOption } from './PointerValue';
-import {
-  shortSignerAddress,
-  type SignerAddressOption,
-} from '../signerDisplay';
+import { shortSignerAddress, type SignerAddressOption } from '../signerDisplay';
+import { addressBookPickerChoices } from '../addressBookEligibility';
+import { explorerAddressUrl } from '../../deployments/explorerLinks';
 
 export interface AbiInput {
   name?: string;
@@ -25,6 +24,12 @@ interface AbiArgFieldProps {
   autoDefault?: boolean;
   eligibleSteps?: PointerOption[];
   signerOptions?: SignerAddressOption[];
+  selectedChainIds?: number[];
+  chainId?: number;
+  maskedChainIds?: number[];
+  contextualBookSourceKey?: string;
+  allowBookLink?: boolean;
+  chains?: ChainInfo[];
   onChange: (value: unknown) => void;
 }
 
@@ -98,13 +103,197 @@ function inputHint(type: string): string {
   return type;
 }
 
-function AddressBookAction({ onPick }: { onPick: (value: string | BookPointer) => void }) {
+function AddressBookAction({
+  onPick,
+  selectedChainIds,
+  chainId,
+  maskedChainIds,
+  contextualBookSourceKey,
+  allowBookLink,
+}: {
+  onPick: (value: string | BookPointer) => void;
+  selectedChainIds: number[];
+  chainId?: number;
+  maskedChainIds?: number[];
+  contextualBookSourceKey?: string;
+  allowBookLink: boolean;
+}) {
   const [books, setBooks] = useState<AddressBookView[]>([]);
   const [query, setQuery] = useState('');
-  useEffect(() => { void apiClient.request('getAddressBook', {}).then((response) => { if ('data' in response) setBooks(response.data.books.filter((book) => book.entries)); }).catch(() => undefined); }, []);
-  const entries = useMemo(() => books.flatMap((book) => (book.entries ?? []).map((entry) => ({ book, entry, address: entry.address ?? Object.values(entry.perChain ?? {})[0] }))).filter((item) => item.address && item.entry.name.includes(query.toLowerCase())), [books, query]);
+  useEffect(() => {
+    void apiClient
+      .request('getAddressBook', {})
+      .then((response) => {
+        if ('data' in response)
+          setBooks(response.data.books.filter((book) => book.entries));
+      })
+      .catch(() => undefined);
+  }, []);
+  const entries = useMemo(
+    () =>
+      addressBookPickerChoices(books, {
+        selectedChainIds,
+        chainId,
+        maskedChainIds,
+        contextualSourceKey: contextualBookSourceKey,
+        allowLink: allowBookLink,
+      }).filter((item) =>
+        `${item.entry.name} ${item.sourceLabel}`.includes(query.toLowerCase())
+      ),
+    [
+      allowBookLink,
+      books,
+      chainId,
+      contextualBookSourceKey,
+      maskedChainIds,
+      query,
+      selectedChainIds,
+    ]
+  );
   if (!entries.length) return null;
-  return <Dropdown anchor="right" menuClassName="card-milky p-2 w-80 z-50" renderTrigger={({ ref, toggle, getReferenceProps }) => <button ref={ref} type="button" className="btn btn-sm btn-secondary absolute right-2 top-1/2 -translate-y-1/2" aria-label="Choose address book entry" onClick={toggle} {...getReferenceProps()}><BookOpen size={14} /></button>}>{({ close }) => <div className="grid gap-2"><input className="input-glass" placeholder="Search address book" value={query} onChange={(event) => setQuery(event.target.value)} />{entries.map(({ book, entry, address }) => <div key={`${book.source.kind}-${entry.name}`} className="flex items-center gap-2 rounded px-2 py-1 hover:bg-white/10"><button type="button" className="text-left flex-1" onClick={() => { onPick(address!); close(); }}><span className="block text-sm">{entry.name} — {book.source.kind === 'local' ? 'local' : 'repo'}</span><span className="mono-data text-xs text-muted">{address}</span></button>{book.source.kind === 'local' && <button type="button" className="btn btn-sm btn-secondary" onClick={() => { onPick({ $book: { name: entry.name } }); close(); }}>Link</button>}</div>)}</div>}</Dropdown>;
+  return (
+    <Dropdown
+      anchor="right"
+      menuClassName="card-milky p-2 w-96 z-50"
+      renderTrigger={({ ref, toggle, getReferenceProps }) => (
+        <button
+          ref={ref}
+          type="button"
+          className="btn btn-sm btn-secondary absolute right-8 top-1/2 -translate-y-1/2"
+          aria-label="Choose address book entry"
+          onClick={toggle}
+          {...getReferenceProps()}
+        >
+          <BookOpen size={14} />
+        </button>
+      )}
+    >
+      {({ close }) => (
+        <div className="grid gap-2">
+          <input
+            className="input-glass"
+            placeholder="Search address book"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          {entries.map(
+            ({
+              book,
+              entry,
+              sourceLabel,
+              resolutions,
+              plainAddress,
+              canLink,
+            }) => (
+              <div
+                key={`${book.source.kind}-${book.source.kind === 'repo' ? book.source.repoPathOrUrl : 'local'}-${entry.name}`}
+                className="flex items-center gap-2 rounded px-2 py-1 hover:bg-white/10"
+              >
+                <button
+                  type="button"
+                  className="text-left flex-1 disabled:cursor-default"
+                  disabled={!plainAddress}
+                  onClick={() => {
+                    if (plainAddress) {
+                      onPick(plainAddress);
+                      close();
+                    }
+                  }}
+                >
+                  <span className="block text-sm">
+                    {entry.name} — {sourceLabel}
+                  </span>
+                  <span className="mono-data text-xs text-muted">
+                    {Object.entries(resolutions)
+                      .map(([id, address]) => `${id}: ${address}`)
+                      .join(' · ') || plainAddress}
+                  </span>
+                </button>
+                {canLink && (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-secondary"
+                    onClick={() => {
+                      onPick({ $book: { name: entry.name } });
+                      close();
+                    }}
+                  >
+                    Link
+                  </button>
+                )}
+              </div>
+            )
+          )}
+        </div>
+      )}
+    </Dropdown>
+  );
+}
+
+function AddressExplorerAction({
+  value,
+  chainIds,
+  chains,
+}: {
+  value: string;
+  chainIds: number[];
+  chains: ChainInfo[];
+}) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(value)) return null;
+  const links = chainIds.flatMap((chainId) => {
+    const chain = chains.find((item) => item.chainId === chainId);
+    const href = explorerAddressUrl(chain, [], value);
+    return href
+      ? [{ chainId, label: chain?.name ?? String(chainId), href }]
+      : [];
+  });
+  if (!links.length) return null;
+  if (links.length === 1)
+    return (
+      <a
+        href={links[0].href}
+        target="_blank"
+        rel="noreferrer"
+        className="btn btn-sm btn-secondary absolute right-2 top-1/2 -translate-y-1/2"
+        aria-label={`Open ${links[0].label} explorer`}
+      >
+        <ExternalLink size={14} />
+      </a>
+    );
+  return (
+    <Dropdown
+      anchor="right"
+      menuClassName="card-milky p-2 w-56 z-50"
+      renderTrigger={({ ref, toggle, getReferenceProps }) => (
+        <button
+          ref={ref}
+          type="button"
+          className="btn btn-sm btn-secondary absolute right-2 top-1/2 -translate-y-1/2"
+          aria-label="Open address in explorer"
+          onClick={toggle}
+          {...getReferenceProps()}
+        >
+          <ExternalLink size={14} />
+        </button>
+      )}
+    >
+      {() => (
+        <div className="grid gap-1">
+          {links.map((link) => (
+            <a
+              key={link.chainId}
+              href={link.href}
+              target="_blank"
+              rel="noreferrer"
+              className="btn btn-sm btn-secondary justify-start"
+            >
+              {link.label}
+            </a>
+          ))}
+        </div>
+      )}
+    </Dropdown>
+  );
 }
 
 function validationMessage(type: string, value: string): string | undefined {
@@ -171,6 +360,12 @@ export default function AbiArgField({
   autoDefault = false,
   eligibleSteps,
   signerOptions = [],
+  selectedChainIds = [],
+  chainId,
+  maskedChainIds,
+  contextualBookSourceKey,
+  allowBookLink = false,
+  chains = [],
   onChange,
 }: AbiArgFieldProps) {
   const label = input.name || fieldKey;
@@ -206,6 +401,12 @@ export default function AbiArgField({
               autoDefault={autoDefault}
               eligibleSteps={eligibleSteps}
               signerOptions={signerOptions}
+              selectedChainIds={selectedChainIds}
+              chainId={chainId}
+              maskedChainIds={maskedChainIds}
+              contextualBookSourceKey={contextualBookSourceKey}
+              allowBookLink={allowBookLink}
+              chains={chains}
               onChange={(next) => onChange({ ...tuple, [key]: next })}
             />
           );
@@ -250,17 +451,42 @@ export default function AbiArgField({
           <div className="relative">
             {/* Explorer lookup merges at right-2. Keep this base-branch offset until that branch lands. */}
             <input
-              className="input-glass pr-9"
+              className="input-glass pr-16"
               value={literal}
               placeholder={inputHint(input.type)}
               aria-invalid={Boolean(invalid)}
               onChange={(event) => onChange(event.target.value)}
             />
-            <AddressBookAction onPick={onChange} />
+            <AddressBookAction
+              onPick={onChange}
+              selectedChainIds={selectedChainIds}
+              chainId={chainId}
+              maskedChainIds={maskedChainIds}
+              contextualBookSourceKey={contextualBookSourceKey}
+              allowBookLink={allowBookLink}
+            />
+            <AddressExplorerAction
+              value={literal}
+              chainIds={chainId === undefined ? selectedChainIds : [chainId]}
+              chains={chains}
+            />
           </div>
         )}
-        {book && <div className="flex items-center gap-2"><span className="chip chip-info">Book: {book.$book.name}</span><button type="button" className="btn btn-sm btn-secondary" onClick={() => onChange('')}>Clear</button></div>}
-        {invalid && !ref && !book && <span className="text-xs text-err">{invalid}</span>}
+        {book && (
+          <div className="flex items-center gap-2">
+            <span className="chip chip-info">Book: {book.$book.name}</span>
+            <button
+              type="button"
+              className="btn btn-sm btn-secondary"
+              onClick={() => onChange('')}
+            >
+              Clear
+            </button>
+          </div>
+        )}
+        {invalid && !ref && !book && (
+          <span className="text-xs text-err">{invalid}</span>
+        )}
       </div>
     );
   }

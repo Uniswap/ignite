@@ -95,6 +95,7 @@ export default function SourceRow({
   onRemove,
   onStrategyValidityChange,
   removingSourceIds,
+  contextualBookSourceKey,
 }: {
   source: RepoWorkflowSource;
   document: WorkflowDocument;
@@ -105,6 +106,7 @@ export default function SourceRow({
   onRemove: () => void;
   onStrategyValidityChange?: (valid: boolean) => void;
   removingSourceIds?: readonly string[];
+  contextualBookSourceKey?: string;
 }) {
   const dispatch = useAppDispatch();
   const [pickVersion, setPickVersion] = useState(false);
@@ -347,6 +349,9 @@ export default function SourceRow({
                       eligibleSteps={
                         input.type === 'address' ? pointerOptions : undefined
                       }
+                      selectedChainIds={[]}
+                      contextualBookSourceKey={contextualBookSourceKey}
+                      allowBookLink
                       onChange={(value) =>
                         onChange(
                           setConstructorArgument(
