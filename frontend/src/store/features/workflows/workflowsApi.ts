@@ -18,6 +18,7 @@ import {
   workflowUpdatesFailed,
   workflowUpdatesLoaded,
   workflowUpdatesRequested,
+  LOCAL_WORKFLOW_REPO,
 } from './workflowsSlice';
 import type { WorkflowDocument } from '@ignite/api';
 import { workflowDraftSaved } from '../deployments/deployDraftSlice';
@@ -42,6 +43,13 @@ const statusKey = (profileId: string, repoPathOrUrl: string) =>
   `${profileId}\0${repoPathOrUrl}`;
 
 export const workflowsApi = {
+  listLocal: () => [
+    workflowListRequested(LOCAL_WORKFLOW_REPO),
+    apiClient.dispatch.listLocalWorkflows({
+      onSuccess: ({ workflows, truncated }) => workflowListLoaded({ repoPathOrUrl: LOCAL_WORKFLOW_REPO, workflows, truncated }),
+      onError: (error) => workflowListFailed({ repoPathOrUrl: LOCAL_WORKFLOW_REPO, error: formatApiError(error).description }),
+    }),
+  ],
   list: (repoPathOrUrl: string) => [
     workflowListRequested(repoPathOrUrl),
     apiClient.dispatch.listWorkflows({
@@ -92,7 +100,17 @@ export const workflowsApi = {
       onError?: () => void;
     }
   ) =>
-    apiClient.dispatch.getWorkflow({
+    (repoPathOrUrl === LOCAL_WORKFLOW_REPO ? apiClient.dispatch.getLocalWorkflow({
+      params: { name },
+      onSuccess: (data) => {
+        callbacks?.onSuccess?.(data);
+        return workflowDocumentLoaded({ repoPathOrUrl, name, ...data });
+      },
+      onError: (error) => {
+        callbacks?.onError?.();
+        return triggerToast({ title: 'Workflow load failed', description: formatApiError(error).description, variant: 'error' });
+      },
+    }) : apiClient.dispatch.getWorkflow({
       params: { name },
       query: { pathOrUrl: repoPathOrUrl },
       onSuccess: (data) => {
@@ -107,7 +125,7 @@ export const workflowsApi = {
           variant: 'error',
         });
       },
-    }),
+    })),
   saveWorkflow: ({
     repoPathOrUrl,
     name,
@@ -123,7 +141,18 @@ export const workflowsApi = {
     onSaved?: (docHash: string) => void;
     onConflict?: (code: 'WORKFLOW_DOC_CONFLICT' | 'WORKFLOW_DELETED') => void;
   }) =>
-    apiClient.dispatch.putWorkflow({
+    (repoPathOrUrl === LOCAL_WORKFLOW_REPO ? apiClient.dispatch.putLocalWorkflow({
+      params: { name },
+      body: { document, baseDocHash },
+      onSuccess: ({ docHash }) => {
+        onSaved?.(docHash);
+        return [workflowDraftSaved({ document, docHash }), workflowDocumentLoaded({ repoPathOrUrl, name, document, raw: JSON.stringify(document, null, 2), docHash }), triggerToast({ title: 'Workflow saved', description: `${name}.json was updated locally.`, variant: 'success' })];
+      },
+      onError: (error) => {
+        if (error.status === 409 && (error.body?.code === 'WORKFLOW_DOC_CONFLICT' || error.body?.code === 'WORKFLOW_DELETED')) { onConflict?.(error.body.code); return undefined; }
+        return triggerToast({ title: 'Workflow save failed', description: formatApiError(error).description, variant: 'error' });
+      },
+    }) : apiClient.dispatch.putWorkflow({
       params: { name },
       query: { pathOrUrl: repoPathOrUrl },
       body: { document, baseDocHash },
@@ -168,7 +197,7 @@ export const workflowsApi = {
           variant: 'error',
         });
       },
-    }),
+    })),
   put: (
     repoPathOrUrl: string,
     name: string,

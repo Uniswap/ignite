@@ -6,6 +6,7 @@ import {
   type DeploymentPlan,
   type WorkflowPromoteData,
   type WorkflowPromoteRequest,
+  type WorkflowPromotionTarget,
 } from '@ignite/api';
 import { ApiError } from '@ignite/api/client';
 import { apiClient } from '../store/api/client';
@@ -17,22 +18,20 @@ import ConfirmDialog from './ConfirmDialog';
 import { getRepoName } from '../utils/repo';
 import { decodeUrlEncodingForDisplay } from '../utils/displayText';
 
-type PromotionInput = { plan: DeploymentPlan } | { runId: string };
+type PromotionInput = { plan: DeploymentPlan } | { runId: string } | { source: { kind: 'local'; name: string } };
 
 export const promotionNameValid = (name: string) =>
   WorkflowNamePattern.test(name);
 
 export function promotionPreviewRequest(
-  repoPathOrUrl: string,
-  name: string,
+  target: WorkflowPromotionTarget,
   input: PromotionInput
 ): WorkflowPromoteRequest {
-  return { mode: 'preview', target: { repoPathOrUrl, name }, ...input };
+  return { mode: 'preview', target, ...input };
 }
 
 export function promotionApplyRequest(
-  repoPathOrUrl: string,
-  name: string,
+  target: WorkflowPromotionTarget,
   input: PromotionInput,
   previewId: string,
   options: {
@@ -45,7 +44,7 @@ export function promotionApplyRequest(
   return {
     mode: 'apply',
     previewId,
-    target: { repoPathOrUrl, name },
+    target,
     ...input,
     hooks: options.hooks,
     ...(options.tagChoiceBySourceId &&
@@ -70,7 +69,7 @@ export default function PromoteWorkflowDialog({
   onOpenChange: (open: boolean) => void;
   input: PromotionInput;
   hooks: string[];
-  onPromoted: (repoPathOrUrl: string, name: string) => void;
+  onPromoted: (target: WorkflowPromotionTarget) => void;
 }) {
   const dispatch = useAppDispatch();
   const repositories = useAppSelector(
@@ -87,6 +86,7 @@ export default function PromoteWorkflowDialog({
     [repositories]
   );
   const [repoPathOrUrl, setRepoPathOrUrl] = useState<string>();
+  const [targetKind, setTargetKind] = useState<'repo' | 'local'>('repo');
   const [name, setName] = useState('');
   const [preview, setPreview] =
     useState<Extract<WorkflowPromoteData, { mode: 'preview' }>>();
@@ -101,7 +101,14 @@ export default function PromoteWorkflowDialog({
     setTagChoices({});
     setError(undefined);
   };
-  const previewBlocked = !repoPathOrUrl || !promotionNameValid(name);
+  const target: WorkflowPromotionTarget | undefined = promotionNameValid(name)
+    ? targetKind === 'local'
+      ? { kind: 'local', name }
+      : repoPathOrUrl
+        ? { kind: 'repo', repoPathOrUrl, name }
+        : undefined
+    : undefined;
+  const previewBlocked = !target;
   const applyBlocked =
     !preview ||
     preview.sources.some(
@@ -111,12 +118,12 @@ export default function PromoteWorkflowDialog({
     );
 
   const requestPreview = async () => {
-    if (!repoPathOrUrl || !promotionNameValid(name)) return;
+    if (!target) return;
     setLoading(true);
     setError(undefined);
     try {
       const response = await apiClient.request('promoteWorkflow', {
-        body: promotionPreviewRequest(repoPathOrUrl, name, input),
+        body: promotionPreviewRequest(target, input),
       });
       if (!('data' in response) || response.data.mode !== 'preview')
         throw new Error('Invalid promotion preview response');
@@ -138,7 +145,7 @@ export default function PromoteWorkflowDialog({
   };
 
   const apply = async (overwrite = false) => {
-    if (!repoPathOrUrl || !preview || applyBlocked) return;
+    if (!target || !preview || applyBlocked) return;
     if (preview.nameCollision && !overwrite) {
       setOverwriteConfirm(true);
       return;
@@ -148,8 +155,7 @@ export default function PromoteWorkflowDialog({
     try {
       const response = await apiClient.request('promoteWorkflow', {
         body: promotionApplyRequest(
-          repoPathOrUrl,
-          name,
+          target,
           input,
           preview.previewId,
           { hooks, tagChoiceBySourceId: tagChoices, overwrite, adopt }
@@ -160,12 +166,12 @@ export default function PromoteWorkflowDialog({
       dispatch(
         triggerToast({
           title: 'Workflow saved',
-          description: `${name}.json was written to ${getRepoName(repoPathOrUrl)}.`,
+          description: target.kind === 'local' ? `${name}.json was saved locally.` : `${name}.json was written to ${getRepoName(target.repoPathOrUrl)}.`,
           variant: 'success',
         })
       );
       onOpenChange(false);
-      onPromoted(repoPathOrUrl, name);
+      onPromoted(target);
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 409) {
         dispatch(
@@ -222,19 +228,28 @@ export default function PromoteWorkflowDialog({
               </Dialog.Close>
             </div>
             <div className="grid gap-4 max-h-[70vh] overflow-y-auto pr-1">
-              <label className="grid gap-1">
-                <span className="eyebrow">Target repository</span>
-                <Select
-                  requireSelection
-                  value={repoPathOrUrl}
-                  options={repoOptions}
-                  placeholder="Choose a registered repository"
-                  onValueChange={(value) => {
-                    setRepoPathOrUrl(value);
-                    resetPreview();
-                  }}
-                />
-              </label>
+              <div className="grid gap-1">
+                <span className="eyebrow">Save location</span>
+                <div className="flex gap-2">
+                  <button type="button" className={`btn ${targetKind === 'repo' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setTargetKind('repo'); resetPreview(); }}>Repository</button>
+                  <button type="button" className={`btn ${targetKind === 'local' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => { setTargetKind('local'); resetPreview(); }}>Local</button>
+                </div>
+              </div>
+              {targetKind === 'repo' && (
+                <label className="grid gap-1">
+                  <span className="eyebrow">Target repository</span>
+                  <Select
+                    requireSelection
+                    value={repoPathOrUrl}
+                    options={repoOptions}
+                    placeholder="Choose a registered repository"
+                    onValueChange={(value) => {
+                      setRepoPathOrUrl(value);
+                      resetPreview();
+                    }}
+                  />
+                </label>
+              )}
               <label className="grid gap-1">
                 <span className="eyebrow">Workflow name</span>
                 <input
@@ -272,7 +287,7 @@ export default function PromoteWorkflowDialog({
                       what's missing (same posture as the wizard nav). */}
                   {previewBlocked && (
                     <span className="text-sm text-muted">
-                      {!repoPathOrUrl
+                      {targetKind === 'repo' && !repoPathOrUrl
                         ? 'Choose a target repository first'
                         : !name
                           ? 'Enter a workflow name first'
@@ -347,7 +362,7 @@ export default function PromoteWorkflowDialog({
                   </div>
                 </section>
               )}
-              {'runId' in input && preview && (
+              {'runId' in input && preview && targetKind === 'repo' && (
                 <label className="flex items-start gap-2 text-sm">
                   <input
                     type="checkbox"

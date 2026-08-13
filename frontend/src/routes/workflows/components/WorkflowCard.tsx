@@ -7,6 +7,7 @@ import {
   Pencil,
   Play,
   RefreshCw,
+  Upload,
 } from 'lucide-react';
 import type { WorkflowSummary } from '@ignite/api';
 import { sanitizeDisplayText } from '@ignite/api';
@@ -30,13 +31,16 @@ import {
 } from '../../../store/features/deployments/deployDraftSlice';
 import { decodeUrlEncodingForDisplay } from '../../../utils/displayText';
 import UpdateDiffDialog from './UpdateDiffDialog';
+import PromoteWorkflowDialog from '../../../components/PromoteWorkflowDialog';
 
 export default function WorkflowCard({
   repoPathOrUrl,
   workflow,
+  local = false,
 }: {
   repoPathOrUrl: string;
   workflow: WorkflowSummary;
+  local?: boolean;
 }) {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
@@ -62,6 +66,7 @@ export default function WorkflowCard({
   const [pluginId, setPluginId] = useState<string | null>(null);
   const installRequested = useRef(false);
   const [installPending, setInstallPending] = useState(false);
+  const [promoteOpen, setPromoteOpen] = useState(false);
 
   useEffect(() => {
     if (workflow.valid && !documentState) {
@@ -153,6 +158,7 @@ export default function WorkflowCard({
             </p>
           )}
           <div className="flex flex-wrap gap-2 mt-3">
+            {local && <span className="pill pill-primary rounded-full px-2 py-0.5">local</span>}
             <span className="pill rounded-full px-2 py-0.5">
               {workflow.sourceCount ?? 0} sources
             </span>
@@ -225,7 +231,17 @@ export default function WorkflowCard({
               ))}
         </div>
         <div className="flex gap-2 shrink-0">
-          {!busy &&
+          {local && !busy && (
+            <button className="btn btn-primary" onClick={() => navigate(`/deploy?workflowRepo=${encodeURIComponent(repoPathOrUrl)}&workflow=${encodeURIComponent(workflow.name)}&workflowLocal=1`)}>
+              <Play size={15} /> Run
+            </button>
+          )}
+          {local && !busy && (
+            <button className="btn btn-secondary" onClick={() => setPromoteOpen(true)}>
+              <Upload size={15} /> Promote
+            </button>
+          )}
+          {!local && !busy &&
             !suppressStateAction &&
             entry?.installState === 'not-installed' && (
               <button
@@ -247,7 +263,7 @@ export default function WorkflowCard({
                 <RefreshCw size={15} /> Update
               </button>
             )}
-          {!busy && !suppressStateAction && entry?.installState === 'ready' && (
+          {!local && !busy && !suppressStateAction && entry?.installState === 'ready' && (
             <button
               className="btn btn-primary"
               onClick={() =>
@@ -264,13 +280,13 @@ export default function WorkflowCard({
             disabled={busy}
             onClick={() =>
               navigate(
-                `/workflows/edit?workflowRepo=${encodeURIComponent(repoPathOrUrl)}&workflow=${encodeURIComponent(workflow.name)}`
+                  `/workflows/edit?workflowRepo=${encodeURIComponent(repoPathOrUrl)}&workflow=${encodeURIComponent(workflow.name)}${local ? '&workflowLocal=1' : ''}`
               )
             }
           >
             <Pencil size={15} /> Edit
           </button>
-          <button
+          {!local && <button
             className="btn btn-secondary"
             disabled={busy || updates?.loading}
             onClick={() =>
@@ -284,7 +300,7 @@ export default function WorkflowCard({
               className={updates?.loading ? 'animate-spin' : ''}
             />{' '}
             Check for new versions
-          </button>
+          </button>}
         </div>
       </div>
       {busy && (
@@ -451,7 +467,7 @@ export default function WorkflowCard({
         </div>
       )}
       {entry?.diff && (
-        <UpdateDiffDialog
+      <UpdateDiffDialog
           open={diffOpen}
           onOpenChange={setDiffOpen}
           diff={entry.diff}
@@ -464,6 +480,15 @@ export default function WorkflowCard({
         requiredPlugin={selectedPlugin}
         manage={managePlugin(selectedInstalledPlugin)}
       />
+      {local && (
+        <PromoteWorkflowDialog
+          open={promoteOpen}
+          onOpenChange={setPromoteOpen}
+          input={{ source: { kind: 'local', name: workflow.name } }}
+          hooks={documentState?.document.outputs.hooks ?? workflow.hooks ?? []}
+          onPromoted={() => setPromoteOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -22,13 +22,13 @@ describe('workflow promotion request builders', () => {
   });
 
   it('builds preview and apply requests for a draft', () => {
-    expect(promotionPreviewRequest('/repo', 'release', { plan })).toEqual({
+    expect(promotionPreviewRequest({ kind: 'repo', repoPathOrUrl: '/repo', name: 'release' }, { plan })).toEqual({
       mode: 'preview',
-      target: { repoPathOrUrl: '/repo', name: 'release' },
+      target: { kind: 'repo', repoPathOrUrl: '/repo', name: 'release' },
       plan,
     });
     expect(
-      promotionApplyRequest('/repo', 'release', { plan }, 'preview-1', {
+      promotionApplyRequest({ kind: 'repo', repoPathOrUrl: '/repo', name: 'release' }, { plan }, 'preview-1', {
         hooks: ['chronicles'],
         overwrite: true,
         tagChoiceBySourceId: { token: 'v1' },
@@ -36,7 +36,7 @@ describe('workflow promotion request builders', () => {
     ).toEqual({
       mode: 'apply',
       previewId: 'preview-1',
-      target: { repoPathOrUrl: '/repo', name: 'release' },
+      target: { kind: 'repo', repoPathOrUrl: '/repo', name: 'release' },
       plan,
       hooks: ['chronicles'],
       overwrite: true,
@@ -47,12 +47,17 @@ describe('workflow promotion request builders', () => {
   it('adds adoption only for a run promotion', () => {
     expect(
       promotionApplyRequest(
-        '/repo',
-        'release',
+        { kind: 'repo', repoPathOrUrl: '/repo', name: 'release' },
         { runId: 'run-1' },
         'preview-1',
         { hooks: [], adopt: true }
       )
     ).toMatchObject({ runId: 'run-1', adoptRunIds: ['run-1'] });
+  });
+
+  it('builds a local promotion target', () => {
+    expect(promotionPreviewRequest({ kind: 'local', name: 'release' }, { plan })).toMatchObject({
+      target: { kind: 'local', name: 'release' },
+    });
   });
 });

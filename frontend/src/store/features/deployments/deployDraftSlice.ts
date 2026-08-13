@@ -252,11 +252,12 @@ const deployDraftSlice = createSlice({
       action: PayloadAction<{
         repoPathOrUrl: string;
         name: string;
+        local?: true;
         docHash: string;
         document: WorkflowDocument;
       }>
     ) {
-      const { repoPathOrUrl, name, docHash, document } = action.payload;
+      const { repoPathOrUrl, name, docHash, document, local } = action.payload;
       const deployExtras: DeployDraftState['deployExtras'] = {};
       const steps: DraftStep[] = document.steps.map((step) => {
         if (step.kind === 'call')
@@ -319,7 +320,7 @@ const deployDraftSlice = createSlice({
         chains: [],
         steps,
         deployExtras,
-        workflowRef: { repoPathOrUrl, name, baseDocHash: docHash, docHash },
+        workflowRef: { repoPathOrUrl, name, ...(local ? { local: true as const } : {}), baseDocHash: docHash, docHash },
         workflowDocument: cloneJson(document),
         workflowSources: cloneJson(document.sources),
         workflowIncludedStepIds: Object.fromEntries(

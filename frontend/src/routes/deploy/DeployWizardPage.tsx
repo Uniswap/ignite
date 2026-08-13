@@ -129,6 +129,7 @@ export default function DeployWizardPage() {
   const [promoteOpen, setPromoteOpen] = useState(false);
   const workflowRepo = searchParams.get('workflowRepo');
   const workflowName = searchParams.get('workflow');
+  const workflowLocal = searchParams.get('workflowLocal') === '1';
   const workflowState = useAppSelector((state) =>
     workflowRepo && workflowName
       ? selectWorkflowDocument(state, workflowRepo, workflowName)
@@ -187,6 +188,7 @@ export default function DeployWizardPage() {
       hydrateWorkflowDraft({
         repoPathOrUrl: workflowRepo,
         name: workflowName,
+        ...(workflowLocal ? { local: true as const } : {}),
         docHash: workflowState.docHash,
         document: workflowState.document,
       })
@@ -203,10 +205,12 @@ export default function DeployWizardPage() {
     }
   }, [
     dispatch,
+    draft.workflowRef,
     draft.workflowRef?.name,
     draft.workflowRef?.repoPathOrUrl,
     workflowName,
     workflowRepo,
+    workflowLocal,
     workflowState,
   ]);
   const { plan, planProblem } = useMemo(() => {

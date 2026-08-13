@@ -11,6 +11,7 @@ import { setCurrentProfile } from '../profiles/profilesSlice';
 
 export const workflowKey = (repoPathOrUrl: string, name: string) =>
   `${repoPathOrUrl}\0${name}`;
+export const LOCAL_WORKFLOW_REPO = '__local__';
 
 export const workflowStatusKey = (profileId: string, repoPathOrUrl: string) =>
   `${profileId}:${repoPathOrUrl}`;

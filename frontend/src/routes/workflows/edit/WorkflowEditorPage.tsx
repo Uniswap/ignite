@@ -17,6 +17,7 @@ import { workflowsApi } from '../../../store/features/workflows/workflowsApi';
 import {
   selectWorkflowInstall,
   selectWorkflowStatus,
+  LOCAL_WORKFLOW_REPO,
 } from '../../../store/features/workflows/workflowsSlice';
 import SourceRow from './components/SourceRow';
 import RemoveCascadeDialog from './components/RemoveCascadeDialog';
@@ -70,6 +71,7 @@ export default function WorkflowEditorPage() {
   const [params] = useSearchParams();
   const repoPathOrUrl = params.get('workflowRepo') ?? '';
   const name = params.get('workflow') ?? '';
+  const local = repoPathOrUrl === LOCAL_WORKFLOW_REPO;
   const editorKey = `${repoPathOrUrl}\0${name}`;
   const status = useAppSelector((state) =>
     selectWorkflowStatus(state, repoPathOrUrl)
@@ -179,11 +181,11 @@ export default function WorkflowEditorPage() {
 
   const profileId = useAppSelector((state) => state.profiles.currentId);
   useEffect(() => {
-    if (repoPathOrUrl && profileId)
+    if (repoPathOrUrl && profileId && !local)
       workflowsApi
         .getWorkflowsStatus(repoPathOrUrl, profileId)
         .forEach((action) => dispatch(action));
-  }, [dispatch, profileId, repoPathOrUrl]);
+  }, [dispatch, local, profileId, repoPathOrUrl]);
   useEffect(() => {
     pluginsApi.refresh().forEach((action) => dispatch(action));
   }, [dispatch]);
@@ -278,7 +280,7 @@ export default function WorkflowEditorPage() {
         onSaved: (docHash) => {
           setBase(draft);
           setBaseHash(docHash);
-          dispatch(
+          if (!local) dispatch(
             workflowsApi.installWorkflow(
               { repoPathOrUrl, name, expectedDocHash: docHash },
               profileId ?? undefined
@@ -311,7 +313,7 @@ export default function WorkflowEditorPage() {
         <div>
           <h1 className="page-title">Edit {sanitizeDisplayText(name)}</h1>
           <p className="text-muted mt-1">
-            Changes are written to the repository working tree.
+            Changes are written {local ? 'to this profile’s local workflow storage.' : 'to the repository working tree.'}
           </p>
         </div>
         {repository?.initialized && repository.info?.dirty && (
