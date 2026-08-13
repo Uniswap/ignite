@@ -16,7 +16,7 @@ import {
   uniqueName,
 } from './runAddressBook';
 
-type CollisionChoice =
+export type CollisionChoice =
   | { action: 'merge'; chains: Record<string, 'keep' | 'replace'> }
   | { action: 'rename'; name: string };
 
@@ -86,7 +86,7 @@ export default function SaveRunAddressesDialog({
       const choice = choices[candidate.stepId];
       if (!choice) return true;
       if (choice.action === 'rename')
-        return !/^[a-z0-9][a-z0-9-]{0,63}$/.test(choice.name);
+        return !runSaveRenameValid(candidate.stepId, choice.name, target.entries ?? [], candidates, choices);
       return conflicts.some(({ chainId }) => !choice.chains[chainId]);
     });
   const save = async () => {
@@ -293,9 +293,10 @@ export default function SaveRunAddressesDialog({
                           Save under a new name
                         </label>
                         {choice?.action === 'rename' && (
-                          <input
+                          <div className="grid gap-1"><input
                             className="input-glass mono-data"
                             value={choice.name}
+                            aria-invalid={!runSaveRenameValid(candidate.stepId, choice.name, target?.entries ?? [], candidates, choices)}
                             onChange={(event) =>
                               setChoices((current) => ({
                                 ...current,
@@ -305,7 +306,7 @@ export default function SaveRunAddressesDialog({
                                 },
                               }))
                             }
-                          />
+                          />{!runSaveRenameValid(candidate.stepId, choice.name, target?.entries ?? [], candidates, choices) && <span className="text-xs text-err">Use a valid name that is not already present or pending.</span>}</div>
                         )}
                       </div>
                     )}
@@ -365,6 +366,14 @@ export function buildEntries(
       );
   }
   return result;
+}
+
+export function runSaveRenameValid(stepId: string, name: string, current: AddressBookEntry[], candidates: RunAddressCandidate[], choices: Record<string, CollisionChoice>): boolean {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) return false;
+  const existingNames = new Set(current.map((entry) => entry.name));
+  if (existingNames.has(name)) return false;
+  if (candidates.some((candidate) => !existingNames.has(candidate.name) && candidate.name === name)) return false;
+  return !Object.entries(choices).some(([candidateStepId, choice]) => candidateStepId !== stepId && choice.action === 'rename' && choice.name === name);
 }
 
 function nextName(

@@ -315,6 +315,8 @@ function validationMessage(type: string, value: string): string | undefined {
       return 'Enter even-length 0x-prefixed hex bytes.';
   }
   if (type.endsWith(']')) {
+    // v1 intentionally keeps ABI arrays in the JSON editor. The backend
+    // accepts nested $book pointers, but picker affordances are a follow-up.
     try {
       if (!Array.isArray(JSON.parse(value))) return 'Enter a JSON array.';
     } catch {

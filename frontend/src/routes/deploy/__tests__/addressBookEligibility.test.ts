@@ -81,4 +81,10 @@ describe('address book picker eligibility', () => {
       }),
     ]);
   });
+
+  it('allows a contextual link when every selected chain is masked', () => {
+    const choice = addressBookPickerChoices([{ source: { kind: 'local' }, writable: true, bookHash: 'a'.repeat(64), entries: [{ name: 'future-owner', perChain: { '137': localOne } }] }], { selectedChainIds: [1, 10], maskedChainIds: [1, 10], contextualSourceKey: 'local', allowLink: true })[0];
+    expect(choice?.canLink).toBe(true);
+    expect(choice?.plainAddress).toBeUndefined();
+  });
 });

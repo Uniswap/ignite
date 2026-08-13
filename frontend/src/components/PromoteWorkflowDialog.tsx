@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { AlertTriangle, Loader2, Save, X } from 'lucide-react';
 import {
   WorkflowNamePattern,
+  type AddressBookEntry,
   type DeploymentPlan,
   type WorkflowPromotionBookChoice,
   type WorkflowPromoteData,
@@ -22,6 +23,9 @@ type PromotionInput = { plan: DeploymentPlan } | { runId: string };
 
 export const promotionNameValid = (name: string) =>
   WorkflowNamePattern.test(name);
+export function promotionEntryAddresses(entry: AddressBookEntry): Array<{ chainId: string; address: string }> {
+  return [...(entry.address ? [{ chainId: 'global', address: entry.address }] : []), ...Object.entries(entry.perChain ?? {}).map(([chainId, address]) => ({ chainId, address }))];
+}
 
 export function promotionPreviewRequest(
   repoPathOrUrl: string,
@@ -404,6 +408,8 @@ export default function PromoteWorkflowDialog({
                                   </div>
                                 )
                               )}
+                              {entry.promotedUses?.map((use) => <div key={`${use.stepId}:${use.argPath}`} className="grid gap-1 text-xs"><span className="mono-data">{use.stepId} {use.argPath}</span>{Object.entries(use.chains).map(([chainId, behavior]) => <span key={chainId} className="mono-data text-muted">Chain {chainId}: {behavior.behavior === 'pointer' ? 'book pointer' : 'kept literal'} {behavior.address}</span>)}</div>)}
+                              {entry.targetEntry && <div className="grid gap-1 text-xs"><span>Repo target addresses:</span>{promotionEntryAddresses(entry.targetEntry).map(({ chainId, address }) => <span key={chainId} className="mono-data text-muted">{chainId === 'global' ? 'Global' : `Chain ${chainId}`}: {address}</span>)}</div>}
                               {entry.conflict && (
                                 <div className="grid gap-2">
                                   <label className="flex items-start gap-2 text-sm">
@@ -420,7 +426,7 @@ export default function PromoteWorkflowDialog({
                                     />
                                     <span>
                                       Keep the repo entry. The promoted pointer
-                                      will retarget to the repo address.
+                                      will retarget to the repo address shown above.
                                     </span>
                                   </label>
                                   <label className="flex items-start gap-2 text-sm">

@@ -7,6 +7,7 @@ import {
   mergeRunCandidate,
   slugAddressBookName,
 } from '../runAddressBook';
+import { runSaveRenameValid } from '../SaveRunAddressesDialog';
 
 describe('run address book generation', () => {
   it('slugifies names, auto-suffixes duplicates, and collapses only identical addresses', () => {
@@ -91,5 +92,19 @@ describe('run address book generation', () => {
       name: 'token',
       perChain: { '1': incoming, '10': incoming },
     });
+  });
+
+  it('rejects run-save renames that collide with existing or pending names', () => {
+    const candidates = [
+      { stepId: 'one', name: 'token', entry: { name: 'token', address: '0x1111111111111111111111111111111111111111' as const }, resolutions: {} },
+      { stepId: 'two', name: 'vault', entry: { name: 'vault', address: '0x2222222222222222222222222222222222222222' as const }, resolutions: {} },
+      { stepId: 'three', name: 'new-contract', entry: { name: 'new-contract', address: '0x3333333333333333333333333333333333333333' as const }, resolutions: {} },
+    ];
+    const current = [{ name: 'token', address: '0x4444444444444444444444444444444444444444' as const }, { name: 'vault', address: '0x5555555555555555555555555555555555555555' as const }];
+    const choices = { one: { action: 'rename' as const, name: 'release-owner' }, two: { action: 'rename' as const, name: 'release-owner' } };
+    expect(runSaveRenameValid('one', 'token', current, candidates, choices)).toBe(false);
+    expect(runSaveRenameValid('one', 'new-contract', current, candidates, choices)).toBe(false);
+    expect(runSaveRenameValid('one', 'release-owner', current, candidates, choices)).toBe(false);
+    expect(runSaveRenameValid('one', 'release-owner-2', current, candidates, choices)).toBe(true);
   });
 });

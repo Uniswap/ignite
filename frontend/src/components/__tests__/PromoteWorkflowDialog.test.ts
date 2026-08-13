@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DeploymentPlan } from '@ignite/api';
 import {
+  promotionEntryAddresses,
   promotionApplyRequest,
   promotionNameValid,
   promotionPreviewRequest,
@@ -54,5 +55,12 @@ describe('workflow promotion request builders', () => {
         { hooks: [], adopt: true }
       )
     ).toMatchObject({ runId: 'run-1', adoptRunIds: ['run-1'] });
+  });
+
+  it('exposes the exact repo target addresses for conflict disclosure', () => {
+    expect(promotionEntryAddresses({ name: 'owner', address: '0x1111111111111111111111111111111111111111', perChain: { '10': '0x2222222222222222222222222222222222222222' } })).toEqual([
+      { chainId: 'global', address: '0x1111111111111111111111111111111111111111' },
+      { chainId: '10', address: '0x2222222222222222222222222222222222222222' },
+    ]);
   });
 });

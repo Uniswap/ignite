@@ -64,8 +64,7 @@ export function addressBookPickerChoices(
         Boolean(
           context.allowLink &&
           context.contextualSourceKey === addressBookSourceKey(book) &&
-          linkChains.length === 0 &&
-          entry.address
+          linkChains.length === 0
         );
       if (!plainAddress && !canLink) return [];
       return [
