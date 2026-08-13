@@ -16,11 +16,11 @@ function plan(value: unknown): DeploymentPlan {
 }
 
 const frozen: FrozenInputs = {
-  contract: { abi: [{ type: 'constructor', inputs: [{ name: 'recipient', type: 'address' }] }], bytecode: '0x00', artifactHash: hash },
+  contract: { abi: [{ type: 'constructor', inputs: [{ name: 'recipient', type: 'address' }] }], creationBytecode: '0x00', compiler: { pluginId: 'foundry', version: '1', settingsHash: hash }, artifactHash: hash, repoDirty: false },
 };
 
 const books = {
-  contextual: async () => ({ source: 'local' as const, sourceKey: 'local', bookHash: hash, file: { schemaVersion: 1 as const, entries: [{ name: 'treasury', perChain: { '1': address, '10': '0x876543210fedCBA9876543210fEdcba987654321' } }] } }),
+  contextual: async (_profileId: string, _workflow?: { repoPathOrUrl: string }) => ({ source: 'local' as const, sourceKey: 'local', bookHash: hash, file: { schemaVersion: 1 as const, entries: [{ name: 'treasury', perChain: { '1': address, '10': '0x876543210fedCBA9876543210fEdcba987654321' as const } }] } }),
 };
 
 describe('book pointer resolution', () => {
