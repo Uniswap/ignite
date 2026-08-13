@@ -253,7 +253,7 @@ export function VerificationTaskRows({
             className="btn btn-sm btn-secondary"
             onClick={() => dispatch(verificationsApi.retry(task.id))}
           >
-            <RotateCcw size={14} /> Retry
+            <RotateCcw size={14} /> Retry Verification
           </button>
         ) : null}
       </div>
