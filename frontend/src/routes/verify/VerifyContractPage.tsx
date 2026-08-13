@@ -6,6 +6,7 @@ import ArtifactPicker from '../../components/ArtifactPicker';
 import ConstructorArgsForm, {
   constructorInputs,
 } from '../../components/ConstructorArgsForm';
+import { explorerLookupOptions } from '../../components/ExplorerLookup';
 import Select from '../../components/Select';
 import ExplorerMultiSelect from '../deploy/steps/ExplorerMultiSelect';
 import { useAppDispatch, useAppSelector } from '../../store';
@@ -327,6 +328,10 @@ export default function VerifyContractPage() {
           <ConstructorArgsForm
             abi={abi as never[]}
             value={args}
+            explorerOptions={explorerLookupOptions(
+              chains,
+              Number.isInteger(numericChainId) ? [numericChainId] : []
+            )}
             onChange={(next) => {
               setArgs(next);
               setEncodedTail(undefined);
