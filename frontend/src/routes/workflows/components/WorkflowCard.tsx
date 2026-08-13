@@ -467,7 +467,7 @@ export default function WorkflowCard({
         </div>
       )}
       {entry?.diff && (
-      <UpdateDiffDialog
+        <UpdateDiffDialog
           open={diffOpen}
           onOpenChange={setDiffOpen}
           diff={entry.diff}
