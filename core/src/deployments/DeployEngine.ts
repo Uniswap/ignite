@@ -96,7 +96,7 @@ export interface DeployEngineDeps {
   validate: (
     plan: DeploymentPlan,
     rpc: RpcSelection,
-    deps?: { profileId?: string; explorerSelection?: Record<string, string[]>; workflow?: { document: WorkflowDocument; binding: WorkflowRunBinding } }
+    deps?: { profileId?: string; launch?: boolean; explorerSelection?: Record<string, string[]>; workflow?: { document: WorkflowDocument; binding: WorkflowRunBinding } }
   ) => ReturnType<typeof validatePlan>;
   writeArtifact: (run: RunRecord) => Promise<unknown>;
   getReceipt: (url: string, hash: Hex) => Promise<Receipt | undefined>;
@@ -234,6 +234,7 @@ export class DeployEngine {
       if (existing) return existing;
       const validated = await this.deps.validate(args.plan, args.rpcSelection, {
         profileId: args.profileId,
+        launch: true,
         explorerSelection: args.explorerSelection,
         ...(args.workflow && args.workflowDocument ? { workflow: { binding: args.workflow, document: args.workflowDocument } } : {}),
       });
@@ -843,6 +844,9 @@ export class DeployEngine {
   async get(profileId: string, runId: string): Promise<RunRecord | undefined> {
     return this.deps.runStore.get(profileId, runId);
   }
+  async findByIdempotencyKey(profileId: string, idempotencyKey: string): Promise<RunRecord | undefined> {
+    return this.deps.runStore.findByIdempotencyKey(profileId, idempotencyKey);
+  }
   async list(profileId: string): Promise<{
     runs: import('@ignite/api').RunSummary[];
     unreadable: string[];
@@ -852,7 +856,7 @@ export class DeployEngine {
   async validatePlan(
     plan: DeploymentPlan,
     rpc: RpcSelection,
-    opts?: { profileId?: string; explorerSelection?: Record<string, string[]>; workflow?: { document: WorkflowDocument; binding: WorkflowRunBinding } }
+    opts?: { profileId?: string; launch?: boolean; explorerSelection?: Record<string, string[]>; workflow?: { document: WorkflowDocument; binding: WorkflowRunBinding } }
   ) {
     return this.deps.validate(plan, rpc, opts);
   }

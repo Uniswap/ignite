@@ -52,6 +52,7 @@ function handlers(overrides: Record<string, unknown> = {}) {
       readWorkflow: readWorkflow as never,
       installedWorkflows: installedWorkflows as never,
       getProfileManager: async () => ({ getCurrentProfile: () => 'p1' }),
+      findRunByIdempotencyKey: async () => undefined,
       ...overrides,
     } as never),
   };
@@ -86,6 +87,14 @@ describe('workflow deployment binding', () => {
     expect(getCurrentProfile).toHaveBeenCalledTimes(1);
     expect(h.installedWorkflows.get).toHaveBeenCalledWith('profile-a', '/workflow', 'release');
     expect(h.launch).toHaveBeenCalledWith(expect.objectContaining({ profileId: 'profile-a' }));
+  });
+
+  it('returns an idempotent replay before reading workflow context', async () => {
+    const existing = { id: 'existing-run' }; const readWorkflow = vi.fn(async () => { throw new Error('workflow is now unreadable'); });
+    const h = handlers({ readWorkflow, findRunByIdempotencyKey: vi.fn(async () => existing) }); const response = reply();
+    await h.value.createDeploymentRun({ body: { plan, rpcSelection: { '1': 'rpc' }, workflow, idempotencyKey: 'key' } } as never, response);
+    expect(response.statusCode).toBe(200); expect(response.body).toEqual({ data: { run: existing } });
+    expect(readWorkflow).not.toHaveBeenCalled(); expect(h.launch).not.toHaveBeenCalled();
   });
 
   it('rejects workflow-bound runs when no installed workflow record exists', async () => {

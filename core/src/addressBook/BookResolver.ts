@@ -25,8 +25,13 @@ export async function resolveBookPointers(
   deps: BookResolverDeps = { books: new AddressBookService() },
 ): Promise<{ plan: DeploymentPlan; bookResolutions?: BookResolutions; bookHashes?: Record<string, string> }> {
   if (!containsBook(plan.steps)) return { plan };
-  const book = await deps.books.contextual(profileId, workflow);
   const next = globalThis.structuredClone(plan);
+  const needsBook = next.chains.some((chainId) => next.steps.some((step) => containsBook(mergeArgs(step, chainId))));
+  if (!needsBook) {
+    stripBookPointers(next);
+    return { plan: next };
+  }
+  const book = await deps.books.contextual(profileId, workflow);
   const bookResolutions: BookResolutions = {};
   for (const chainId of next.chains) {
     const resolutions: NonNullable<BookResolutions[string]> = [];
@@ -168,9 +173,18 @@ function stripBookPointers(plan: DeploymentPlan): void {
 function stripObject(value: Record<string, unknown>): void {
   for (const [key, child] of Object.entries(value)) {
     if (hasBookKey(child)) delete value[key];
-    else if (Array.isArray(child)) child.forEach((item) => { if (item && typeof item === 'object') stripObject(item as Record<string, unknown>); });
+    else if (Array.isArray(child)) value[key] = stripArray(child);
     else if (child && typeof child === 'object') stripObject(child as Record<string, unknown>);
   }
+}
+
+function stripArray(value: unknown[]): unknown[] {
+  return value.flatMap((child) => {
+    if (hasBookKey(child)) return [];
+    if (Array.isArray(child)) return [stripArray(child)];
+    if (child && typeof child === 'object') stripObject(child as Record<string, unknown>);
+    return [child];
+  });
 }
 
 function invalidPosition(stepId: string, argPath: string): IgniteError {

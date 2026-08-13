@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { DeploymentPlan, FrozenInputs } from '@ignite/api';
 import { resolveBookPointers } from '../../addressBook/BookResolver.js';
 
@@ -127,6 +127,24 @@ describe('book pointer resolution', () => {
         }),
       ],
     });
+  });
+
+  it('does not read a malformed contextual book when every selected chain masks the pointer', async () => {
+    const masked = plan({ $book: { name: 'treasury' } });
+    masked.steps[0]!.argsPerChain = { '1': { recipient: '0x1111111111111111111111111111111111111111' }, '10': { recipient: '0x2222222222222222222222222222222222222222' } };
+    const contextual = vi.fn(async () => { throw new Error('malformed contextual book'); });
+    const result = await resolveBookPointers(masked, frozen, 'profile', undefined, { books: { contextual } });
+    expect(contextual).not.toHaveBeenCalled();
+    expect(JSON.stringify(result.plan)).not.toContain('$book');
+    expect(result.plan.steps[0]).toMatchObject({ argsPerChain: masked.steps[0]!.argsPerChain });
+  });
+
+  it('removes direct array-element pointers from the frozen plan', async () => {
+    const arrayPlan = plan([{ $book: { name: 'treasury' } }]);
+    const arrayFrozen = { contract: { ...frozen.contract, abi: [{ type: 'constructor', inputs: [{ name: 'recipient', type: 'address[]' }] }] } } as FrozenInputs;
+    const result = await resolveBookPointers(arrayPlan, arrayFrozen, 'profile', undefined, { books });
+    expect(JSON.stringify(result.plan)).not.toContain('$book');
+    expect(result.plan.steps[0]).toMatchObject({ args: { recipient: [] }, argsPerChain: { '1': { recipient: [address] }, '10': { recipient: ['0x876543210FedCBa9876543210fedcBA987654321'] } } });
   });
 
   it('rejects a strict pointer with extra keys at the exact argument path', async () => {

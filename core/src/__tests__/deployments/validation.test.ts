@@ -233,6 +233,22 @@ describe('validatePlan', () => {
     expect(freezeInputs).toHaveBeenCalledOnce();
   });
 
+  it('does not let launch validation join an in-flight review book snapshot', async () => {
+    let releaseReview!: () => void; const reviewMayFinish = new Promise<void>((resolve) => { releaseReview = resolve; });
+    let firstCapture = true; let currentHash = 'a'.repeat(64);
+    const resolveBookPointers = vi.fn(async (candidate: DeploymentPlan) => ({ plan: candidate, bookHashes: { local: currentHash } }));
+    const captureBundles = vi.fn(async () => { if (firstCapture) { firstCapture = false; await reviewMayFinish; } return { token: { bundleHash: HASH } }; });
+    const d = deps({ resolveBookPointers, captureBundles });
+    const review = validatePlan(plan(), { '1': 'rpc-1' }, d);
+    while (resolveBookPointers.mock.calls.length === 0) await Promise.resolve();
+    currentHash = 'c'.repeat(64);
+    const launch = await validatePlan(plan(), { '1': 'rpc-1' }, { ...d, launch: true });
+    expect(launch.bookHashes).toEqual({ local: 'c'.repeat(64) });
+    expect(resolveBookPointers).toHaveBeenCalledTimes(2);
+    releaseReview();
+    await expect(review).resolves.toMatchObject({ bookHashes: { local: 'a'.repeat(64) } });
+  });
+
   it('freezes contract types once and passes that exact snapshot into input freezing', async () => {
     const snapshot = {};
     const freezeContractTypes = vi.fn(async () => snapshot);

@@ -115,6 +115,7 @@ const validationFlights = new Map<
 
 export interface ValidationDeps {
   profileId?: string;
+  launch?: boolean;
   freezeInputs: (
     profileId: string,
     contracts: ContractSource[],
@@ -163,6 +164,7 @@ export interface ValidationDeps {
   }) => Promise<ForkRunner | undefined>;
   workflow?: { document: WorkflowDocument; binding: WorkflowRunBinding };
   resolveHookStatus: (pluginId: string) => Promise<'ready' | 'missing' | 'untrusted'>;
+  resolveBookPointers: typeof resolveBookPointers;
 }
 
 export async function validatePlan(
@@ -183,6 +185,9 @@ export async function validatePlan(
   bookResolutions?: BookResolutions;
   bookHashes?: Record<string, string>;
 }> {
+  // Launch must take a fresh address-book snapshot. Joining a review flight
+  // could reuse a resolution that was read before the launch request began.
+  if (overrides?.launch) return validatePlanOnce(plan, rpcSelection, overrides);
   // Only byte-identical validation requests may share work: sharing a
   // profile alone can otherwise return a Review result for a different draft.
   const profileId = overrides?.profileId ?? 'default';
@@ -251,7 +256,7 @@ async function validatePlanOnce(
   let bookResolutions: BookResolutions | undefined;
   let bookHashes: Record<string, string> | undefined;
   if (!freezeError) {
-    const resolved = await resolveBookPointers(
+    const resolved = await deps.resolveBookPointers(
       plan,
       frozen,
       deps.profileId ?? 'default',
@@ -443,6 +448,7 @@ function defaultDeps(): ValidationDeps {
       (await registry.getPluginConfig(pluginId)).origin,
     deploymentTypes: DeploymentTypeService.getInstance(),
     makeForkRunner,
+    resolveBookPointers,
     resolveHookStatus: async (pluginId) => {
       let config;
       try { config = await registry.getPluginConfig(pluginId); }

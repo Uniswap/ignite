@@ -54,11 +54,13 @@ export interface DeploymentHandlerDeps {
         rpc: ValidateDeploymentRequest['rpcSelection'],
         opts?: {
           profileId?: string;
+          launch?: boolean;
           explorerSelection?: Record<string, string[]>;
           workflow?: { document: WorkflowDocument; binding: WorkflowRunBinding };
         }
         ) => Promise<{ report: ValidateDeploymentData; frozen: unknown; bookResolutions?: ValidateDeploymentData['bookResolutions']; bookHashes?: ValidateDeploymentData['bookHashes'] }>;
   getRun: (profileId: string, runId: string) => Promise<RunRecord | undefined>;
+  findRunByIdempotencyKey: (profileId: string, idempotencyKey: string) => Promise<RunRecord | undefined>;
   listVerifications: (
     profileId: string,
     runId: string
@@ -94,6 +96,11 @@ export function createDeploymentHandlers(
     getRun:
       deps?.getRun ??
       ((profileId, runId) => DeployEngine.getInstance().get(profileId, runId)),
+    findRunByIdempotencyKey:
+      deps?.findRunByIdempotencyKey ??
+      (deps?.engine
+        ? async () => undefined
+        : (profileId, idempotencyKey) => DeployEngine.getInstance().findByIdempotencyKey(profileId, idempotencyKey)),
     listRuns:
       deps?.listRuns ??
       ((profileId) => DeployEngine.getInstance().list(profileId)),
@@ -345,6 +352,8 @@ export function createDeploymentHandlers(
     ): Promise<IApiResponse<CreateRunData>> => {
       try {
         const currentProfileId = await profileId();
+        const existing = await d.findRunByIdempotencyKey(currentProfileId, request.body.idempotencyKey);
+        if (existing) return reply.status(200).send({ data: { run: existing } });
         const workflow = await workflowContext(currentProfileId, request.body.workflow, request.body.plan);
         const run = await engine().launch({
           profileId: currentProfileId,

@@ -726,6 +726,8 @@ describe('DeployEngine', () => {
     const secondHash = '2'.repeat(64);
     let currentAddress: Hex = firstAddress;
     let currentHash = firstHash;
+    let releaseReview!: () => void; const reviewMayFinish = new Promise<void>((resolve) => { releaseReview = resolve; });
+    let reviewCaptured!: () => void; const reviewDidCapture = new Promise<void>((resolve) => { reviewCaptured = resolve; });
     const sourcePlan = makePlan({
       chains: [1],
       contracts: makePlan().contracts.slice(0, 1),
@@ -738,24 +740,26 @@ describe('DeployEngine', () => {
         },
       ],
     });
-    const validate = vi.fn(async () => {
+    const validate = vi.fn(async (_plan, _rpc, options) => {
+      const addressAtRead = currentAddress; const hashAtRead = currentHash;
+      if (!options?.launch) { reviewCaptured(); await reviewMayFinish; }
       const resolved = globalThis.structuredClone(sourcePlan);
-      resolved.steps[0]!.args = { owner: currentAddress };
+      resolved.steps[0]!.args = { owner: addressAtRead };
       const result = validated(resolved);
       (result.frozen.c1 as { abi: unknown }).abi = [{ type: 'constructor', inputs: [{ name: 'owner', type: 'address' }] }];
       return {
         ...result,
         resolvedPlan: resolved,
-        bookHashes: { local: currentHash },
+        bookHashes: { local: hashAtRead },
         bookResolutions: {
           '1': [
             {
               stepId: 'step-1',
               argPath: 'args.owner',
               entry: 'owner',
-              address: currentAddress,
+              address: addressAtRead,
               source: 'local' as const,
-              bookHash: currentHash,
+              bookHash: hashAtRead,
             },
           ],
         },
@@ -763,6 +767,8 @@ describe('DeployEngine', () => {
     });
     const harness = makeEngine({ validate });
 
+    const review = validate(sourcePlan, { '1': 'rpc' }, {});
+    await reviewDidCapture;
     currentAddress = secondAddress;
     currentHash = secondHash;
     await expect(
@@ -774,6 +780,9 @@ describe('DeployEngine', () => {
         expectedBookHash: { local: firstHash },
       })
     ).rejects.toMatchObject({ code: 'BOOK_OUT_OF_SYNC' });
+    releaseReview();
+    await expect(review).resolves.toMatchObject({ bookHashes: { local: firstHash } });
+    expect(validate).toHaveBeenLastCalledWith(sourcePlan, { '1': 'rpc' }, expect.objectContaining({ launch: true }));
 
     const run = await harness.engine.launch({
       profileId: 'p1',
