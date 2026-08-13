@@ -19,6 +19,9 @@ export function initcodeHashForEntry(
   if (artifactEntry?.status !== 'ready') return undefined;
   const { creationCode, creationCodeLinkReferences } = artifactEntry.artifact;
   if (!creationCode || creationCode === '0x') return undefined;
+  // Unlinked hardhat artifacts embed __$...$__ placeholders even when the
+  // plugin reports no link references; anything non-hex cannot be hashed.
+  if (!/^0x(?:[0-9a-fA-F]{2})+$/.test(creationCode)) return undefined;
   const linked = Object.values(creationCodeLinkReferences ?? {}).some(
     (source) => Object.keys(source as Record<string, unknown>).length > 0
   );
@@ -104,6 +107,7 @@ export default function ContractsStep({
                     <button
                       type="button"
                       className="mono-data truncate inline-flex items-center gap-1"
+                      aria-label={`Copy initcode hash of ${contract.contractName}`}
                       title={`${initcodeHash} — hash of the creation code without constructor arguments`}
                       onClick={() =>
                         void globalThis.navigator.clipboard.writeText(

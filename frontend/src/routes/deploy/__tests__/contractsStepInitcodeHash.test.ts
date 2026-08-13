@@ -59,6 +59,16 @@ describe('initcodeHashForEntry', () => {
     ).toBeUndefined();
   });
 
+  it('returns undefined for non-hex creation code (unlinked placeholders)', () => {
+    expect(
+      initcodeHashForEntry(
+        readyEntry({
+          creationCode: '0x6080__$5b32009b33b28a327c929c8faed4d8929a$__6040',
+        })
+      )
+    ).toBeUndefined();
+  });
+
   it('returns undefined when the creation code needs library linking', () => {
     expect(
       initcodeHashForEntry(
