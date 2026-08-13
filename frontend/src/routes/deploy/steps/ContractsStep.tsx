@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Box, Loader2, X } from 'lucide-react';
+import { keccak256 } from 'viem';
+import { Box, Copy, Loader2, X } from 'lucide-react';
 import type { DraftContract } from '../../../store/features/deployments/types';
 import { decodeUrlEncodingForDisplay } from '../../../utils/displayText';
 import { useAppDispatch, useAppSelector } from '../../../store';
@@ -8,6 +9,22 @@ import ConfirmDialog from '../../../components/ConfirmDialog';
 import { artifactVariantFromPath } from '../../../utils/artifactVariants';
 import { findVersionForPin, pinChipText } from '../../../utils/pinDisplay';
 import type { DeploymentArtifactEntry } from '../useDeploymentArtifacts';
+
+// Hash of the unlinked artifact creation code. Skipped for library-linked
+// contracts (placeholder bytes make it meaningless) and empty creation code.
+// Constructor args are not part of it.
+export function initcodeHashForEntry(
+  artifactEntry: DeploymentArtifactEntry | undefined
+): `0x${string}` | undefined {
+  if (artifactEntry?.status !== 'ready') return undefined;
+  const { creationCode, creationCodeLinkReferences } = artifactEntry.artifact;
+  if (!creationCode || creationCode === '0x') return undefined;
+  const linked = Object.values(creationCodeLinkReferences ?? {}).some(
+    (source) => Object.keys(source as Record<string, unknown>).length > 0
+  );
+  if (linked) return undefined;
+  return keccak256(creationCode as `0x${string}`);
+}
 
 interface ContractsStepProps {
   contracts: DraftContract[];
@@ -57,6 +74,7 @@ export default function ContractsStep({
             const variant = contract.origin === 'contract-type'
               ? undefined
               : artifactVariantFromPath(contract.artifactPath, contract.contractName);
+            const initcodeHash = initcodeHashForEntry(artifactEntry);
             return (
             <div key={contract.id} className="list-row flex items-center gap-3">
               <Box size={17} className="text-info" />
@@ -79,6 +97,24 @@ export default function ContractsStep({
                 )}
                 {libraryNames.length > 0 && (
                   <div className="text-xs text-muted">Uses libraries: {libraryNames.join(', ')}</div>
+                )}
+                {initcodeHash && (
+                  <div className="text-xs text-muted flex items-center gap-1 min-w-0">
+                    <span className="shrink-0">Initcode hash:</span>
+                    <button
+                      type="button"
+                      className="mono-data truncate inline-flex items-center gap-1"
+                      title={`${initcodeHash} — hash of the creation code without constructor arguments`}
+                      onClick={() =>
+                        void globalThis.navigator.clipboard.writeText(
+                          initcodeHash
+                        )
+                      }
+                    >
+                      <span className="truncate">{initcodeHash}</span>
+                      <Copy size={11} className="shrink-0" />
+                    </button>
+                  </div>
                 )}
                 {artifactEntry?.status === 'error' && (
                   <div className="flex flex-wrap items-center gap-2 text-xs text-err">
