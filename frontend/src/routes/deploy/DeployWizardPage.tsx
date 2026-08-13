@@ -67,7 +67,8 @@ export function needsWorkflowDraftHydration(
   workflowRepo: string | null,
   workflowName: string | null,
   workflowState: unknown,
-  workflowRef?: { repoPathOrUrl: string; name: string; docHash?: string }
+  workflowRef?: { repoPathOrUrl: string; name: string; local?: true; docHash?: string },
+  workflowLocal = false,
 ): boolean {
   return Boolean(
     workflowRepo &&
@@ -75,6 +76,7 @@ export function needsWorkflowDraftHydration(
       workflowState &&
       (workflowRef?.repoPathOrUrl !== workflowRepo ||
         workflowRef.name !== workflowName ||
+        Boolean(workflowRef.local) !== workflowLocal ||
         workflowRef.docHash !== (workflowState as { docHash?: string }).docHash)
   );
 }
@@ -175,7 +177,8 @@ export default function DeployWizardPage() {
         workflowRepo,
         workflowName,
         workflowState,
-        draft.workflowRef
+        draft.workflowRef,
+        workflowLocal
       )
     )
       return;

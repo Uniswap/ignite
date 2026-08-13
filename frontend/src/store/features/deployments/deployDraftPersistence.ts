@@ -127,6 +127,7 @@ const PersistedDraftSchema = z.object({
     .object({
       repoPathOrUrl: z.string(),
       name: z.string(),
+      local: z.literal(true).optional(),
       baseDocHash: z.string(),
       docHash: z.string(),
     })

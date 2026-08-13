@@ -8,6 +8,9 @@ import {
   workflowListFailed,
   workflowListLoaded,
   workflowListRequested,
+  localWorkflowListFailed,
+  localWorkflowListLoaded,
+  localWorkflowListRequested,
   workflowStatusFailed,
   workflowStatusLoaded,
   workflowStatusRequested,
@@ -39,17 +42,22 @@ const installDocHashes = new Map<string, string>();
 const installKey = (repoPathOrUrl: string, name: string) =>
   `${repoPathOrUrl}\0${name}`;
 const statusGenerations = new Map<string, number>();
+const localListGenerations = new Map<string, number>();
 const statusKey = (profileId: string, repoPathOrUrl: string) =>
   `${profileId}\0${repoPathOrUrl}`;
 
 export const workflowsApi = {
-  listLocal: () => [
-    workflowListRequested(LOCAL_WORKFLOW_REPO),
+  listLocal: (profileId: string) => {
+    const generation = (localListGenerations.get(profileId) ?? 0) + 1;
+    localListGenerations.set(profileId, generation);
+    return [
+    localWorkflowListRequested({ profileId, generation }),
     apiClient.dispatch.listLocalWorkflows({
-      onSuccess: ({ workflows, truncated }) => workflowListLoaded({ repoPathOrUrl: LOCAL_WORKFLOW_REPO, workflows, truncated }),
-      onError: (error) => workflowListFailed({ repoPathOrUrl: LOCAL_WORKFLOW_REPO, error: formatApiError(error).description }),
+      onSuccess: ({ workflows, truncated }) => localWorkflowListLoaded({ profileId, generation, workflows, truncated }),
+      onError: (error) => localWorkflowListFailed({ profileId, generation, error: formatApiError(error).description }),
     }),
-  ],
+    ];
+  },
   list: (repoPathOrUrl: string) => [
     workflowListRequested(repoPathOrUrl),
     apiClient.dispatch.listWorkflows({

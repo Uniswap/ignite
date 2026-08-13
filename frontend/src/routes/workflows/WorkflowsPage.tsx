@@ -30,7 +30,7 @@ export default function WorkflowsPage() {
   );
 
   useEffect(() => {
-    workflowsApi.listLocal().forEach((action) => dispatch(action));
+    if (profileId) workflowsApi.listLocal(profileId).forEach((action) => dispatch(action));
     repos.forEach((repo) => {
       workflowsApi.list(repo.pathOrUrl).forEach((action) => dispatch(action));
       if (profileId) {

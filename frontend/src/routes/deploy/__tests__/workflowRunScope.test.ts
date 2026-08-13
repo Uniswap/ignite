@@ -35,6 +35,14 @@ describe('workflow wizard run scope', () => {
     ).toBe(true);
   });
 
+  it('keeps a restored local workflow distinct from a repository workflow', () => {
+    const workflow = { docHash: 'a'.repeat(64) };
+    const localRef = { repoPathOrUrl: '\0local-workflows', name: 'release', local: true as const, docHash: workflow.docHash };
+
+    expect(needsWorkflowDraftHydration('\0local-workflows', 'release', workflow, localRef, true)).toBe(false);
+    expect(needsWorkflowDraftHydration('\0local-workflows', 'release', workflow, { ...localRef, local: undefined }, true)).toBe(true);
+  });
+
   it('bounces out-of-sync workflow validations and runs to workflows', () => {
     const dispatch = vi.fn();
     const navigate = vi.fn();

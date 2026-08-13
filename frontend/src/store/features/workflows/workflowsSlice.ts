@@ -11,7 +11,9 @@ import { setCurrentProfile } from '../profiles/profilesSlice';
 
 export const workflowKey = (repoPathOrUrl: string, name: string) =>
   `${repoPathOrUrl}\0${name}`;
-export const LOCAL_WORKFLOW_REPO = '__local__';
+// A NUL cannot occur in a filesystem path, so this cannot collide with a
+// registered repository. It is URL-encoded when used in navigation params.
+export const LOCAL_WORKFLOW_REPO = '\0local-workflows';
 
 export const workflowStatusKey = (profileId: string, repoPathOrUrl: string) =>
   `${profileId}:${repoPathOrUrl}`;
@@ -21,6 +23,8 @@ interface WorkflowListState {
   truncated: boolean;
   loading: boolean;
   error?: string;
+  profileId?: string;
+  generation?: number;
 }
 
 export interface WorkflowDocumentState {
@@ -101,6 +105,38 @@ const slice = createSlice({
         error: action.payload.error,
       };
     },
+    localWorkflowListRequested(state, action: PayloadAction<{ profileId: string; generation: number }>) {
+      state.byRepo[LOCAL_WORKFLOW_REPO] = {
+        workflows: [],
+        truncated: false,
+        loading: true,
+        profileId: action.payload.profileId,
+        generation: action.payload.generation,
+      };
+    },
+    localWorkflowListLoaded(state, action: PayloadAction<{ profileId: string; generation: number; workflows: WorkflowSummary[]; truncated: boolean }>) {
+      const previous = state.byRepo[LOCAL_WORKFLOW_REPO];
+      if (previous?.profileId !== action.payload.profileId || previous.generation !== action.payload.generation) return;
+      state.byRepo[LOCAL_WORKFLOW_REPO] = {
+        workflows: action.payload.workflows,
+        truncated: action.payload.truncated,
+        loading: false,
+        profileId: action.payload.profileId,
+        generation: action.payload.generation,
+      };
+    },
+    localWorkflowListFailed(state, action: PayloadAction<{ profileId: string; generation: number; error: string }>) {
+      const previous = state.byRepo[LOCAL_WORKFLOW_REPO];
+      if (previous?.profileId !== action.payload.profileId || previous.generation !== action.payload.generation) return;
+      state.byRepo[LOCAL_WORKFLOW_REPO] = {
+        workflows: previous.workflows,
+        truncated: previous.truncated,
+        loading: false,
+        error: action.payload.error,
+        profileId: action.payload.profileId,
+        generation: action.payload.generation,
+      };
+    },
     workflowStatusRequested(state, action: PayloadAction<{ profileId: string; repoPathOrUrl: string; generation: number }>) {
       const key = workflowStatusKey(action.payload.profileId, action.payload.repoPathOrUrl);
       const previous = state.statusByProfileAndRepo[key];
@@ -176,6 +212,9 @@ const slice = createSlice({
     builder.addCase(setCurrentProfile, (state) => {
       state.statusByProfileAndRepo = {};
       state.installByKey = {};
+      delete state.byRepo[LOCAL_WORKFLOW_REPO];
+      for (const key of Object.keys(state.documentsByKey))
+        if (key.startsWith(`${LOCAL_WORKFLOW_REPO}\0`)) delete state.documentsByKey[key];
       delete state.originApproval;
     });
   },
@@ -183,6 +222,7 @@ const slice = createSlice({
 
 export const {
   workflowListRequested, workflowListLoaded, workflowListFailed,
+  localWorkflowListRequested, localWorkflowListLoaded, localWorkflowListFailed,
   workflowStatusRequested, workflowStatusLoaded, workflowStatusFailed,
   workflowDocumentLoaded,
   workflowInstallStarted, workflowInstallRunning, workflowInstallSucceeded, workflowInstallFailed,
