@@ -2,14 +2,7 @@ import { getAddress } from 'viem';
 import { AddressBookFileSchema, type AddressBookEntry, type AddressBookFile, type AddressBookView, type WorkflowRunBinding } from '@ignite/api';
 import { ProfileRepoRegistry } from '../filesystem/ProfileRepoRegistry.js';
 import { RepoService } from '../repos/RepoService.js';
-import {
-  AddressBookError,
-  AddressBookStore,
-  MAX_ADDRESS_BOOK_BYTES,
-  hashAddressBookRaw,
-  normalizeAddressBookEntries,
-  parseAddressBook,
-} from './AddressBookStore.js';
+import { AddressBookError, AddressBookStore, MAX_ADDRESS_BOOK_BYTES, hashAddressBookRaw, normalizeAddressBookEntries, parseAddressBook } from './AddressBookStore.js';
 
 export const addressBookRelPath = 'ignite/addressbook.json';
 export type ContextualBook = {
@@ -40,16 +33,26 @@ export class AddressBookService {
     const books: AddressBookView[] = [];
     try {
       const local = await this.deps.local.read(profileId);
-      books.push({ source: { kind: 'local' }, writable: true, bookHash: local.bookHash, entries: local.file.entries });
+      books.push({
+        source: { kind: 'local' },
+        writable: true,
+        bookHash: local.bookHash,
+        entries: local.file.entries,
+      });
     } catch (error) {
       const raw = await this.localRaw(profileId);
-      books.push({ source: { kind: 'local' }, writable: true, bookHash: hashAddressBookRaw(raw), error: message(error) });
+      books.push({
+        source: { kind: 'local' },
+        writable: true,
+        bookHash: hashAddressBookRaw(raw),
+        error: message(error),
+      });
     }
     let records: Array<{ pathOrUrl: string }> = [];
     try {
       const registered = await this.deps.registry.list(profileId);
       records = [...registered.local, ...registered.cloned];
-    } catch (error) {
+    } catch {
       // The local book remains usable even if repository registry data is unavailable.
       return books;
     }
@@ -60,12 +63,16 @@ export class AddressBookService {
   async contextual(profileId: string, workflow?: Pick<WorkflowRunBinding, 'repoPathOrUrl'>): Promise<ContextualBook> {
     if (!workflow) {
       const local = await this.deps.local.read(profileId);
-      return { source: 'local', sourceKey: 'local', bookHash: local.bookHash, file: local.file };
+      return {
+        source: 'local',
+        sourceKey: 'local',
+        bookHash: local.bookHash,
+        file: local.file,
+      };
     }
     await this.assertRegistered(profileId, workflow.repoPathOrUrl);
     const result = await this.deps.repos.getFile(workflow.repoPathOrUrl, addressBookRelPath);
-    if (!result.success && result.error.code !== 'FILE_NOT_FOUND')
-      throw new AddressBookError(422, 'ADDRESS_BOOK_READ_FAILED', result.error.message);
+    if (!result.success && result.error.code !== 'FILE_NOT_FOUND') throw new AddressBookError(422, 'ADDRESS_BOOK_READ_FAILED', result.error.message);
     const raw = result.success ? result.data.content : '';
     return {
       source: 'repo',
@@ -81,18 +88,26 @@ export class AddressBookService {
 
   async writeRepo(profileId: string, repoPathOrUrl: string, entries: AddressBookEntry[], baseHash?: string, force?: boolean): Promise<{ bookHash: string; entries: AddressBookEntry[] }> {
     await this.assertRegistered(profileId, repoPathOrUrl);
-    if (!this.deps.repos.isWritableWorkspace(repoPathOrUrl))
-      throw new AddressBookError(400, 'ADDRESS_BOOK_TARGET_UNWRITABLE', 'Address book target is read-only');
+    if (!this.deps.repos.isWritableWorkspace(repoPathOrUrl)) throw new AddressBookError(400, 'ADDRESS_BOOK_TARGET_UNWRITABLE', 'Address book target is read-only');
     let normalized: AddressBookEntry[];
-    try { normalized = normalizeAddressBookEntries(AddressBookFileSchema.parse({ schemaVersion: 1, entries }).entries); }
-    catch (error) { throw new AddressBookError(400, 'ADDRESS_BOOK_INVALID', message(error)); }
+    try {
+      normalized = normalizeAddressBookEntries(AddressBookFileSchema.parse({ schemaVersion: 1, entries }).entries);
+    } catch (error) {
+      throw new AddressBookError(400, 'ADDRESS_BOOK_INVALID', message(error));
+    }
     const raw = `${JSON.stringify({ schemaVersion: 1, entries: normalized }, null, 2)}\n`;
-    if (Buffer.byteLength(raw) > MAX_ADDRESS_BOOK_BYTES)
-      throw new AddressBookError(400, 'ADDRESS_BOOK_TOO_LARGE', 'Address book exceeds 256 KiB');
+    if (Buffer.byteLength(raw) > MAX_ADDRESS_BOOK_BYTES) throw new AddressBookError(400, 'ADDRESS_BOOK_TOO_LARGE', 'Address book exceeds 256 KiB');
     return this.deps.repos.withWorkflowWriteLock(repoPathOrUrl, async ({ readFile, writeFile }) => {
       const current = await readFile(addressBookRelPath);
       if (current !== null) {
-        const valid = (() => { try { parseAddressBook(current); return true; } catch { return false; } })();
+        const valid = (() => {
+          try {
+            parseAddressBook(current);
+            return true;
+          } catch {
+            return false;
+          }
+        })();
         if (!valid && force === true) {
           // An explicitly invalid file may be repaired without a stale hash.
         } else if (!baseHash) {
@@ -110,11 +125,17 @@ export class AddressBookService {
 
   private async viewRepo(repoPathOrUrl: string): Promise<AddressBookView> {
     const writable = this.deps.repos.isWritableWorkspace(repoPathOrUrl);
+    let raw = '';
     try {
       const result = await this.deps.repos.getFile(repoPathOrUrl, addressBookRelPath);
       if (!result.success && result.error.code !== 'FILE_NOT_FOUND')
-        return { source: { kind: 'repo', repoPathOrUrl }, writable, bookHash: hashAddressBookRaw(''), error: result.error.message };
-      const raw = result.success ? result.data.content : '';
+        return {
+          source: { kind: 'repo', repoPathOrUrl },
+          writable,
+          bookHash: hashAddressBookRaw(''),
+          error: result.error.message,
+        };
+      raw = result.success ? result.data.content : '';
       return {
         source: { kind: 'repo', repoPathOrUrl },
         writable,
@@ -122,19 +143,26 @@ export class AddressBookService {
         entries: raw ? parseAddressBook(raw).entries : [],
       };
     } catch (error) {
-      return { source: { kind: 'repo', repoPathOrUrl }, writable, bookHash: hashAddressBookRaw(''), error: message(error) };
+      return {
+        source: { kind: 'repo', repoPathOrUrl },
+        writable,
+        bookHash: hashAddressBookRaw(raw),
+        error: message(error),
+      };
     }
   }
 
   private async assertRegistered(profileId: string, repoPathOrUrl: string): Promise<void> {
     const repos = await this.deps.registry.list(profileId);
-    if (![...repos.local, ...repos.cloned].some((repo) => repo.pathOrUrl === repoPathOrUrl))
-      throw new AddressBookError(400, 'ADDRESS_BOOK_TARGET_UNREGISTERED', 'Address book target is not registered in the current profile');
+    if (![...repos.local, ...repos.cloned].some((repo) => repo.pathOrUrl === repoPathOrUrl)) throw new AddressBookError(400, 'ADDRESS_BOOK_TARGET_UNREGISTERED', 'Address book target is not registered in the current profile');
   }
 
   private async localRaw(profileId: string): Promise<string> {
-    try { return (await this.deps.local.read(profileId)).raw; }
-    catch { return ''; }
+    try {
+      return (await this.deps.local.read(profileId)).raw;
+    } catch {
+      return '';
+    }
   }
 }
 
