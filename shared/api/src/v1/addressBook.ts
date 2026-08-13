@@ -50,7 +50,7 @@ export interface PutAddressBookData {
   entries: AddressBookEntry[];
 }
 
-const AddressSchema = z.string().regex(AddressBookAddressPattern) as z.ZodType<Hex>;
+const AddressSchema = z.string().regex(AddressBookAddressPattern).refine((address) => !/^0x0{40}$/i.test(address), 'zero address is not allowed') as z.ZodType<Hex>;
 const ChainIdSchema = z.string().regex(AddressBookChainIdPattern);
 const Sha256Schema = z.string().regex(/^[0-9a-fA-F]{64}$/);
 

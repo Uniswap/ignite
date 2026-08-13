@@ -22,11 +22,15 @@ export class AddressBookError extends Error {
   }
 }
 
-export function hashAddressBookRaw(raw: string): string {
+export function hashAddressBookRaw(raw: string | Uint8Array): string {
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
 
+export const EMPTY_ADDRESS_BOOK_HASH = hashAddressBookRaw('');
+
 export function normalizeAddressBookEntries(entries: AddressBookEntry[]): AddressBookEntry[] {
+  // getAddress's mixed-case checksum validation is intentional strictness.
+  // The v1 UI does not normalize an incorrectly checksummed mixed-case value.
   return entries.map((entry) => ({
     ...entry,
     ...(entry.address ? { address: getAddress(entry.address) } : {}),
@@ -83,6 +87,14 @@ export class AddressBookStore {
     }
   }
 
+  async rawBytes(profileId: string): Promise<Buffer> {
+    try { return await fs.readFile(this.file(profileId)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return Buffer.alloc(0);
+      throw error;
+    }
+  }
+
   async write(profileId: string, entries: AddressBookEntry[], baseHash?: string, force?: boolean): Promise<{ bookHash: string; entries: AddressBookEntry[] }> {
     let normalized: AddressBookEntry[];
     try { normalized = normalizeAddressBookEntries(AddressBookFileSchema.parse({ schemaVersion: 1, entries }).entries); }
@@ -108,7 +120,7 @@ export class AddressBookStore {
         } else if (currentHash !== baseHash) {
           throw new AddressBookError(409, 'ADDRESS_BOOK_CONFLICT', 'Address book changed since it was loaded');
         }
-      } else if (baseHash) {
+      } else if (baseHash && baseHash !== EMPTY_ADDRESS_BOOK_HASH) {
         throw new AddressBookError(409, 'ADDRESS_BOOK_DELETED', 'Address book was deleted since it was loaded');
       }
       await fs.mkdir(path.dirname(file), { recursive: true });

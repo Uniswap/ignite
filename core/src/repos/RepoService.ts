@@ -1788,13 +1788,14 @@ export class RepoService {
 
   async getFile(
     pathOrUrl: string,
-    filePath: string
+    filePath: string,
+    profileId?: string
   ): Promise<RepoResult<{ content: string }>> {
     try {
       const validated = this.validateFilePath(filePath);
       if (!validated.success) return validated;
 
-      const cwd = await this.resolveWorkspacePath(pathOrUrl);
+      const cwd = await this.resolveWorkspacePath(pathOrUrl, profileId);
       // path.join (not path.resolve) — an absolute-looking filePath must not
       // be able to override cwd the way path.resolve's right-to-left
       // semantics would (path.resolve(cwd, '/etc/passwd') === '/etc/passwd').
@@ -1947,7 +1948,9 @@ export class RepoService {
     fn: (files: {
       readFile: (relPath: string) => Promise<string | null>;
       writeFile: (relPath: string, contents: string) => Promise<void>;
-    }) => Promise<T>
+      restoreFile: (relPath: string, contents: string | null) => Promise<void>;
+    }) => Promise<T>,
+    profileId?: string
   ): Promise<T> {
     if (this.isReadOnlyWorkspace(pathOrUrl)) {
       const result = this.readOnlyWorkspaceResult(pathOrUrl);
@@ -1956,10 +1959,10 @@ export class RepoService {
           code: result.error.code,
         });
     }
-    const root = await this.resolveExistingWorkspacePath(pathOrUrl);
-    const realRoot = await fs.realpath(path.resolve(root));
-    return withRepoWriteLock(realRoot, () =>
-      fn({
+    return this.withRepoLifecycleLock(pathOrUrl, profileId, async () => {
+      const root = await this.resolveExistingWorkspacePath(pathOrUrl, profileId);
+      const realRoot = await fs.realpath(path.resolve(root));
+      return withRepoWriteLock(realRoot, () => fn({
         readFile: async (relPath) => {
           const result = await this.getFile(realRoot, relPath);
           if (result.success) return result.data.content;
@@ -1979,8 +1982,15 @@ export class RepoService {
               code: result.error.code,
             });
         },
-      })
-    );
+        restoreFile: async (relPath, contents) => {
+          const result = contents === null
+            ? await this.deleteRepoFileLocked(realRoot, relPath)
+            : await this.writeRepoFileLocked(realRoot, relPath, contents);
+          if (!result.success)
+            throw Object.assign(new Error(result.error.message), { code: result.error.code });
+        },
+      }));
+    });
   }
 
   isWritableWorkspace(pathOrUrl: string): boolean {
@@ -2079,6 +2089,32 @@ export class RepoService {
         success: false,
         error: { code: 'FILE_WRITE_ERROR', message: errMsg(error) },
       };
+    }
+  }
+
+  private async deleteRepoFileLocked(realRoot: string, filePath: string): Promise<RepoResult<null>> {
+    const validated = this.validateFilePath(filePath);
+    if (!validated.success) return validated;
+    try {
+      const normalized = filePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      const target = path.resolve(realRoot, normalized);
+      if (target === realRoot || !target.startsWith(realRoot + path.sep))
+        return { success: false, error: { code: 'INVALID_PATH', message: 'File path escapes repository root' } };
+      let stats: import('node:fs').Stats;
+      try { stats = await fs.lstat(target); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { success: true, data: null };
+        throw error;
+      }
+      if (!stats.isFile() || stats.isSymbolicLink())
+        return { success: false, error: { code: 'SUSPICIOUS_PATH_PATTERN', message: 'Delete target must be a regular file' } };
+      const realParent = await fs.realpath(path.dirname(target));
+      if (realParent !== realRoot && !realParent.startsWith(realRoot + path.sep))
+        return { success: false, error: { code: 'SUSPICIOUS_PATH_PATTERN', message: 'File parent resolves outside the repository' } };
+      await fs.unlink(target);
+      return { success: true, data: null };
+    } catch (error) {
+      return { success: false, error: { code: 'FILE_WRITE_ERROR', message: errMsg(error) } };
     }
   }
 

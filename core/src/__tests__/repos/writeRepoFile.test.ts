@@ -59,6 +59,18 @@ describe('writeRepoFile', () => {
     await expect(fs.readFile(path.join(root, 'ignite/workflow.json'), 'utf8')).resolves.toBe('after');
   });
 
+  it('serializes workflow writes with repository lifecycle operations', async () => {
+    const { root, repos } = await workspace(); const order: string[] = [];
+    let releaseWrite!: () => void; const writeMayFinish = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    let writerEntered!: () => void; const writerDidEnter = new Promise<void>((resolve) => { writerEntered = resolve; });
+    const write = repos.withWorkflowWriteLock(root, async () => { order.push('write-enter'); writerEntered(); await writeMayFinish; order.push('write-exit'); });
+    await writerDidEnter;
+    const lifecycle = repos.withRepoLifecycleLock(root, 'p1', async () => { order.push('lifecycle'); });
+    await Promise.resolve(); expect(order).toEqual(['write-enter']);
+    releaseWrite(); await Promise.all([write, lifecycle]);
+    expect(order).toEqual(['write-enter', 'write-exit', 'lifecycle']);
+  });
+
   it('refuses mutations under the global version cache with a typed error', async () => {
     const root = await temp('ignite-version-cache-');
     const repos = new RepoService({
