@@ -44,9 +44,9 @@ describe('WorkflowPromotionService', () => {
   it('applies chosen pins, preserves pre-pinned sources, strips signers, computes plugins, uses frozen run hashes, and adopts idempotently under one lock', async () => {
     const run = promotedRun();
     let lockCalls = 0;
-    const withWorkflowWriteLock = async <T>(_repo: string, fn: (io: { readFile: (path: string) => Promise<string | null>; writeFile: (path: string, contents: string) => Promise<void> }) => Promise<T>): Promise<T> => {
+    const withWorkflowWriteLock: WorkflowPromotionServiceDeps['withWorkflowWriteLock'] = async (_repo, fn) => {
       lockCalls += 1;
-      return fn({ readFile: async (file) => files.get(file) ?? null, writeFile: async (file, contents) => { files.set(file, contents); writes.push({ path: file, contents }); } });
+      return fn({ readFile: async (file) => files.get(file) ?? null, writeFile: async (file, contents) => { files.set(file, contents); writes.push({ path: file, contents }); }, restoreFile: async (file, contents) => { if (contents === null) files.delete(file); else files.set(file, contents); } });
     };
     const service = makeService({
       inspectSource: async () => ({ origin: 'https://example.test/unpinned.git', commit: SHA, tags: ['stable', 'v2.0.0'], branch: 'main', dirty: false }),
@@ -267,11 +267,53 @@ describe('WorkflowPromotionService', () => {
     expect(files.has('ignite/workflows/book-cas.json')).toBe(false);
   });
 
+  it('keeps masked run literals and previews pointer behavior per chain', async () => {
+    const pointerAddress = '0x1111111111111111111111111111111111111111' as const; const maskedAddress = '0x3333333333333333333333333333333333333333' as const;
+    const run = promotedRun(); run.plan.chains = [1, 10, 137];
+    run.plan.steps = [{ id: 'deploy-pinned', kind: 'deploy', contractId: 'pinned', args: {}, argsPerChain: { '1': { owner: pointerAddress }, '10': { owner: pointerAddress }, '137': { owner: maskedAddress } } }];
+    run.bookResolutions = { '1': [{ stepId: 'deploy-pinned', argPath: 'args.owner', entry: 'owner', address: pointerAddress, source: 'local', bookHash: HASH }], '10': [{ stepId: 'deploy-pinned', argPath: 'args.owner', entry: 'owner', address: pointerAddress, source: 'local', bookHash: HASH }] };
+    const service = makeService({ getRun: async () => run }); const target = { repoPathOrUrl: '/target', name: 'masked-run' };
+    const preview = await service.promote({ mode: 'preview', target, runId: run.id }, 'p1');
+    expect(preview.referencedEntries[0]?.promotedUses).toEqual([{ stepId: 'deploy-pinned', argPath: 'args.owner', chains: { '1': { behavior: 'pointer', address: pointerAddress }, '10': { behavior: 'pointer', address: pointerAddress }, '137': { behavior: 'kept-literal', address: maskedAddress } } }]);
+    await service.promote({ mode: 'apply', previewId: preview.previewId, target, runId: run.id, hooks: [] }, 'p1');
+    const document = JSON.parse(files.get('ignite/workflows/masked-run.json')!) as WorkflowDocument;
+    expect(document.steps[0]).toMatchObject({ args: { owner: { $book: { name: 'owner' } } }, argsPerChain: { '137': { owner: maskedAddress } } });
+  });
+
+  it('copies fully masked and unselected pointer entries instead of leaving them dangling', async () => {
+    const pointerPlan = oneSourcePlan(); pointerPlan.chains = [1];
+    pointerPlan.steps[0] = { id: 'deploy', kind: 'deploy', contractId: 'one', args: { owner: { $book: { name: 'owner' } } }, argsPerChain: { '1': { owner: '0x2222222222222222222222222222222222222222' }, '10': { owner: { $book: { name: 'owner' } } } } };
+    const service = makeService({ contextualBook: async () => ({ source: 'local', sourceKey: 'local', bookHash: HASH, file: { schemaVersion: 1, entries: [{ name: 'owner', perChain: { '10': '0x1010101010101010101010101010101010101010' } }] } }) });
+    const target = { repoPathOrUrl: '/target', name: 'masked-draft' }; const preview = await service.promote({ mode: 'preview', target, plan: pointerPlan }, 'p1');
+    expect(preview.referencedEntries).toEqual([expect.objectContaining({ name: 'owner', resolutions: {} })]);
+    await service.promote({ mode: 'apply', previewId: preview.previewId, target, plan: pointerPlan, hooks: [] }, 'p1');
+    expect(JSON.parse(files.get('ignite/addressbook.json')!)).toMatchObject({ entries: [{ name: 'owner', perChain: { '10': '0x1010101010101010101010101010101010101010' } }] });
+  });
+
+  it('rehydrates array provenance paths without creating bracket-named properties', async () => {
+    const owner = '0x1111111111111111111111111111111111111111' as const; const run = promotedRun(); run.plan.chains = [1, 10];
+    run.plan.steps = [{ id: 'deploy-pinned', kind: 'deploy', contractId: 'pinned', args: { owners: [] }, argsPerChain: { '1': { owners: [owner] }, '10': { owners: [owner] } } }];
+    run.bookResolutions = { '1': [{ stepId: 'deploy-pinned', argPath: 'args.owners[0]', entry: 'owner', address: owner, source: 'local', bookHash: HASH }], '10': [{ stepId: 'deploy-pinned', argPath: 'args.owners[0]', entry: 'owner', address: owner, source: 'local', bookHash: HASH }] };
+    const service = makeService({ getRun: async () => run }); const target = { repoPathOrUrl: '/target', name: 'array-run' }; const preview = await service.promote({ mode: 'preview', target, runId: run.id }, 'p1');
+    await service.promote({ mode: 'apply', previewId: preview.previewId, target, runId: run.id, hooks: [] }, 'p1');
+    const raw = files.get('ignite/workflows/array-run.json')!; expect(raw).not.toContain('owners[0]');
+    expect((JSON.parse(raw) as WorkflowDocument).steps[0]).toMatchObject({ argsPerChain: { '1': { owners: [{ $book: { name: 'owner' } }] }, '10': { owners: [{ $book: { name: 'owner' } }] } } });
+  });
+
+  it('restores the target book if a later workflow write fails', async () => {
+    const priorBook = `${JSON.stringify({ schemaVersion: 1, entries: [{ name: 'existing', address: '0x2222222222222222222222222222222222222222' }] }, null, 2)}\n`; files.set('ignite/addressbook.json', priorBook);
+    const pointerPlan = oneSourcePlan(); pointerPlan.steps[0] = { id: 'deploy', kind: 'deploy', contractId: 'one', args: { owner: { $book: { name: 'owner' } } } };
+    const service = makeService({ contextualBook: async () => ({ source: 'local', sourceKey: 'local', bookHash: HASH, file: { schemaVersion: 1, entries: [{ name: 'owner', address: '0x1111111111111111111111111111111111111111' }] } }), withWorkflowWriteLock: async (_repo, fn) => fn({ readFile: async (file) => files.get(file) ?? null, writeFile: async (file, contents) => { if (file.startsWith('ignite/workflows/')) throw new Error('workflow write failed'); files.set(file, contents); }, restoreFile: async (file, contents) => { if (contents === null) files.delete(file); else files.set(file, contents); } }) });
+    const target = { repoPathOrUrl: '/target', name: 'rollback' }; const preview = await service.promote({ mode: 'preview', target, plan: pointerPlan }, 'p1');
+    await expect(service.promote({ mode: 'apply', previewId: preview.previewId, target, plan: pointerPlan, hooks: [] }, 'p1')).rejects.toThrow('workflow write failed');
+    expect(files.get('ignite/addressbook.json')).toBe(priorBook);
+  });
+
   function makeService(overrides: Partial<WorkflowPromotionServiceDeps> = {}) {
     return new WorkflowPromotionService({
       inspectSource: async () => ({ origin: 'https://example.test/repo.git', commit: SHA, tags: ['v1.0.0'], branch: 'main', dirty: false }),
       readTargetFile: async (_repo, file) => files.get(file) ?? null,
-      withWorkflowWriteLock: async (_repo, fn) => fn({ readFile: async (file) => files.get(file) ?? null, writeFile: async (file, contents) => { files.set(file, contents); writes.push({ path: file, contents }); } }),
+      withWorkflowWriteLock: async (_repo, fn) => fn({ readFile: async (file) => files.get(file) ?? null, writeFile: async (file, contents) => { files.set(file, contents); writes.push({ path: file, contents }); }, restoreFile: async (file, contents) => { if (contents === null) files.delete(file); else files.set(file, contents); } }),
       getRun: async () => undefined,
       getRequiredPlugin: async (id) => ({ id, version: '1' }),
       renderRunArtifact: async (_profile, id) => ({ runId: id }),

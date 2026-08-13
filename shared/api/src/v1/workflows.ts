@@ -130,7 +130,8 @@ export interface InstalledWorkflowRecord {
 export interface InstalledWorkflowsFile { schemaVersion: 1; records: InstalledWorkflowRecord[]; quarantinedAt?: string }
 
 export interface WorkflowPromotionSourcePreview { sourceId: string; origin: string; commit: string; tagChoices: string[]; dirty: boolean; error?: string }
-export interface WorkflowPromotionBookPreview { name: string; entry: AddressBookEntry; resolutions: Record<string, Hex>; source: 'local' | 'repo'; bookHash: string; targetEntry?: AddressBookEntry; conflict: boolean }
+export interface WorkflowPromotionBookUsePreview { stepId: string; argPath: string; chains: Record<string, { behavior: 'pointer'; address: Hex } | { behavior: 'kept-literal'; address: Hex }> }
+export interface WorkflowPromotionBookPreview { name: string; entry: AddressBookEntry; resolutions: Record<string, Hex>; source: 'local' | 'repo'; bookHash: string; targetEntry?: AddressBookEntry; conflict: boolean; promotedUses?: WorkflowPromotionBookUsePreview[] }
 export type WorkflowPromotionBookChoice = { action: 'keep-repo' } | { action: 'copy-under-new-name'; name: string };
 export type WorkflowPromoteRequest =
   | { mode: 'preview'; target: { repoPathOrUrl: string; name: string }; plan?: DeploymentPlan; runId?: string }
@@ -356,7 +357,8 @@ const PromotionApplyRequestSchema = z.object({
 });
 export const WorkflowPromoteRequestSchema = z.discriminatedUnion('mode', [PromotionPreviewRequestSchema, PromotionApplyRequestSchema]) as z.ZodType<WorkflowPromoteRequest>;
 const PromotionSourcePreviewSchema = z.object({ sourceId: z.string().min(1), origin: z.string(), commit: z.string(), tagChoices: z.array(z.string()), dirty: z.boolean(), error: z.string().optional() }).strict();
-const PromotionBookPreviewSchema = z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), entry: AddressBookEntrySchema, resolutions: z.record(ChainKeySchema, AddressSchema), source: z.enum(['local', 'repo']), bookHash: z.string().regex(SHA256_HEX), targetEntry: AddressBookEntrySchema.optional(), conflict: z.boolean() }).strict();
+const PromotionBookUseSchema = z.object({ stepId: z.string().min(1), argPath: z.string().min(1), chains: z.record(ChainKeySchema, z.discriminatedUnion('behavior', [z.object({ behavior: z.literal('pointer'), address: AddressSchema }).strict(), z.object({ behavior: z.literal('kept-literal'), address: AddressSchema }).strict()])) }).strict();
+const PromotionBookPreviewSchema = z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), entry: AddressBookEntrySchema, resolutions: z.record(ChainKeySchema, AddressSchema), source: z.enum(['local', 'repo']), bookHash: z.string().regex(SHA256_HEX), targetEntry: AddressBookEntrySchema.optional(), conflict: z.boolean(), promotedUses: z.array(PromotionBookUseSchema).optional() }).strict();
 export const WorkflowPromoteResponseSchema = createApiResponseSchema<WorkflowPromoteData>('WorkflowPromoteResponseSchema')(
   z.discriminatedUnion('mode', [
     z.object({ mode: z.literal('preview'), previewId: z.string().min(1), sources: z.array(PromotionSourcePreviewSchema), referencedEntries: z.array(PromotionBookPreviewSchema), nameCollision: z.boolean() }).strict(),

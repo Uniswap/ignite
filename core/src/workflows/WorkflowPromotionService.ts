@@ -34,6 +34,7 @@ type ApplyData = Extract<WorkflowPromoteData, { mode: 'apply' }>;
 interface WorkflowFiles {
   readFile(path: string): Promise<string | null>;
   writeFile(path: string, contents: string): Promise<void>;
+  restoreFile(path: string, contents: string | null): Promise<void>;
 }
 interface PreviewSnapshot {
   target: string;
@@ -46,8 +47,8 @@ interface PreviewSnapshot {
 }
 export interface WorkflowPromotionServiceDeps {
   inspectSource: (pathOrUrl: string) => Promise<PromotionSourceInspection>;
-  readTargetFile: (repo: string, file: string) => Promise<string | null>;
-  withWorkflowWriteLock: <T>(repo: string, fn: (files: WorkflowFiles) => Promise<T>) => Promise<T>;
+  readTargetFile: (repo: string, file: string, profileId: string) => Promise<string | null>;
+  withWorkflowWriteLock: <T>(repo: string, fn: (files: WorkflowFiles) => Promise<T>, profileId: string) => Promise<T>;
   getRun: (profileId: string, runId: string) => Promise<RunRecord | undefined>;
   getRequiredPlugin: (id: string) => Promise<WorkflowRequiredPlugin>;
   renderRunArtifact: (profileId: string, runId: string) => Promise<unknown>;
@@ -69,13 +70,13 @@ export class WorkflowPromotionService {
     const repos = RepoService.getInstance();
     this.deps = {
       inspectSource: deps?.inspectSource ?? ((value) => repos.inspectPromotionSource(value)),
-      readTargetFile: deps?.readTargetFile ?? (async (repo, file) => {
-        const result = await repos.getFile(repo, file);
+      readTargetFile: deps?.readTargetFile ?? (async (repo, file, profileId) => {
+        const result = await repos.getFile(repo, file, profileId);
         if (result.success) return result.data.content;
         if (result.error.code === 'FILE_NOT_FOUND') return null;
         throw Object.assign(new Error(result.error.message), { code: result.error.code });
       }),
-      withWorkflowWriteLock: deps?.withWorkflowWriteLock ?? ((repo, fn) => repos.withWorkflowWriteLock(repo, fn)),
+      withWorkflowWriteLock: deps?.withWorkflowWriteLock ?? ((repo, fn, profileId) => repos.withWorkflowWriteLock(repo, fn, profileId)),
       getRun: deps?.getRun ?? ((profileId, runId) => new RunStore().get(profileId, runId)),
       getRequiredPlugin: deps?.getRequiredPlugin ?? requiredPlugin,
       renderRunArtifact: deps?.renderRunArtifact ?? (async (profileId, runId) => {
@@ -123,8 +124,8 @@ export class WorkflowPromotionService {
       }
     }
     const file = workflowPath(request.target.name);
-    const nameCollision = (await this.deps.readTargetFile(request.target.repoPathOrUrl, file)) !== null;
-    const targetBookRaw = (await this.deps.readTargetFile(request.target.repoPathOrUrl, addressBookRelPath)) ?? '';
+    const nameCollision = (await this.deps.readTargetFile(request.target.repoPathOrUrl, file, profileId)) !== null;
+    const targetBookRaw = (await this.deps.readTargetFile(request.target.repoPathOrUrl, addressBookRelPath, profileId)) ?? '';
     let targetEntries: AddressBookEntry[] = [];
     try {
       targetEntries = targetBookRaw ? parseAddressBook(targetBookRaw).entries : [];
@@ -201,8 +202,15 @@ export class WorkflowPromotionService {
       const existing = await files.readFile(workflowPath(request.target.name));
       if (existing !== null && !request.overwrite)
         throw new WorkflowPromotionError(409, 'WORKFLOW_NAME_CONFLICT', `Workflow ${request.target.name} already exists`);
+      let priorBook: string | null = null;
+      let wroteBook = false;
+      let wroteWorkflow = false;
+      const priorArtifacts = new Map<string, string | null>();
+      const writtenArtifacts: string[] = [];
+      try {
       if (snapshot.referencedEntries.length) {
-        const currentBook = (await files.readFile(addressBookRelPath)) ?? '';
+        priorBook = await files.readFile(addressBookRelPath);
+        const currentBook = priorBook ?? '';
         if (hashAddressBookRaw(currentBook) !== snapshot.targetBookHash) throw new WorkflowPromotionError(409, 'PROMOTION_BOOK_CONFLICT', 'Target address book changed since preview');
         let currentEntries: AddressBookEntry[];
         try {
@@ -214,19 +222,30 @@ export class WorkflowPromotionService {
         const bookRaw = `${JSON.stringify({ schemaVersion: 1, entries }, null, 2)}\n`;
         if (Buffer.byteLength(bookRaw) > MAX_ADDRESS_BOOK_BYTES) throw new WorkflowPromotionError(422, 'PROMOTION_TARGET_BOOK_TOO_LARGE', 'Target address book would exceed 256 KiB');
         await files.writeFile(addressBookRelPath, bookRaw);
+        wroteBook = true;
       }
       await files.writeFile(workflowPath(request.target.name), raw);
+      wroteWorkflow = true;
       for (const runId of uniqueAdoptions) {
-        await files.writeFile(`ignite/deployments/${request.target.name}/${runId}.json`, adoptedArtifacts.get(runId)!);
+        const artifactPath = `ignite/deployments/${request.target.name}/${runId}.json`;
+        priorArtifacts.set(artifactPath, await files.readFile(artifactPath));
+        await files.writeFile(artifactPath, adoptedArtifacts.get(runId)!);
+        writtenArtifacts.push(artifactPath);
       }
-    });
+      } catch (error) {
+        for (const artifactPath of writtenArtifacts.reverse()) await files.restoreFile(artifactPath, priorArtifacts.get(artifactPath) ?? null);
+        if (wroteWorkflow) await files.restoreFile(workflowPath(request.target.name), existing);
+        if (wroteBook) await files.restoreFile(addressBookRelPath, priorBook);
+        throw error;
+      }
+    }, profileId);
     this.previews.delete(request.previewId);
     return { mode: 'apply', workflow: summary(request.target.name, document), docHash, ...(warnings.length ? { warnings } : {}) };
   }
 
   private async referencedEntries(plan: DeploymentPlan, run: RunRecord | undefined, profileId: string, targetEntries: AddressBookEntry[]): Promise<PreviewData['referencedEntries']> {
     if (run?.bookResolutions) return referencesFromRun(run, targetEntries);
-    const needed = effectiveBookPointerChains(plan);
+    const needed = bookPointerChains(plan);
     if (!needed.size) return [];
     const book = await this.deps.contextualBook(profileId);
     return [...needed.entries()].map(([name, chainIds]) => {
@@ -391,8 +410,9 @@ function remapEncodeContractIds(value: unknown, sourceIds: Map<string, string>):
   Object.values(record).forEach((entry) => remapEncodeContractIds(entry, sourceIds));
 }
 
-function effectiveBookPointerChains(plan: DeploymentPlan): Map<string, Set<number>> {
+function bookPointerChains(plan: DeploymentPlan): Map<string, Set<number>> {
   const result = new Map<string, Set<number>>();
+  visitBookPointers(plan.steps, (pointer) => { if (!result.has(pointer.$book.name)) result.set(pointer.$book.name, new Set()); });
   for (const chainId of plan.chains) {
     for (const step of plan.steps) {
       const values = { ...(step.args ?? {}), ...(step.argsPerChain?.[String(chainId)] ?? {}) };
@@ -417,7 +437,7 @@ function visitBookPointers(value: unknown, visit: (pointer: BookPointer) => void
   else Object.values(value as Record<string, unknown>).forEach((entry) => visitBookPointers(entry, visit));
 }
 
-function promotionBookPreview(entry: AddressBookEntry, resolutions: Record<string, `0x${string}`>, source: 'local' | 'repo', bookHash: string, targetEntries: AddressBookEntry[]): PreviewData['referencedEntries'][number] {
+function promotionBookPreview(entry: AddressBookEntry, resolutions: Record<string, `0x${string}`>, source: 'local' | 'repo', bookHash: string, targetEntries: AddressBookEntry[], promotedUses?: NonNullable<PreviewData['referencedEntries'][number]['promotedUses']>): PreviewData['referencedEntries'][number] {
   const targetEntry = targetEntries.find((candidate) => candidate.name === entry.name);
   return {
     name: entry.name,
@@ -427,22 +447,34 @@ function promotionBookPreview(entry: AddressBookEntry, resolutions: Record<strin
     bookHash,
     ...(targetEntry ? { targetEntry: globalThis.structuredClone(targetEntry) } : {}),
     conflict: Boolean(targetEntry && !sameEntryAddresses(entry, targetEntry)),
+    ...(promotedUses?.length ? { promotedUses } : {}),
   };
 }
 
 function referencesFromRun(run: RunRecord, targetEntries: AddressBookEntry[]): PreviewData['referencedEntries'] {
-  const grouped = new Map<string, { source: 'local' | 'repo'; bookHash: string; resolutions: Record<string, `0x${string}`> }>();
-  for (const [chainId, resolutions] of Object.entries(run.bookResolutions ?? {})) {
-    for (const resolution of resolutions) {
-      const current = grouped.get(resolution.entry) ?? { source: resolution.source, bookHash: resolution.bookHash, resolutions: {} };
-      current.resolutions[chainId] = resolution.address;
-      grouped.set(resolution.entry, current);
+  const grouped = new Map<string, { source: 'local' | 'repo'; bookHash: string; resolutions: Record<string, `0x${string}`>; promotedUses: NonNullable<PreviewData['referencedEntries'][number]['promotedUses']> }>();
+  for (const item of runPointerGroups(run)) {
+    const first = [...item.resolutions.values()][0]!;
+    const current = grouped.get(item.entry) ?? { source: first.source, bookHash: first.bookHash, resolutions: {}, promotedUses: [] };
+    const chains: NonNullable<PreviewData['referencedEntries'][number]['promotedUses']>[number]['chains'] = {};
+    for (const chainId of run.plan.chains.map(String)) {
+      const resolution = item.resolutions.get(chainId);
+      if (resolution) {
+        current.resolutions[chainId] = resolution.address;
+        chains[chainId] = { behavior: 'pointer', address: resolution.address };
+        continue;
+      }
+      const step = run.plan.steps.find((candidate) => candidate.id === item.stepId);
+      const literal = step ? getArgumentPath(step.argsPerChain?.[chainId] ?? step.args ?? {}, item.argPath) : undefined;
+      if (isAddress(literal)) chains[chainId] = { behavior: 'kept-literal', address: literal };
     }
+    current.promotedUses.push({ stepId: item.stepId, argPath: item.argPath, chains });
+    grouped.set(item.entry, current);
   }
   return [...grouped.entries()].map(([name, item]) => {
     const addresses = Object.values(item.resolutions);
     const entry: AddressBookEntry = addresses.every((address) => address.toLowerCase() === addresses[0]?.toLowerCase()) ? { name, address: addresses[0]! } : { name, perChain: { ...item.resolutions } };
-    return promotionBookPreview(entry, item.resolutions, item.source, item.bookHash, targetEntries);
+    return promotionBookPreview(entry, item.resolutions, item.source, item.bookHash, targetEntries, item.promotedUses);
   });
 }
 
@@ -471,60 +503,86 @@ function rewriteBookPointers(value: unknown, renames: Map<string, string>): void
 
 function hydrateRunBookPointers(run: RunRecord): DeploymentPlan {
   const plan = globalThis.structuredClone(run.plan);
-  const grouped = new Map<string, { stepId: string; argPath: string; entry: string; chains: Set<string> }>();
-  for (const [chainId, resolutions] of Object.entries(run.bookResolutions ?? {})) {
-    for (const resolution of resolutions) {
-      const key = `${resolution.stepId}\0${resolution.argPath}\0${resolution.entry}`;
-      const current = grouped.get(key) ?? { stepId: resolution.stepId, argPath: resolution.argPath, entry: resolution.entry, chains: new Set<string>() };
-      current.chains.add(chainId);
-      grouped.set(key, current);
-    }
-  }
-  for (const item of grouped.values()) {
+  for (const item of runPointerGroups(run)) {
     const step = plan.steps.find((candidate) => candidate.id === item.stepId);
     if (!step) continue;
     const pointer: BookPointer = { $book: { name: item.entry } };
-    const globalPointer = item.chains.size > 1 || item.chains.size === plan.chains.length;
+    const segments = argumentSegments(item.argPath);
+    const encoded = segments.includes('$encode');
+    const globalPointer = encoded || (segments.length === 1 && item.resolutions.size > 1);
     if (globalPointer) {
       setArgumentPath((step.args ??= {}), item.argPath, pointer);
-      for (const values of Object.values(step.argsPerChain ?? {})) deleteArgumentPath(values, item.argPath);
+      for (const chainId of item.resolutions.keys()) {
+        const values = step.argsPerChain?.[chainId];
+        if (!values) continue;
+        if (encoded && segments[0] !== undefined) delete values[String(segments[0])];
+        else deleteArgumentPath(values, item.argPath);
+      }
     } else {
-      const chainId = [...item.chains][0]!;
-      const values = ((step.argsPerChain ??= {})[chainId] ??= {});
-      setArgumentPath(values, item.argPath, pointer);
+      for (const chainId of item.resolutions.keys()) {
+        const values = ((step.argsPerChain ??= {})[chainId] ??= {});
+        setArgumentPath(values, item.argPath, pointer);
+      }
     }
   }
   return plan;
 }
 
-function argumentSegments(argPath: string): string[] {
+type ArgumentSegment = string | number;
+function argumentSegments(argPath: string): ArgumentSegment[] {
   const raw = argPath.split('.');
-  const result: string[] = [];
+  const result: ArgumentSegment[] = [];
   for (const segment of raw) {
     if (segment === 'args' && result.length === 0) continue;
     if (segment === '$encode') result.push('$encode', 'args');
-    else result.push(segment);
+    else for (const match of segment.matchAll(/([^\[\]]+)|\[([0-9]+)\]/g)) result.push(match[2] === undefined ? match[1]! : Number(match[2]));
   }
   return result;
 }
 
 function setArgumentPath(root: Record<string, unknown>, argPath: string, value: unknown): void {
   const segments = argumentSegments(argPath);
-  let current = root;
-  for (const segment of segments.slice(0, -1)) {
-    const child = current[segment];
-    current[segment] = child && typeof child === 'object' && !Array.isArray(child) ? child : {};
-    current = current[segment] as Record<string, unknown>;
+  let current: Record<string, unknown> | unknown[] = root;
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const segment = segments[index]!;
+    const nextIsArray = typeof segments[index + 1] === 'number';
+    const child = current[segment as keyof typeof current] as unknown;
+    const usable = child && typeof child === 'object' && (nextIsArray ? Array.isArray(child) : !Array.isArray(child));
+    if (!usable) current[segment as keyof typeof current] = (nextIsArray ? [] : {}) as never;
+    current = current[segment as keyof typeof current] as Record<string, unknown> | unknown[];
   }
-  if (segments.length) current[segments.at(-1)!] = value;
+  if (segments.length) current[segments.at(-1)! as keyof typeof current] = value as never;
 }
 
 function deleteArgumentPath(root: Record<string, unknown>, argPath: string): void {
   const segments = argumentSegments(argPath);
-  let current: Record<string, unknown> | undefined = root;
+  let current: Record<string, unknown> | unknown[] | undefined = root;
   for (const segment of segments.slice(0, -1)) {
-    const child: unknown = current?.[segment];
-    current = child && typeof child === 'object' && !Array.isArray(child) ? child as Record<string, unknown> : undefined;
+    const child: unknown = current?.[segment as keyof typeof current];
+    current = child && typeof child === 'object' ? child as Record<string, unknown> | unknown[] : undefined;
   }
-  if (current && segments.length) delete current[segments.at(-1)!];
+  if (!current || !segments.length) return;
+  const last = segments.at(-1)!;
+  if (Array.isArray(current) && typeof last === 'number') current.splice(last, 1);
+  else delete current[last as keyof typeof current];
+}
+
+function getArgumentPath(root: Record<string, unknown>, argPath: string): unknown {
+  let current: unknown = root;
+  for (const segment of argumentSegments(argPath)) {
+    if (!current || typeof current !== 'object') return undefined;
+    current = (current as Record<string | number, unknown>)[segment];
+  }
+  return current;
+}
+function isAddress(value: unknown): value is `0x${string}` { return typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value); }
+function runPointerGroups(run: RunRecord): Array<{ stepId: string; argPath: string; entry: string; resolutions: Map<string, NonNullable<RunRecord['bookResolutions']>[string][number]> }> {
+  const grouped = new Map<string, ReturnType<typeof runPointerGroups>[number]>();
+  for (const [chainId, resolutions] of Object.entries(run.bookResolutions ?? {})) for (const resolution of resolutions) {
+    const key = `${resolution.stepId}\0${resolution.argPath}\0${resolution.entry}`;
+    const current = grouped.get(key) ?? { stepId: resolution.stepId, argPath: resolution.argPath, entry: resolution.entry, resolutions: new Map() };
+    current.resolutions.set(chainId, resolution);
+    grouped.set(key, current);
+  }
+  return [...grouped.values()];
 }
