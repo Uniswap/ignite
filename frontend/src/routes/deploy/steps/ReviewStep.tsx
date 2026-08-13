@@ -496,6 +496,7 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
           plan={plan}
           rpcSelection={rpcSelection}
           frozenInputs={frozenInputs}
+          storageResetKey={report}
           onAcknowledge={acknowledge}
           onAcceptArtifactDrift={(drifts) => {
             for (const drift of drifts)

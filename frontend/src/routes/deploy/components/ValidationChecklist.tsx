@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Abi } from 'viem';
-import { decodeAbiParameters, decodeEventLog, parseAbiParameters } from 'viem';
+import { decodeEventLog } from 'viem';
 import type { ChainChecklist, ChainInfo, DeploymentPlan, FrozenInputs, RpcSelection, SimulatedLog, SimulationStepResult, StorageSlotChangesData, ValidationItem } from '@ignite/api';
 import { CheckCircle2, CircleAlert } from 'lucide-react';
 import { replaceIdsForDisplay } from '../../../utils/displayText';
@@ -30,6 +30,7 @@ interface ValidationChecklistProps {
   plan?: DeploymentPlan;
   rpcSelection?: RpcSelection;
   frozenInputs?: FrozenInputs;
+  storageResetKey?: unknown;
 }
 
 function formatValue(value: unknown): string {
@@ -39,8 +40,9 @@ function formatValue(value: unknown): string {
   return String(value);
 }
 
-function knownEvent(log: SimulatedLog, abis: Abi[]): string | undefined {
-  for (const abi of abis) {
+function knownEvent(log: SimulatedLog, abis: Abi[], abiByAddress: Map<string, Abi>): string | undefined {
+  const knownAbi = abiByAddress.get(log.address.toLowerCase());
+  for (const abi of knownAbi ? [knownAbi] : abis) {
     try {
       const decoded = decodeEventLog({ abi, data: log.data, topics: log.topics as [`0x${string}`, ...`0x${string}`[]], strict: false });
       const args = Object.entries(decoded.args ?? {}).map(([key, value]) => `${key}: ${formatValue(value)}`).join(', ');
@@ -53,24 +55,18 @@ function knownEvent(log: SimulatedLog, abis: Abi[]): string | undefined {
   return undefined;
 }
 
-function signatureEvent(signature: string, log: SimulatedLog): string | undefined {
-  const match = /^([^()]+)\((.*)\)$/.exec(signature);
-  if (!match) return undefined;
-  const types = match[2] ? match[2].split(',').map((type) => type.trim()).filter(Boolean) : [];
-  try {
-    const parameters = parseAbiParameters(types.map((type, index) => `${type} arg${index}`).join(', '));
-    const values = parameters.length ? decodeAbiParameters(parameters, log.data) : [];
-    return `${match[1]}(${values.map((value, index) => `arg${index}: ${formatValue(value)}`).join(', ')})`;
-  } catch {
-    return undefined;
-  }
+export function signatureFallback(signature: string | undefined, log: SimulatedLog): { label: string; raw: string } {
+  return {
+    label: signature ?? 'Raw event',
+    raw: `topics: ${log.topics.join(', ') || 'none'}\ndata: ${log.data}`,
+  };
 }
 
-function EventLogs({ logs, abis }: { logs: SimulatedLog[] | undefined; abis: Abi[] }) {
+function EventLogs({ logs, abis, abiByAddress }: { logs: SimulatedLog[] | undefined; abis: Abi[]; abiByAddress: Map<string, Abi> }) {
   const [signatures, setSignatures] = useState<Record<string, string | undefined>>({});
   const loadUnknown = () => {
     if (!logs) return;
-    const topic0s = [...new Set(logs.flatMap((log) => knownEvent(log, abis) || !log.topics[0] ? [] : [log.topics[0]]))]
+    const topic0s = [...new Set(logs.flatMap((log) => knownEvent(log, abis, abiByAddress) || !log.topics[0] ? [] : [log.topics[0]]))]
       .filter((topic): topic is `0x${string}` => signatures[topic] === undefined && !Object.prototype.hasOwnProperty.call(signatures, topic));
     if (!topic0s.length) return;
     void Promise.all(topic0s.map(async (topic) => {
@@ -86,12 +82,12 @@ function EventLogs({ logs, abis }: { logs: SimulatedLog[] | undefined; abis: Abi
     <summary className="cursor-pointer">Events{logs ? ` (${logs.length})` : ''}</summary>
     {!logs ? <div className="mt-1">Events need a simulating tier.</div> : logs.length === 0 ? <div className="mt-1">No events were emitted.</div> : <div className="mt-2 max-h-48 overflow-y-auto grid gap-2 pr-1">
       {logs.map((log, index) => {
-        const decoded = knownEvent(log, abis);
+        const decoded = knownEvent(log, abis, abiByAddress);
         const signature = !decoded && log.topics[0] ? signatures[log.topics[0]] : undefined;
-        const decodedSignature = signature ? signatureEvent(signature, log) : undefined;
+        const fallback = !decoded ? signatureFallback(signature, log) : undefined;
         return <div key={`${log.address}-${index}`} className="rounded border border-white/10 p-2 mono-data">
-          <div>{decoded ?? decodedSignature ?? signature ?? 'Raw event'}</div>
-          {!decoded && !decodedSignature && <div className="break-all mt-1">topics: {log.topics.join(', ') || 'none'}<br />data: {log.data}</div>}
+          <div>{decoded ?? fallback!.label}</div>
+          {!decoded && <div className="break-all mt-1">topics: {log.topics.join(', ') || 'none'}<br />data: {log.data}</div>}
           <div className="break-all mt-1 text-muted">from {log.address}</div>
         </div>;
       })}
@@ -99,23 +95,11 @@ function EventLogs({ logs, abis }: { logs: SimulatedLog[] | undefined; abis: Abi
   </details>;
 }
 
-function StorageChanges({ chainId, stepId, plan, rpcSelection }: { chainId: number; stepId: string; plan?: DeploymentPlan; rpcSelection?: RpcSelection }) {
-  const [data, setData] = useState<StorageSlotChangesData>();
-  const [error, setError] = useState<string>();
-  const [loading, setLoading] = useState(false);
-  const load = async () => {
-    if (!plan || !rpcSelection) return;
-    setLoading(true); setError(undefined);
-    try {
-      const response = await apiClient.request('getStorageSlotChanges', { body: { plan, rpcSelection, chainId, stepId } });
-      if (!('data' in response)) throw new Error(response.message);
-      setData(response.data);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally { setLoading(false); }
-  };
+function StorageChanges({ plan, rpcSelection, loading, result, onLoad }: { plan?: DeploymentPlan; rpcSelection?: RpcSelection; loading: boolean; result?: { data?: StorageSlotChangesData; error?: string }; onLoad: () => void }) {
+  const data = result?.data;
+  const error = result?.error;
   return <div className="mt-2">
-    <button type="button" className="btn btn-sm btn-secondary" disabled={!plan || !rpcSelection || loading} onClick={() => void load()}>{loading ? 'Getting storage changes…' : 'Get storage slot changes'}</button>
+    <button type="button" className="btn btn-sm btn-secondary" disabled={!plan || !rpcSelection || loading} onClick={onLoad}>{loading ? 'Getting storage changes…' : 'Get storage slot changes'}</button>
     {error && <div className="text-xs text-err mt-1">{error}</div>}
     {data && <details className="text-xs text-muted mt-2">
       <summary className="cursor-pointer">Storage slot changes</summary>
@@ -127,6 +111,34 @@ function StorageChanges({ chainId, stepId, plan, rpcSelection }: { chainId: numb
 function simulationSteps(details: Record<string, unknown> | undefined): Record<string, SimulationStepResult> {
   if (!details || !details.perStep || typeof details.perStep !== 'object') return {};
   return details.perStep as Record<string, SimulationStepResult>;
+}
+
+function eventAbiByAddress(
+  plan: DeploymentPlan | undefined,
+  frozenInputs: FrozenInputs | undefined,
+  chains: Record<string, ChainChecklist>,
+): Map<string, Abi> {
+  const byAddress = new Map<string, Abi>();
+  if (!plan || !frozenInputs) return byAddress;
+  const abiByStep = new Map(
+    plan.steps.flatMap((step) =>
+      step.kind === 'deploy' && Array.isArray(frozenInputs[step.contractId]?.abi)
+        ? [[step.id, frozenInputs[step.contractId]!.abi as Abi] as const]
+        : [],
+    ),
+  );
+  for (const checklist of Object.values(chains)) {
+    const predicted = checklist.create2?.details?.predicted;
+    if (!predicted || typeof predicted !== 'object' || Array.isArray(predicted)) continue;
+    for (const [stepId, entry] of Object.entries(predicted as Record<string, unknown>)) {
+      const address = entry && typeof entry === 'object'
+        ? (entry as { predictedAddress?: unknown }).predictedAddress
+        : undefined;
+      const abi = abiByStep.get(stepId);
+      if (typeof address === 'string' && abi) byAddress.set(address.toLowerCase(), abi);
+    }
+  }
+  return byAddress;
 }
 
 export function artifactDrifts(item: {
@@ -219,8 +231,35 @@ export default function ValidationChecklist({
   plan,
   rpcSelection,
   frozenInputs,
+  storageResetKey,
 }: ValidationChecklistProps) {
   const eventAbis = Object.values(frozenInputs ?? {}).flatMap((input) => Array.isArray(input.abi) ? [input.abi as Abi] : []);
+  const abiByAddress = useMemo(
+    () => eventAbiByAddress(plan, frozenInputs, chains),
+    [chains, frozenInputs, plan],
+  );
+  const [storageResults, setStorageResults] = useState<Record<string, { data?: StorageSlotChangesData; error?: string }>>({});
+  const [storageLoading, setStorageLoading] = useState(false);
+  useEffect(() => {
+    setStorageResults({});
+  }, [plan, rpcSelection, storageResetKey]);
+  const loadStorage = async (chainId: number, stepId: string, baseBlock: number | undefined) => {
+    if (!plan || !rpcSelection || storageLoading) return;
+    const key = `${chainId}:${stepId}`;
+    setStorageLoading(true);
+    setStorageResults((current) => ({ ...current, [key]: {} }));
+    try {
+      const response = await apiClient.request('getStorageSlotChanges', {
+        body: { plan, rpcSelection, chainId, stepId, ...(baseBlock === undefined ? {} : { baseBlock }) },
+      });
+      if (!('data' in response)) throw new Error(response.message);
+      setStorageResults((current) => ({ ...current, [key]: { data: response.data } }));
+    } catch (cause) {
+      setStorageResults((current) => ({ ...current, [key]: { error: cause instanceof Error ? cause.message : String(cause) } }));
+    } finally {
+      setStorageLoading(false);
+    }
+  };
   return (
     <div className="grid gap-3">
       {run && (run.workflow || run.outputs) && (
@@ -301,14 +340,22 @@ export default function ValidationChecklist({
                           {Object.entries(simulationSteps(item.details)).map(([stepId, step]) => (
                             <div key={stepId} className="rounded border border-white/10 p-2">
                               <div className="font-medium">{replaceIdsForDisplay(stepId, stepLabels)}</div>
+                              <div className="text-xs text-muted mt-1">Status: {step.status}</div>
+                              {step.reason && <div className="text-xs text-warn mt-1">{replaceIdsForDisplay(step.reason, stepLabels)}</div>}
                               {step.gasUsed && <div className="mono-data mt-1">{step.gasUsed} gas</div>}
-                              <EventLogs logs={step.logs} abis={eventAbis} />
-                              <StorageChanges chainId={Number(chainId)} stepId={stepId} plan={plan} rpcSelection={rpcSelection} />
+                              <EventLogs logs={step.logs} abis={eventAbis} abiByAddress={abiByAddress} />
+                              {step.status !== 'skipped-existing' && item.details?.tier !== 'estimate' && <StorageChanges
+                                plan={plan}
+                                rpcSelection={rpcSelection}
+                                loading={storageLoading}
+                                result={storageResults[`${chainId}:${stepId}`]}
+                                onLoad={() => void loadStorage(Number(chainId), stepId, typeof item.details?.baseBlock === 'number' ? item.details.baseBlock : undefined)}
+                              />}
                             </div>
                           ))}
                         </div>
                       )}
-                      {key !== 'simulation' && detailGas(item.details).length > 0 && (
+                      {(key !== 'simulation' || Object.entries(simulationSteps(item.details)).length === 0) && detailGas(item.details).length > 0 && (
                         <details className="text-xs text-muted mt-2">
                           <summary className="cursor-pointer">
                             Per-step gas
