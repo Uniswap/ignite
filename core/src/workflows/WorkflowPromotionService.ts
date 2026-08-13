@@ -1,5 +1,17 @@
 import crypto from 'node:crypto';
-import type { AddressBookEntry, BookPointer, DeploymentPlan, RunRecord, WorkflowDocument, WorkflowPromoteData, WorkflowPromoteRequest, WorkflowRequiredPlugin, RepoWorkflowSource, WorkflowSource, WorkflowSummary } from '@ignite/api';
+import type {
+  AddressBookEntry,
+  BookPointer,
+  DeploymentPlan,
+  RunRecord,
+  WorkflowDocument,
+  WorkflowPromoteData,
+  WorkflowPromoteRequest,
+  WorkflowRequiredPlugin,
+  RepoWorkflowSource,
+  WorkflowSource,
+  WorkflowSummary,
+} from '@ignite/api';
 import { AddressBookEntryNamePattern, makeWorkflowDocumentSchema, stripGitUrlCredentials, WorkflowNamePattern } from '@ignite/api';
 import { normalizeRepoUrl } from '@ignite/plugin-types';
 import { RepoService, type PromotionSourceInspection } from '../repos/RepoService.js';
@@ -46,13 +58,7 @@ export interface WorkflowPromotionServiceDeps {
 }
 
 export class WorkflowPromotionError extends Error {
-  constructor(
-    readonly statusCode: 400 | 404 | 409 | 422,
-    readonly code: string,
-    message: string
-  ) {
-    super(message);
-  }
+  constructor(readonly statusCode: 400 | 404 | 409 | 422, readonly code: string, message: string) { super(message); }
 }
 
 export class WorkflowPromotionService {
@@ -63,27 +69,21 @@ export class WorkflowPromotionService {
     const repos = RepoService.getInstance();
     this.deps = {
       inspectSource: deps?.inspectSource ?? ((value) => repos.inspectPromotionSource(value)),
-      readTargetFile:
-        deps?.readTargetFile ??
-        (async (repo, file) => {
-          const result = await repos.getFile(repo, file);
-          if (result.success) return result.data.content;
-          if (result.error.code === 'FILE_NOT_FOUND') return null;
-          throw Object.assign(new Error(result.error.message), {
-            code: result.error.code,
-          });
-        }),
+      readTargetFile: deps?.readTargetFile ?? (async (repo, file) => {
+        const result = await repos.getFile(repo, file);
+        if (result.success) return result.data.content;
+        if (result.error.code === 'FILE_NOT_FOUND') return null;
+        throw Object.assign(new Error(result.error.message), { code: result.error.code });
+      }),
       withWorkflowWriteLock: deps?.withWorkflowWriteLock ?? ((repo, fn) => repos.withWorkflowWriteLock(repo, fn)),
       getRun: deps?.getRun ?? ((profileId, runId) => new RunStore().get(profileId, runId)),
       getRequiredPlugin: deps?.getRequiredPlugin ?? requiredPlugin,
-      renderRunArtifact:
-        deps?.renderRunArtifact ??
-        (async (profileId, runId) => {
-          const run = await new RunStore().get(profileId, runId);
-          if (!run) throw new WorkflowPromotionError(404, 'DEPLOYMENT_RUN_NOT_FOUND', `Deployment run not found: ${runId}`);
-          const tasks = await VerificationQueue.getInstance().store.list(profileId, { runId });
-          return renderArtifact(run, tasks);
-        }),
+      renderRunArtifact: deps?.renderRunArtifact ?? (async (profileId, runId) => {
+        const run = await new RunStore().get(profileId, runId);
+        if (!run) throw new WorkflowPromotionError(404, 'DEPLOYMENT_RUN_NOT_FOUND', `Deployment run not found: ${runId}`);
+        const tasks = await VerificationQueue.getInstance().store.list(profileId, { runId });
+        return renderArtifact(run, tasks);
+      }),
       freezeInputs: deps?.freezeInputs ?? ((profileId, plan) => new ArtifactFreezeService().freezeInputs(profileId, plan.contracts)),
       validateTargetRepo: deps?.validateTargetRepo ?? ((repo) => repos.isExistingGitRepository(repo)),
       getVersionRecord: deps?.getVersionRecord ?? ((url, commit) => new VersionStore().get(url, commit)),
@@ -99,55 +99,27 @@ export class WorkflowPromotionService {
   }
 
   private async preview(request: PreviewRequest, profileId: string): Promise<PreviewData> {
-    if (!(await this.deps.validateTargetRepo(request.target.repoPathOrUrl))) throw new WorkflowPromotionError(422, 'PROMOTION_TARGET_INVALID', 'Promotion target must be an existing git repository');
+    if (!(await this.deps.validateTargetRepo(request.target.repoPathOrUrl)))
+      throw new WorkflowPromotionError(422, 'PROMOTION_TARGET_INVALID', 'Promotion target must be an existing git repository');
     const { plan, run } = await this.resolveInput(request, profileId);
     const sources: PreviewData['sources'] = [];
     const inspections = new Map<string, PromotionSourceInspection>();
     for (const source of plan.contracts) {
       if (source.origin === 'contract-type') {
-        sources.push({
-          sourceId: source.id,
-          origin: 'contract-type',
-          commit: source.contentHash,
-          tagChoices: [],
-          dirty: false,
-        });
+        sources.push({ sourceId: source.id, origin: 'contract-type', commit: source.contentHash, tagChoices: [], dirty: false });
         continue;
       }
       if (source.pin) {
-        sources.push({
-          sourceId: source.id,
-          origin: source.pin.url,
-          commit: source.pin.commit,
-          tagChoices: source.pin.refKind === 'tag' && source.pin.ref ? [source.pin.ref] : [],
-          dirty: false,
-        });
+        sources.push({ sourceId: source.id, origin: source.pin.url, commit: source.pin.commit, tagChoices: source.pin.refKind === 'tag' && source.pin.ref ? [source.pin.ref] : [], dirty: false });
         continue;
       }
       try {
         const inspected = await this.deps.inspectSource(source.repoPathOrUrl);
-        const normalized = {
-          ...inspected,
-          origin: promotionOrigin(inspected.origin),
-          tags: [...inspected.tags].sort(),
-        };
+        const normalized = { ...inspected, origin: promotionOrigin(inspected.origin), tags: [...inspected.tags].sort() };
         inspections.set(source.id, normalized);
-        sources.push({
-          sourceId: source.id,
-          origin: normalized.origin,
-          commit: normalized.commit,
-          tagChoices: normalized.tags,
-          dirty: normalized.dirty,
-        });
+        sources.push({ sourceId: source.id, origin: normalized.origin, commit: normalized.commit, tagChoices: normalized.tags, dirty: normalized.dirty });
       } catch (error) {
-        sources.push({
-          sourceId: source.id,
-          origin: '',
-          commit: '',
-          tagChoices: [],
-          dirty: false,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        sources.push({ sourceId: source.id, origin: '', commit: '', tagChoices: [], dirty: false, error: error instanceof Error ? error.message : String(error) });
       }
     }
     const file = workflowPath(request.target.name);
@@ -161,28 +133,15 @@ export class WorkflowPromotionService {
     }
     const referencedEntries = await this.referencedEntries(plan, run, profileId, targetEntries);
     const previewId = crypto.randomUUID();
-    this.previews.set(previewId, {
-      target: targetKey(request.target),
-      inputKey: inputKey(request),
-      sources,
-      inspections,
-      referencedEntries,
-      targetBookHash: hashAddressBookRaw(targetBookRaw),
-      targetEntries,
-    });
+    this.previews.set(previewId, { target: targetKey(request.target), inputKey: inputKey(request), sources, inspections, referencedEntries, targetBookHash: hashAddressBookRaw(targetBookRaw), targetEntries });
     while (this.previews.size > 128) this.previews.delete(this.previews.keys().next().value!);
-    return {
-      mode: 'preview',
-      previewId,
-      sources,
-      referencedEntries,
-      nameCollision,
-    };
+    return { mode: 'preview', previewId, sources, referencedEntries, nameCollision };
   }
 
   private async apply(request: ApplyRequest, profileId: string): Promise<ApplyData> {
     const snapshot = this.previews.get(request.previewId);
-    if (!snapshot || snapshot.target !== targetKey(request.target) || snapshot.inputKey !== inputKey(request)) throw new WorkflowPromotionError(409, 'PROMOTION_PREVIEW_STALE', 'Promotion preview is missing or no longer matches this request');
+    if (!snapshot || snapshot.target !== targetKey(request.target) || snapshot.inputKey !== inputKey(request))
+      throw new WorkflowPromotionError(409, 'PROMOTION_PREVIEW_STALE', 'Promotion preview is missing or no longer matches this request');
     const { plan, run } = await this.resolveInput(request, profileId);
     const previewErrors = snapshot.sources.filter((source) => source.error);
     if (previewErrors.length) throw new WorkflowPromotionError(422, 'PROMOTION_SOURCE_INVALID', previewErrors.map((source) => `${source.sourceId}: ${source.error}`).join('; '));
@@ -190,54 +149,37 @@ export class WorkflowPromotionService {
     const pins = new Map<string, RepoWorkflowSource['repo']>();
     for (const source of plan.contracts) {
       if (source.origin === 'contract-type') continue;
-      if (source.pin) {
-        pins.set(source.id, globalThis.structuredClone(source.pin));
-        continue;
-      }
+      if (source.pin) { pins.set(source.id, globalThis.structuredClone(source.pin)); continue; }
       const before = snapshot.inspections.get(source.id);
       if (!before) throw new WorkflowPromotionError(409, 'PROMOTION_PREVIEW_STALE', `Source ${source.id} was not resolved by the preview`);
       let current: PromotionSourceInspection;
-      try {
-        current = await this.deps.inspectSource(source.repoPathOrUrl);
-      } catch {
-        throw new WorkflowPromotionError(409, 'PROMOTION_PREVIEW_STALE', `Source ${source.id} can no longer be inspected`);
-      }
+      try { current = await this.deps.inspectSource(source.repoPathOrUrl); }
+      catch { throw new WorkflowPromotionError(409, 'PROMOTION_PREVIEW_STALE', `Source ${source.id} can no longer be inspected`); }
       const currentOrigin = promotionOrigin(current.origin);
-      if (currentOrigin !== before.origin || current.commit !== before.commit) throw new WorkflowPromotionError(409, 'PROMOTION_PREVIEW_STALE', `Source ${source.id} HEAD or origin changed since preview`);
+      if (currentOrigin !== before.origin || current.commit !== before.commit)
+        throw new WorkflowPromotionError(409, 'PROMOTION_PREVIEW_STALE', `Source ${source.id} HEAD or origin changed since preview`);
       const tags = [...current.tags].sort();
       let ref: string | undefined;
       let refKind: 'tag' | 'branch' | undefined;
-      if (tags.length === 1) {
-        ref = tags[0];
-        refKind = 'tag';
-      } else if (tags.length > 1) {
+      if (tags.length === 1) { ref = tags[0]; refKind = 'tag'; }
+      else if (tags.length > 1) {
         ref = request.tagChoiceBySourceId?.[source.id];
         if (!ref || !tags.includes(ref)) throw new WorkflowPromotionError(422, 'PROMOTION_TAG_CHOICE_REQUIRED', `Choose one tag for source ${source.id}`);
         refKind = 'tag';
-      } else if (current.branch) {
-        ref = current.branch;
-        refKind = 'branch';
-      }
-      pins.set(source.id, {
-        url: currentOrigin,
-        commit: current.commit,
-        ...(ref ? { ref, refKind } : {}),
-      });
+      } else if (current.branch) { ref = current.branch; refKind = 'branch'; }
+      pins.set(source.id, { url: currentOrigin, commit: current.commit, ...(ref ? { ref, refKind } : {}) });
     }
 
     let document: WorkflowDocument;
-    try {
-      document = await this.buildDocument(plan, run, pins, request.hooks, profileId);
-    } catch (error) {
+    try { document = await this.buildDocument(plan, run, pins, request.hooks, profileId); }
+    catch (error) {
       if (error instanceof WorkflowPromotionError) throw error;
       throw new WorkflowPromotionError(422, 'PROMOTION_DOCUMENT_INVALID', error instanceof Error ? error.message : String(error));
     }
     const addressBook = this.applyBookChoices(snapshot.referencedEntries, request.bookChoices ?? {}, snapshot.targetEntries);
     if (addressBook.renames.size) rewriteBookPointers(document, addressBook.renames);
     try {
-      document = makeWorkflowDocumentSchema({
-        allowFileUrls: process.env.NODE_ENV === 'development',
-      }).parse(document);
+      document = makeWorkflowDocumentSchema({ allowFileUrls: process.env.NODE_ENV === 'development' }).parse(document);
     } catch (error) {
       throw new WorkflowPromotionError(422, 'PROMOTION_DOCUMENT_INVALID', error instanceof Error ? error.message : String(error));
     }
@@ -250,13 +192,15 @@ export class WorkflowPromotionService {
     // therefore never leave the workflow file applied on its own.
     const adoptedArtifacts = new Map<string, string>();
     for (const runId of uniqueAdoptions) {
-      if (!(await this.deps.getRun(profileId, runId))) throw new WorkflowPromotionError(404, 'DEPLOYMENT_RUN_NOT_FOUND', `Deployment run not found: ${runId}`);
+      if (!(await this.deps.getRun(profileId, runId)))
+        throw new WorkflowPromotionError(404, 'DEPLOYMENT_RUN_NOT_FOUND', `Deployment run not found: ${runId}`);
       const artifact = await this.deps.renderRunArtifact(profileId, runId);
       adoptedArtifacts.set(runId, `${JSON.stringify(artifact, null, 2)}\n`);
     }
     await this.deps.withWorkflowWriteLock(request.target.repoPathOrUrl, async (files) => {
       const existing = await files.readFile(workflowPath(request.target.name));
-      if (existing !== null && !request.overwrite) throw new WorkflowPromotionError(409, 'WORKFLOW_NAME_CONFLICT', `Workflow ${request.target.name} already exists`);
+      if (existing !== null && !request.overwrite)
+        throw new WorkflowPromotionError(409, 'WORKFLOW_NAME_CONFLICT', `Workflow ${request.target.name} already exists`);
       if (snapshot.referencedEntries.length) {
         const currentBook = (await files.readFile(addressBookRelPath)) ?? '';
         if (hashAddressBookRaw(currentBook) !== snapshot.targetBookHash) throw new WorkflowPromotionError(409, 'PROMOTION_BOOK_CONFLICT', 'Target address book changed since preview');
@@ -277,12 +221,7 @@ export class WorkflowPromotionService {
       }
     });
     this.previews.delete(request.previewId);
-    return {
-      mode: 'apply',
-      workflow: summary(request.target.name, document),
-      docHash,
-      ...(warnings.length ? { warnings } : {}),
-    };
+    return { mode: 'apply', workflow: summary(request.target.name, document), docHash, ...(warnings.length ? { warnings } : {}) };
   }
 
   private async referencedEntries(plan: DeploymentPlan, run: RunRecord | undefined, profileId: string, targetEntries: AddressBookEntry[]): Promise<PreviewData['referencedEntries']> {
@@ -293,13 +232,11 @@ export class WorkflowPromotionService {
     return [...needed.entries()].map(([name, chainIds]) => {
       const entry = book.file.entries.find((candidate) => candidate.name === name);
       if (!entry) throw new WorkflowPromotionError(422, 'PROMOTION_BOOK_ENTRY_MISSING', `Address book entry ${name} no longer exists`);
-      const resolutions = Object.fromEntries(
-        [...chainIds].map((chainId) => {
-          const address = resolveBookEntry(entry, chainId);
-          if (!address) throw new WorkflowPromotionError(422, 'PROMOTION_BOOK_ENTRY_UNRESOLVED', `Address book entry ${name} is unresolved on chain ${chainId}`);
-          return [String(chainId), address];
-        })
-      );
+      const resolutions = Object.fromEntries([...chainIds].map((chainId) => {
+        const address = resolveBookEntry(entry, chainId);
+        if (!address) throw new WorkflowPromotionError(422, 'PROMOTION_BOOK_ENTRY_UNRESOLVED', `Address book entry ${name} is unresolved on chain ${chainId}`);
+        return [String(chainId), address];
+      }));
       return promotionBookPreview(entry, resolutions, book.source, book.bookHash, targetEntries);
     });
   }
@@ -334,53 +271,35 @@ export class WorkflowPromotionService {
   }
 
   private async buildDocument(plan: DeploymentPlan, run: RunRecord | undefined, pins: Map<string, RepoWorkflowSource['repo']>, hooks: string[], profileId: string): Promise<WorkflowDocument> {
-    const frozen = run?.inputs ?? (await this.deps.freezeInputs(profileId, plan).catch(() => undefined));
+    const frozen = run?.inputs ?? await this.deps.freezeInputs(profileId, plan).catch(() => undefined);
     const sourceIdMap = new Map<string, string>();
     const sourceIds = new Set<string>();
     const sources: WorkflowSource[] = plan.contracts.map((source) => {
       const id = mintWorkflowSourceId(source.contractName, sourceIds);
       sourceIdMap.set(source.id, id);
-      if (source.origin === 'contract-type')
-        return {
-          id,
-          origin: 'contract-type',
-          contractName: source.contractName,
-          pluginId: source.pluginId,
-          artifactKey: source.artifactKey,
-          versionLabel: source.versionLabel,
-          contentHash: source.contentHash,
-        };
+      if (source.origin === 'contract-type') return {
+        id, origin: 'contract-type', contractName: source.contractName,
+        pluginId: source.pluginId, artifactKey: source.artifactKey,
+        versionLabel: source.versionLabel, contentHash: source.contentHash,
+      };
       return {
-        id,
-        repo: pins.get(source.id)!,
-        frameworkId: source.frameworkId,
-        sourcePath: source.sourcePath,
-        contractName: source.contractName,
-        artifactPath: source.artifactPath,
+        id, repo: pins.get(source.id)!, frameworkId: source.frameworkId, sourcePath: source.sourcePath,
+        contractName: source.contractName, artifactPath: source.artifactPath,
         ...(frozen?.[source.id]?.artifactHash ? { artifactHash: frozen[source.id].artifactHash } : {}),
       };
     });
-    const pluginIds = new Set<string>([...sources.map((source) => (source.origin === 'contract-type' ? source.pluginId : source.frameworkId)), ...hooks]);
-    for (const step of plan.steps) if (step.kind === 'deploy' && step.strategy?.kind === 'plugin') pluginIds.add(step.strategy.pluginId);
+    const pluginIds = new Set<string>([...sources.map((source) => source.origin === 'contract-type' ? source.pluginId : source.frameworkId), ...hooks]);
+    for (const step of plan.steps)
+      if (step.kind === 'deploy' && step.strategy?.kind === 'plugin') pluginIds.add(step.strategy.pluginId);
     const requiredPlugins = await Promise.all([...pluginIds].sort().map((id) => this.deps.getRequiredPlugin(id)));
     const steps = plan.steps.map((step) => {
-      const copy = globalThis.structuredClone(step) as typeof step & {
-        signerOverride?: unknown;
-      };
+      const copy = globalThis.structuredClone(step) as typeof step & { signerOverride?: unknown };
       delete copy.signerOverride;
       remapStepContractIds(copy, sourceIdMap);
       return copy;
     });
-    const candidate = {
-      schemaVersion: 1 as const,
-      sources,
-      steps,
-      requiredPlugins,
-      outputs: { hooks: [...hooks] },
-    };
-    return makeWorkflowDocumentSchema({
-      allowFileUrls: process.env.NODE_ENV === 'development',
-    }).parse(candidate);
+    const candidate = { schemaVersion: 1 as const, sources, steps, requiredPlugins, outputs: { hooks: [...hooks] } };
+    return makeWorkflowDocumentSchema({ allowFileUrls: process.env.NODE_ENV === 'development' }).parse(candidate);
   }
 
   private async localFallbackWarnings(plan: DeploymentPlan, pins: Map<string, RepoWorkflowSource['repo']>): Promise<string[]> {
@@ -408,44 +327,21 @@ export class WorkflowPromotionService {
 }
 
 async function requiredPlugin(id: string): Promise<WorkflowRequiredPlugin> {
-  const config = await PluginRegistryLoader.getInstance()
-    .getPluginConfig(id)
-    .catch(() => undefined);
+  const config = await PluginRegistryLoader.getInstance().getPluginConfig(id).catch(() => undefined);
   if (!config) throw new WorkflowPromotionError(422, 'PROMOTION_PLUGIN_MISSING', `Required plugin is not installed: ${id}`);
   const source = config.origin === 'installed' ? await PluginManager.getInstance().getInstallSource(id) : undefined;
   return {
-    id,
-    version: config.metadata.version,
-    ...(source?.kind === 'git'
-      ? {
-          source: {
-            kind: 'git' as const,
-            url: stripGitUrlCredentials(source.url),
-            ...(source.ref ? { ref: source.ref } : {}),
-            ...(source.track ? { track: source.track } : {}),
-            ...(source.commit ? { commit: source.commit } : {}),
-          },
-        }
-      : {}),
+    id, version: config.metadata.version,
+    ...(source?.kind === 'git' ? { source: { kind: 'git' as const, url: stripGitUrlCredentials(source.url), ...(source.ref ? { ref: source.ref } : {}), ...(source.track ? { track: source.track } : {}), ...(source.commit ? { commit: source.commit } : {}) } } : {}),
   };
 }
-function workflowPath(name: string): string {
-  return `ignite/workflows/${name}.json`;
-}
-function targetKey(target: { repoPathOrUrl: string; name: string }): string {
-  return `${target.repoPathOrUrl}\0${target.name}`;
-}
+function workflowPath(name: string): string { return `ignite/workflows/${name}.json`; }
+function targetKey(target: { repoPathOrUrl: string; name: string }): string { return `${target.repoPathOrUrl}\0${target.name}`; }
 function inputKey(request: Pick<WorkflowPromoteRequest, 'plan' | 'runId'>): string {
   return request.runId ? `run:${request.runId}` : `plan:${crypto.createHash('sha256').update(JSON.stringify(request.plan)).digest('hex')}`;
 }
 function summary(name: string, document: WorkflowDocument): WorkflowSummary {
-  return {
-    name,
-    valid: true,
-    sourceCount: document.sources.length,
-    stepCount: document.steps.length,
-    hooks: document.outputs.hooks,
-  };
+  return { name, valid: true, sourceCount: document.sources.length, stepCount: document.steps.length, hooks: document.outputs.hooks };
 }
 function promotionOrigin(origin: string): string {
   const normalized = normalizeRepoUrl(origin);
@@ -460,11 +356,10 @@ function promotionOrigin(origin: string): string {
 }
 
 function mintWorkflowSourceId(contractName: string, used: Set<string>): string {
-  const name =
-    contractName
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '') || 'contract';
+  const name = contractName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'contract';
   let counter = 1;
   while (used.has(`${name}-${counter}`)) counter += 1;
   const id = `${name}-${counter}`;
@@ -475,7 +370,8 @@ function mintWorkflowSourceId(contractName: string, used: Set<string>): string {
 function remapStepContractIds(step: unknown, sourceIds: Map<string, string>): void {
   if (!step || typeof step !== 'object') return;
   const record = step as Record<string, unknown>;
-  if (record.kind === 'deploy' && typeof record.contractId === 'string') record.contractId = sourceIds.get(record.contractId) ?? record.contractId;
+  if (record.kind === 'deploy' && typeof record.contractId === 'string')
+    record.contractId = sourceIds.get(record.contractId) ?? record.contractId;
   remapEncodeContractIds(record, sourceIds);
 }
 
@@ -489,7 +385,8 @@ function remapEncodeContractIds(value: unknown, sourceIds: Map<string, string>):
   const encoded = record.$encode;
   if (encoded && typeof encoded === 'object' && !Array.isArray(encoded)) {
     const encode = encoded as Record<string, unknown>;
-    if (typeof encode.contractId === 'string') encode.contractId = sourceIds.get(encode.contractId) ?? encode.contractId;
+    if (typeof encode.contractId === 'string')
+      encode.contractId = sourceIds.get(encode.contractId) ?? encode.contractId;
   }
   Object.values(record).forEach((entry) => remapEncodeContractIds(entry, sourceIds));
 }
@@ -498,10 +395,7 @@ function effectiveBookPointerChains(plan: DeploymentPlan): Map<string, Set<numbe
   const result = new Map<string, Set<number>>();
   for (const chainId of plan.chains) {
     for (const step of plan.steps) {
-      const values = {
-        ...(step.args ?? {}),
-        ...(step.argsPerChain?.[String(chainId)] ?? {}),
-      };
+      const values = { ...(step.args ?? {}), ...(step.argsPerChain?.[String(chainId)] ?? {}) };
       visitBookPointers(values, (pointer) => {
         const chains = result.get(pointer.$book.name) ?? new Set<number>();
         chains.add(chainId);
@@ -537,21 +431,10 @@ function promotionBookPreview(entry: AddressBookEntry, resolutions: Record<strin
 }
 
 function referencesFromRun(run: RunRecord, targetEntries: AddressBookEntry[]): PreviewData['referencedEntries'] {
-  const grouped = new Map<
-    string,
-    {
-      source: 'local' | 'repo';
-      bookHash: string;
-      resolutions: Record<string, `0x${string}`>;
-    }
-  >();
+  const grouped = new Map<string, { source: 'local' | 'repo'; bookHash: string; resolutions: Record<string, `0x${string}`> }>();
   for (const [chainId, resolutions] of Object.entries(run.bookResolutions ?? {})) {
     for (const resolution of resolutions) {
-      const current = grouped.get(resolution.entry) ?? {
-        source: resolution.source,
-        bookHash: resolution.bookHash,
-        resolutions: {},
-      };
+      const current = grouped.get(resolution.entry) ?? { source: resolution.source, bookHash: resolution.bookHash, resolutions: {} };
       current.resolutions[chainId] = resolution.address;
       grouped.set(resolution.entry, current);
     }
@@ -592,12 +475,7 @@ function hydrateRunBookPointers(run: RunRecord): DeploymentPlan {
   for (const [chainId, resolutions] of Object.entries(run.bookResolutions ?? {})) {
     for (const resolution of resolutions) {
       const key = `${resolution.stepId}\0${resolution.argPath}\0${resolution.entry}`;
-      const current = grouped.get(key) ?? {
-        stepId: resolution.stepId,
-        argPath: resolution.argPath,
-        entry: resolution.entry,
-        chains: new Set<string>(),
-      };
+      const current = grouped.get(key) ?? { stepId: resolution.stepId, argPath: resolution.argPath, entry: resolution.entry, chains: new Set<string>() };
       current.chains.add(chainId);
       grouped.set(key, current);
     }
@@ -646,7 +524,7 @@ function deleteArgumentPath(root: Record<string, unknown>, argPath: string): voi
   let current: Record<string, unknown> | undefined = root;
   for (const segment of segments.slice(0, -1)) {
     const child: unknown = current?.[segment];
-    current = child && typeof child === 'object' && !Array.isArray(child) ? (child as Record<string, unknown>) : undefined;
+    current = child && typeof child === 'object' && !Array.isArray(child) ? child as Record<string, unknown> : undefined;
   }
   if (current && segments.length) delete current[segments.at(-1)!];
 }

@@ -5,7 +5,10 @@ import Dropdown from '../../../components/Dropdown';
 import { apiClient } from '../../../store/api/client';
 import Switch from '../../../components/Switch';
 import PointerValue, { type PointerOption } from './PointerValue';
-import { shortSignerAddress, type SignerAddressOption } from '../signerDisplay';
+import {
+  shortSignerAddress,
+  type SignerAddressOption,
+} from '../signerDisplay';
 import { addressBookPickerChoices } from '../addressBookEligibility';
 import { explorerAddressUrl } from '../../deployments/explorerLinks';
 
@@ -457,36 +460,12 @@ export default function AbiArgField({
               aria-invalid={Boolean(invalid)}
               onChange={(event) => onChange(event.target.value)}
             />
-            <AddressBookAction
-              onPick={onChange}
-              selectedChainIds={selectedChainIds}
-              chainId={chainId}
-              maskedChainIds={maskedChainIds}
-              contextualBookSourceKey={contextualBookSourceKey}
-              allowBookLink={allowBookLink}
-            />
-            <AddressExplorerAction
-              value={literal}
-              chainIds={chainId === undefined ? selectedChainIds : [chainId]}
-              chains={chains}
-            />
+            <AddressBookAction onPick={onChange} selectedChainIds={selectedChainIds} chainId={chainId} maskedChainIds={maskedChainIds} contextualBookSourceKey={contextualBookSourceKey} allowBookLink={allowBookLink} />
+            <AddressExplorerAction value={literal} chainIds={chainId === undefined ? selectedChainIds : [chainId]} chains={chains} />
           </div>
         )}
-        {book && (
-          <div className="flex items-center gap-2">
-            <span className="chip chip-info">Book: {book.$book.name}</span>
-            <button
-              type="button"
-              className="btn btn-sm btn-secondary"
-              onClick={() => onChange('')}
-            >
-              Clear
-            </button>
-          </div>
-        )}
-        {invalid && !ref && !book && (
-          <span className="text-xs text-err">{invalid}</span>
-        )}
+        {book && <div className="flex items-center gap-2"><span className="chip chip-info">Book: {book.$book.name}</span><button type="button" className="btn btn-sm btn-secondary" onClick={() => onChange('')}>Clear</button></div>}
+        {invalid && !ref && !book && <span className="text-xs text-err">{invalid}</span>}
       </div>
     );
   }
