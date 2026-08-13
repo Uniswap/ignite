@@ -26,7 +26,7 @@ import { VersionStore, type VersionRecord } from '../repos/VersionStore.js';
 import { ProfileManager } from '../filesystem/ProfileManager.js';
 import { WorkflowInstallService, WorkflowInstallServiceError, deriveWorkflowRequiredRoles, getWorkflowPluginReadiness, type RequiredRole } from '../workflows/WorkflowInstallService.js';
 import { InstalledWorkflowStore } from '../workflows/InstalledWorkflowStore.js';
-import { LocalWorkflowStore } from '../workflows/LocalWorkflowStore.js';
+import { LocalWorkflowStore, validateLocalWorkflowName } from '../workflows/LocalWorkflowStore.js';
 import { JobManager } from '../jobs/JobManager.js';
 import {
   WorkflowHttpError,
@@ -224,7 +224,7 @@ export function createWorkflowHandlers(deps?: Partial<WorkflowHandlerDeps>) {
       reply: FastifyReply
     ): Promise<IApiResponse<{ docHash: string }>> => {
       try {
-        validateName(request.params.name);
+        validateLocalWorkflowName(request.params.name);
         const document = makeWorkflowDocumentSchema({ allowFileUrls: d.devMode() }).parse(request.body.document);
         const missing = validateWorkflowClosure(document);
         if (missing.length > 0) throw new WorkflowHttpError(400, 'WORKFLOW_CLOSURE_INVALID', `Missing required plugin ids: ${missing.join(', ')}`);

@@ -102,7 +102,7 @@ export class WorkflowPromotionService {
   private async preview(request: PreviewRequest, profileId: string): Promise<PreviewData> {
     if (request.target.kind === 'repo' && !(await this.deps.validateTargetRepo(request.target.repoPathOrUrl)))
       throw new WorkflowPromotionError(422, 'PROMOTION_TARGET_INVALID', 'Promotion target must be an existing git repository');
-    const { plan, document } = await this.resolveInput(request, profileId);
+    const { plan, document, sourceDocHash } = await this.resolveInput(request, profileId);
     const sources: PreviewData['sources'] = [];
     const inspections = new Map<string, PromotionSourceInspection>();
     if (document) {
@@ -136,16 +136,18 @@ export class WorkflowPromotionService {
         throw error;
       });
     const previewId = crypto.randomUUID();
-    this.previews.set(previewId, { target: targetKey(request.target), inputKey: inputKey(request), sources, inspections });
+    this.previews.set(previewId, { target: targetKey(request.target), inputKey: inputKey(request, profileId, sourceDocHash), sources, inspections });
     while (this.previews.size > 128) this.previews.delete(this.previews.keys().next().value!);
     return { mode: 'preview', previewId, sources, nameCollision };
   }
 
   private async apply(request: ApplyRequest, profileId: string): Promise<ApplyData> {
     const snapshot = this.previews.get(request.previewId);
-    if (!snapshot || snapshot.target !== targetKey(request.target) || snapshot.inputKey !== inputKey(request))
+    if (!snapshot || snapshot.target !== targetKey(request.target))
       throw new WorkflowPromotionError(409, 'PROMOTION_PREVIEW_STALE', 'Promotion preview is missing or no longer matches this request');
-    const { plan, run, document: sourceDocument } = await this.resolveInput(request, profileId);
+    const { plan, run, document: sourceDocument, sourceDocHash } = await this.resolveInput(request, profileId);
+    if (snapshot.inputKey !== inputKey(request, profileId, sourceDocHash))
+      throw new WorkflowPromotionError(409, 'PROMOTION_PREVIEW_STALE', 'Promotion preview is missing or no longer matches this request');
     const previewErrors = snapshot.sources.filter((source) => source.error);
     if (previewErrors.length) throw new WorkflowPromotionError(422, 'PROMOTION_SOURCE_INVALID', previewErrors.map((source) => `${source.sourceId}: ${source.error}`).join('; '));
 
@@ -261,9 +263,12 @@ export class WorkflowPromotionService {
     return warnings;
   }
 
-  private async resolveInput(request: Pick<WorkflowPromoteRequest, 'plan' | 'runId' | 'source'>, profileId: string): Promise<{ plan?: DeploymentPlan; run?: RunRecord; document?: WorkflowDocument }> {
+  private async resolveInput(request: Pick<WorkflowPromoteRequest, 'plan' | 'runId' | 'source'>, profileId: string): Promise<{ plan?: DeploymentPlan; run?: RunRecord; document?: WorkflowDocument; sourceDocHash?: string }> {
     if (request.plan) return { plan: globalThis.structuredClone(request.plan) };
-    if (request.source?.kind === 'local') return { document: (await this.deps.localWorkflows.read(profileId, request.source.name)).document };
+    if (request.source?.kind === 'local') {
+      const source = await this.deps.localWorkflows.read(profileId, request.source.name);
+      return { document: source.document, sourceDocHash: source.docHash };
+    }
     if (!request.runId) throw new WorkflowPromotionError(400, 'PROMOTION_INPUT_REQUIRED', 'Exactly one of plan or runId is required');
     const run = await this.deps.getRun(profileId, request.runId);
     if (!run) throw new WorkflowPromotionError(404, 'DEPLOYMENT_RUN_NOT_FOUND', `Deployment run not found: ${request.runId}`);
@@ -286,9 +291,9 @@ async function requiredPlugin(id: string): Promise<WorkflowRequiredPlugin> {
 }
 function workflowPath(name: string): string { return `ignite/workflows/${name}.json`; }
 function targetKey(target: WorkflowPromotionTarget): string { return target.kind === 'repo' ? `repo:${target.repoPathOrUrl}\0${target.name}` : `local:${target.name}`; }
-function inputKey(request: Pick<WorkflowPromoteRequest, 'plan' | 'runId' | 'source'>): string {
+function inputKey(request: Pick<WorkflowPromoteRequest, 'plan' | 'runId' | 'source'>, profileId?: string, sourceDocHash?: string): string {
   if (request.runId) return `run:${request.runId}`;
-  if (request.source) return `local:${request.source.name}`;
+  if (request.source) return `local:${profileId ?? ''}:${request.source.name}:${sourceDocHash ?? ''}`;
   return `plan:${crypto.createHash('sha256').update(JSON.stringify(request.plan)).digest('hex')}`;
 }
 function summary(name: string, document: WorkflowDocument): WorkflowSummary {

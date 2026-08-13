@@ -29,4 +29,12 @@ describe('LocalWorkflowStore', () => {
     await expect(store.write('profile-a', 'release', document, hash)).resolves.toMatch(/^[0-9a-f]{64}$/);
     expect(await fs.stat(path.join(root, 'profiles', 'profile-a', 'workflows', 'local', 'release.json'))).toBeDefined();
   });
+
+  it('rejects Windows reserved device names for local workflows', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ignite-local-workflows-')); dirs.push(root);
+    const store = new LocalWorkflowStore({ fileSystem: { getProfileLocalWorkflowsPath: (profileId) => path.join(root, 'profiles', profileId, 'workflows', 'local') }, devMode: () => false });
+
+    for (const name of ['con', 'PRN', 'aux', 'NUL', 'com1', 'COM9', 'lpt1', 'LPT9'])
+      await expect(store.write('profile-a', name, document)).rejects.toMatchObject({ code: 'WORKFLOW_NAME_INVALID', message: 'Local workflow name cannot be a Windows reserved device name' });
+  });
 });

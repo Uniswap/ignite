@@ -57,6 +57,12 @@ describe('workflow discovery/read/save API', () => {
     expect(conflict.json()).toMatchObject({ code: 'WORKFLOW_BASE_HASH_REQUIRED' });
   });
 
+  it('rejects Windows reserved device names through the local workflow API', async () => {
+    const response = await app.inject({ method: 'PUT', url: '/api/v1/workflows/local/CON', payload: { document: document() } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ code: 'WORKFLOW_NAME_INVALID', message: 'Local workflow name cannot be a Windows reserved device name' });
+  });
+
   it('lists valid and invalid files, reports oversized entries, and handles a missing directory', async () => {
     const emptyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ignite-workflows-empty-')); dirs.push(emptyRoot);
     expect((await app.inject({ method: 'GET', url: `/api/v1/repos/workflows?pathOrUrl=${encodeURIComponent(emptyRoot)}` })).json()).toEqual({ data: { workflows: [], truncated: false } });

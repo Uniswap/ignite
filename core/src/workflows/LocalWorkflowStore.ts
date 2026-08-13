@@ -6,6 +6,13 @@ import { KeyedMutex } from '../utils/KeyedMutex.js';
 import { WorkflowHttpError, hashWorkflowRaw, parseWorkflowDocument, validateWorkflowName } from './WorkflowDocumentReader.js';
 
 const MAX_LIST_ENTRIES = 256;
+const WINDOWS_RESERVED_DEVICE_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+export function validateLocalWorkflowName(name: string): void {
+  if (WINDOWS_RESERVED_DEVICE_NAME.test(name))
+    throw new WorkflowHttpError(400, 'WORKFLOW_NAME_INVALID', 'Local workflow name cannot be a Windows reserved device name');
+  validateWorkflowName(name);
+}
 
 export interface LocalWorkflowStoreDeps {
   fileSystem: Pick<FileSystem, 'getProfileLocalWorkflowsPath'>;
@@ -46,7 +53,7 @@ export class LocalWorkflowStore {
   }
 
   async read(profileId: string, name: string): Promise<{ document: WorkflowDocument; raw: string; docHash: string }> {
-    validateWorkflowName(name);
+    validateLocalWorkflowName(name);
     let raw: string;
     try { raw = await fs.readFile(this.file(profileId, name), 'utf8'); }
     catch (error) {
@@ -57,7 +64,7 @@ export class LocalWorkflowStore {
   }
 
   async write(profileId: string, name: string, document: WorkflowDocument, baseDocHash?: string): Promise<string> {
-    validateWorkflowName(name);
+    validateLocalWorkflowName(name);
     const raw = `${JSON.stringify(document, null, 2)}\n`;
     return LocalWorkflowStore.mutex.run(`${profileId}\0${name}`, async () => {
       const file = this.file(profileId, name);

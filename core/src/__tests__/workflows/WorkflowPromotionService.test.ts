@@ -141,6 +141,31 @@ describe('WorkflowPromotionService', () => {
     expect(JSON.parse(files.get('ignite/workflows/release.json')!)).toEqual(localDocument);
   });
 
+  it('rejects a local source promotion when its document changes or the profile changes after preview', async () => {
+    const localDocument: WorkflowDocument = {
+      schemaVersion: 1,
+      sources: [{ id: 'contract', repo: { url: 'https://example.test/repo.git', commit: SHA }, frameworkId: 'foundry', sourcePath: 'src/Contract.sol', contractName: 'Contract', artifactPath: 'out/Contract.json' }],
+      steps: [{ id: 'deploy', kind: 'deploy', contractId: 'contract' }],
+      requiredPlugins: [{ id: 'foundry', version: '1' }],
+      outputs: { hooks: [] },
+    };
+    let docHash = HASH;
+    const service = makeService({
+      localWorkflows: {
+        read: async () => ({ document: localDocument, raw: JSON.stringify(localDocument), docHash }),
+        write: async () => HASH,
+      },
+    });
+    const target = { kind: 'repo' as const, repoPathOrUrl: '/target', name: 'release' };
+    const preview = await service.promote({ mode: 'preview', target, source: { kind: 'local', name: 'local-release' } }, 'p1');
+    docHash = 'd'.repeat(64);
+    await expect(service.promote({ mode: 'apply', previewId: preview.previewId, target, source: { kind: 'local', name: 'local-release' }, hooks: [] }, 'p1')).rejects.toMatchObject({ code: 'PROMOTION_PREVIEW_STALE', statusCode: 409 });
+
+    const secondPreview = await service.promote({ mode: 'preview', target, source: { kind: 'local', name: 'local-release' } }, 'p1');
+    await expect(service.promote({ mode: 'apply', previewId: secondPreview.previewId, target, source: { kind: 'local', name: 'local-release' }, hooks: [] }, 'p2')).rejects.toMatchObject({ code: 'PROMOTION_PREVIEW_STALE', statusCode: 409 });
+    expect(writes).toEqual([]);
+  });
+
   it('mints opaque source ids, remaps every contract reference, skips pinned inspection, and warns for local-only commits', async () => {
     const inspectSource = vi.fn();
     const source = { repoPathOrUrl: 'https://example.test/repo.git', frameworkId: 'foundry', sourcePath: 'src/C.sol', contractName: 'C', artifactPath: 'out/C.json' };
