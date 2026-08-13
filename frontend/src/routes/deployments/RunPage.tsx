@@ -360,6 +360,12 @@ export default function RunPage() {
         )}
       </header>
       {error && <div className="card-milky p-3 text-err">{error}</div>}
+      {run.bookResolutions && Object.keys(run.bookResolutions).length > 0 && (
+        <section className="card-milky p-4 grid gap-3">
+          <div><h2 className="font-semibold">Book addresses</h2><p className="text-sm text-muted">Frozen when this run was launched.</p></div>
+          <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-muted"><tr><th className="py-1 pr-3">Chain</th><th className="py-1 pr-3">Entry</th><th className="py-1 pr-3">Address</th><th className="py-1 pr-3">Source</th><th className="py-1">Book hash</th></tr></thead><tbody>{Object.entries(run.bookResolutions).flatMap(([chainId, items]) => items.map((item) => <tr key={`${chainId}-${item.stepId}-${item.argPath}`}><td className="py-1 pr-3">{chainId}</td><td className="py-1 pr-3">{item.entry}</td><td className="py-1 pr-3 mono-data">{item.address}</td><td className="py-1 pr-3">{item.source}</td><td className="py-1 mono-data">{item.bookHash.slice(0, 12)}</td></tr>))}</tbody></table></div>
+        </section>
+      )}
       <div className="grid gap-4">
         {run.plan.chains.map((chainId) => {
           const lane = run.lanes[String(chainId)];

@@ -18,6 +18,7 @@ import RunPage from './routes/deployments/RunPage.tsx';
 import WorkflowsPage from './routes/workflows/WorkflowsPage.tsx';
 import WorkflowEditorPage from './routes/workflows/edit/WorkflowEditorPage.tsx';
 import VerifyContractPage from './routes/verify/VerifyContractPage.tsx';
+import AddressBookPage from './routes/addressBook/AddressBookPage.tsx';
 import './index.css';
 import { ToastProvider } from './ui/toast/ToastProvider';
 
@@ -33,6 +34,7 @@ const router = createBrowserRouter([
       { path: 'deploy', element: <DeployWizardPage /> },
       { path: 'workflows', element: <WorkflowsPage /> },
       { path: 'workflows/edit', element: <WorkflowEditorPage /> },
+      { path: 'address-book', element: <AddressBookPage /> },
       { path: 'deployments', element: <DeploymentsPage /> },
       { path: 'deployments/:runId', element: <RunPage /> },
       { path: 'verify', element: <VerifyContractPage /> },

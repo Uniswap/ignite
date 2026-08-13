@@ -6,6 +6,7 @@ import {
   ChevronsRight,
   Rocket,
   Workflow,
+  BookOpen,
 } from 'lucide-react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useAppDispatch, useAppSelector } from '../store';
@@ -40,6 +41,13 @@ export default function Sidebar() {
       to: '/workflows',
       label: 'Workflows',
       Icon: Workflow,
+      badge: 0,
+      forceActive: undefined as boolean | undefined,
+    },
+    {
+      to: '/address-book',
+      label: 'Address book',
+      Icon: BookOpen,
       badge: 0,
       forceActive: undefined as boolean | undefined,
     },

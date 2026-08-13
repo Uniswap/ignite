@@ -4,6 +4,7 @@ import type {
   DeploymentPlan,
   ValidationItem,
   ValidationReport,
+  BookResolutions,
 } from '@ignite/api';
 import { sanitizeDisplayText } from '@ignite/api';
 import { Loader2, RefreshCw, Rocket } from 'lucide-react';
@@ -51,7 +52,7 @@ export function bounceOutOfSyncWorkflowRun(
     !(cause instanceof ApiError) ||
     cause.status !== 409 ||
     cause.body.code !== 'WORKFLOW_OUT_OF_SYNC'
-  )
+)
     return false;
   dispatch(
     triggerToast({
@@ -62,6 +63,12 @@ export function bounceOutOfSyncWorkflowRun(
     })
   );
   navigate('/workflows', { replace: true });
+  return true;
+}
+
+function bounceOutOfSyncBook(cause: unknown, dispatch: (action: ReturnType<typeof triggerToast>) => unknown): boolean {
+  if (!(cause instanceof ApiError) || cause.status !== 409 || cause.body.code !== 'BOOK_OUT_OF_SYNC') return false;
+  dispatch(triggerToast({ title: 'Address book changed', description: 'The address book changed after review. Re-validating now.', variant: 'warning', duration: 8000 }));
   return true;
 }
 
@@ -114,6 +121,8 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
       : undefined
   );
   const [report, setReport] = useState<ValidationReport | null>(null);
+  const [bookResolutions, setBookResolutions] = useState<BookResolutions>();
+  const [bookHashes, setBookHashes] = useState<Record<string, string>>();
   const [loading, setLoading] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -209,8 +218,12 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
         chains: response.data.chains,
         ...(response.data.run ? { run: response.data.run } : {}),
       });
+      setBookResolutions(response.data.bookResolutions);
+      setBookHashes(response.data.bookHashes);
     } catch (cause) {
       setReport(null);
+      setBookResolutions(undefined);
+      setBookHashes(undefined);
       if (bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)) return;
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -243,6 +256,7 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
           idempotencyKey: launchedKey,
           name: draft.name?.trim() || defaultName,
           ...(workflowRequest ? { workflow: workflowRequest } : {}),
+          ...(bookHashes ? { expectedBookHash: bookHashes } : {}),
         },
       });
       if (!('data' in response)) throw new Error(response.message);
@@ -251,6 +265,7 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
       navigate(`/deployments/${response.data.run.id}`, { replace: true });
     } catch (cause) {
       if (bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)) return;
+      if (bounceOutOfSyncBook(cause, dispatch)) { await validate(); return; }
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLaunching(false);
@@ -327,6 +342,7 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
           }
         />
       </label>
+      {bookResolutions && Object.keys(bookResolutions).length > 0 && <div className="card-milky p-4 grid gap-3"><div><h3 className="font-semibold">Book addresses</h3><p className="text-sm text-muted">These addresses are frozen into the launch plan.</p></div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-muted"><tr><th className="py-1 pr-3">Chain</th><th className="py-1 pr-3">Entry</th><th className="py-1 pr-3">Address</th><th className="py-1 pr-3">Source</th><th className="py-1">Book hash</th></tr></thead><tbody>{Object.entries(bookResolutions).flatMap(([chainId, items]) => items.map((item) => <tr key={`${chainId}-${item.stepId}-${item.argPath}`}><td className="py-1 pr-3">{chainId}</td><td className="py-1 pr-3">{item.entry}</td><td className="py-1 pr-3 mono-data">{item.address}</td><td className="py-1 pr-3">{item.source === 'repo' ? <span className="chip chip-info">from repo book</span> : 'local'}</td><td className="py-1 mono-data">{item.bookHash.slice(0, 12)}</td></tr>))}</tbody></table></div></div>}
       {draft.workflowRef && (
         <section className="card-milky p-4 grid gap-3">
           <div>

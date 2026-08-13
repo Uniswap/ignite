@@ -1,4 +1,8 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { BookOpen } from 'lucide-react';
+import type { AddressBookView, BookPointer } from '@ignite/api';
+import Dropdown from '../../../components/Dropdown';
+import { apiClient } from '../../../store/api/client';
 import Switch from '../../../components/Switch';
 import PointerValue, { type PointerOption } from './PointerValue';
 import {
@@ -92,6 +96,15 @@ function inputHint(type: string): string {
   if (/^bytes/.test(type)) return '0x… hex bytes';
   if (type.endsWith(']')) return 'JSON array';
   return type;
+}
+
+function AddressBookAction({ onPick }: { onPick: (value: string | BookPointer) => void }) {
+  const [books, setBooks] = useState<AddressBookView[]>([]);
+  const [query, setQuery] = useState('');
+  useEffect(() => { void apiClient.request('getAddressBook', {}).then((response) => { if ('data' in response) setBooks(response.data.books.filter((book) => book.entries)); }).catch(() => undefined); }, []);
+  const entries = useMemo(() => books.flatMap((book) => (book.entries ?? []).map((entry) => ({ book, entry, address: entry.address ?? Object.values(entry.perChain ?? {})[0] }))).filter((item) => item.address && item.entry.name.includes(query.toLowerCase())), [books, query]);
+  if (!entries.length) return null;
+  return <Dropdown anchor="right" menuClassName="card-milky p-2 w-80 z-50" renderTrigger={({ ref, toggle, getReferenceProps }) => <button ref={ref} type="button" className="btn btn-sm btn-secondary absolute right-2 top-1/2 -translate-y-1/2" aria-label="Choose address book entry" onClick={toggle} {...getReferenceProps()}><BookOpen size={14} /></button>}>{({ close }) => <div className="grid gap-2"><input className="input-glass" placeholder="Search address book" value={query} onChange={(event) => setQuery(event.target.value)} />{entries.map(({ book, entry, address }) => <div key={`${book.source.kind}-${entry.name}`} className="flex items-center gap-2 rounded px-2 py-1 hover:bg-white/10"><button type="button" className="text-left flex-1" onClick={() => { onPick(address!); close(); }}><span className="block text-sm">{entry.name} — {book.source.kind === 'local' ? 'local' : 'repo'}</span><span className="mono-data text-xs text-muted">{address}</span></button>{book.source.kind === 'local' && <button type="button" className="btn btn-sm btn-secondary" onClick={() => { onPick({ $book: { name: entry.name } }); close(); }}>Link</button>}</div>)}</div>}</Dropdown>;
 }
 
 function validationMessage(type: string, value: string): string | undefined {
@@ -214,6 +227,10 @@ export default function AbiArgField({
       value && typeof value === 'object' && '$ref' in value
         ? (value as { $ref: { kind: 'step'; stepId: string } })
         : undefined;
+    const book =
+      value && typeof value === 'object' && '$book' in value
+        ? (value as BookPointer)
+        : undefined;
     return (
       <div className="grid gap-2">
         <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -222,23 +239,28 @@ export default function AbiArgField({
           </span>
           <SignerFillAction options={signerOptions} onFill={onChange} />
         </div>
-        {eligibleSteps && (
+        {eligibleSteps && !book && (
           <PointerValue
             value={ref ?? literal}
             onChange={onChange}
             eligibleSteps={eligibleSteps}
           />
         )}
-        {!ref && (
-          <input
-            className="input-glass"
-            value={literal}
-            placeholder={inputHint(input.type)}
-            aria-invalid={Boolean(invalid)}
-            onChange={(event) => onChange(event.target.value)}
-          />
+        {!ref && !book && (
+          <div className="relative">
+            {/* Explorer lookup merges at right-2. Keep this base-branch offset until that branch lands. */}
+            <input
+              className="input-glass pr-9"
+              value={literal}
+              placeholder={inputHint(input.type)}
+              aria-invalid={Boolean(invalid)}
+              onChange={(event) => onChange(event.target.value)}
+            />
+            <AddressBookAction onPick={onChange} />
+          </div>
         )}
-        {invalid && !ref && <span className="text-xs text-err">{invalid}</span>}
+        {book && <div className="flex items-center gap-2"><span className="chip chip-info">Book: {book.$book.name}</span><button type="button" className="btn btn-sm btn-secondary" onClick={() => onChange('')}>Clear</button></div>}
+        {invalid && !ref && !book && <span className="text-xs text-err">{invalid}</span>}
       </div>
     );
   }
