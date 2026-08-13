@@ -1,6 +1,10 @@
-import type { ChainChecklist, ChainInfo, ValidationItem } from '@ignite/api';
+import { useState } from 'react';
+import type { Abi } from 'viem';
+import { decodeAbiParameters, decodeEventLog, parseAbiParameters } from 'viem';
+import type { ChainChecklist, ChainInfo, DeploymentPlan, FrozenInputs, RpcSelection, SimulatedLog, SimulationStepResult, StorageSlotChangesData, ValidationItem } from '@ignite/api';
 import { CheckCircle2, CircleAlert } from 'lucide-react';
 import { replaceIdsForDisplay } from '../../../utils/displayText';
+import { apiClient } from '../../../store/api/client';
 
 const ITEM_KEYS = [
   'rpc',
@@ -23,6 +27,106 @@ interface ValidationChecklistProps {
   onAcceptArtifactDrift?: (
     drifts: Array<{ sourceId: string; expected: string; actual: string }>
   ) => void;
+  plan?: DeploymentPlan;
+  rpcSelection?: RpcSelection;
+  frozenInputs?: FrozenInputs;
+}
+
+function formatValue(value: unknown): string {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return `[${value.map(formatValue).join(', ')}]`;
+  if (value && typeof value === 'object') return `{ ${Object.entries(value).map(([key, entry]) => `${key}: ${formatValue(entry)}`).join(', ')} }`;
+  return String(value);
+}
+
+function knownEvent(log: SimulatedLog, abis: Abi[]): string | undefined {
+  for (const abi of abis) {
+    try {
+      const decoded = decodeEventLog({ abi, data: log.data, topics: log.topics as [`0x${string}`, ...`0x${string}`[]], strict: false });
+      const args = Object.entries(decoded.args ?? {}).map(([key, value]) => `${key}: ${formatValue(value)}`).join(', ');
+      return `${decoded.eventName}(${args})`;
+    } catch {
+      // An ABI that does not define this topic is expected while scanning the
+      // draft's frozen contracts.
+    }
+  }
+  return undefined;
+}
+
+function signatureEvent(signature: string, log: SimulatedLog): string | undefined {
+  const match = /^([^()]+)\((.*)\)$/.exec(signature);
+  if (!match) return undefined;
+  const types = match[2] ? match[2].split(',').map((type) => type.trim()).filter(Boolean) : [];
+  try {
+    const parameters = parseAbiParameters(types.map((type, index) => `${type} arg${index}`).join(', '));
+    const values = parameters.length ? decodeAbiParameters(parameters, log.data) : [];
+    return `${match[1]}(${values.map((value, index) => `arg${index}: ${formatValue(value)}`).join(', ')})`;
+  } catch {
+    return undefined;
+  }
+}
+
+function EventLogs({ logs, abis }: { logs: SimulatedLog[] | undefined; abis: Abi[] }) {
+  const [signatures, setSignatures] = useState<Record<string, string | undefined>>({});
+  const loadUnknown = () => {
+    if (!logs) return;
+    const topic0s = [...new Set(logs.flatMap((log) => knownEvent(log, abis) || !log.topics[0] ? [] : [log.topics[0]]))]
+      .filter((topic): topic is `0x${string}` => signatures[topic] === undefined && !Object.prototype.hasOwnProperty.call(signatures, topic));
+    if (!topic0s.length) return;
+    void Promise.all(topic0s.map(async (topic) => {
+      try {
+        const response = await apiClient.request('lookupEventSignature', { query: { topic0: topic as `0x${string}` } });
+        return [topic, 'data' in response ? response.data.signature : undefined] as const;
+      } catch {
+        return [topic, undefined] as const;
+      }
+    })).then((results) => setSignatures((current) => ({ ...current, ...Object.fromEntries(results) })));
+  };
+  return <details className="text-xs text-muted mt-2" onToggle={(event) => { if (event.currentTarget.open) loadUnknown(); }}>
+    <summary className="cursor-pointer">Events{logs ? ` (${logs.length})` : ''}</summary>
+    {!logs ? <div className="mt-1">Events need a simulating tier.</div> : logs.length === 0 ? <div className="mt-1">No events were emitted.</div> : <div className="mt-2 max-h-48 overflow-y-auto grid gap-2 pr-1">
+      {logs.map((log, index) => {
+        const decoded = knownEvent(log, abis);
+        const signature = !decoded && log.topics[0] ? signatures[log.topics[0]] : undefined;
+        const decodedSignature = signature ? signatureEvent(signature, log) : undefined;
+        return <div key={`${log.address}-${index}`} className="rounded border border-white/10 p-2 mono-data">
+          <div>{decoded ?? decodedSignature ?? signature ?? 'Raw event'}</div>
+          {!decoded && !decodedSignature && <div className="break-all mt-1">topics: {log.topics.join(', ') || 'none'}<br />data: {log.data}</div>}
+          <div className="break-all mt-1 text-muted">from {log.address}</div>
+        </div>;
+      })}
+    </div>}
+  </details>;
+}
+
+function StorageChanges({ chainId, stepId, plan, rpcSelection }: { chainId: number; stepId: string; plan?: DeploymentPlan; rpcSelection?: RpcSelection }) {
+  const [data, setData] = useState<StorageSlotChangesData>();
+  const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(false);
+  const load = async () => {
+    if (!plan || !rpcSelection) return;
+    setLoading(true); setError(undefined);
+    try {
+      const response = await apiClient.request('getStorageSlotChanges', { body: { plan, rpcSelection, chainId, stepId } });
+      if (!('data' in response)) throw new Error(response.message);
+      setData(response.data);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setLoading(false); }
+  };
+  return <div className="mt-2">
+    <button type="button" className="btn btn-sm btn-secondary" disabled={!plan || !rpcSelection || loading} onClick={() => void load()}>{loading ? 'Getting storage changes…' : 'Get storage slot changes'}</button>
+    {error && <div className="text-xs text-err mt-1">{error}</div>}
+    {data && <details className="text-xs text-muted mt-2">
+      <summary className="cursor-pointer">Storage slot changes</summary>
+      <div className="mt-2 max-h-48 overflow-y-auto grid gap-2 pr-1">{Object.entries(data.storage).sort(([left], [right]) => left.toLowerCase() === data.target?.toLowerCase() ? -1 : right.toLowerCase() === data.target?.toLowerCase() ? 1 : left.localeCompare(right)).map(([address, changes]) => <div key={address} className="rounded border border-white/10 p-2 mono-data"><div className="break-all">{address}</div>{changes.length ? changes.map((change) => <div key={change.slot} className="break-all mt-1">slot {change.slot}<br />before {change.before}<br />after {change.after}</div>) : <div className="mt-1">No storage slots changed.</div>}</div>)}</div>
+    </details>}
+  </div>;
+}
+
+function simulationSteps(details: Record<string, unknown> | undefined): Record<string, SimulationStepResult> {
+  if (!details || !details.perStep || typeof details.perStep !== 'object') return {};
+  return details.perStep as Record<string, SimulationStepResult>;
 }
 
 export function artifactDrifts(item: {
@@ -112,7 +216,11 @@ export default function ValidationChecklist({
   onAcknowledge,
   run,
   onAcceptArtifactDrift,
+  plan,
+  rpcSelection,
+  frozenInputs,
 }: ValidationChecklistProps) {
+  const eventAbis = Object.values(frozenInputs ?? {}).flatMap((input) => Array.isArray(input.abi) ? [input.abi as Abi] : []);
   return (
     <div className="grid gap-3">
       {run && (run.workflow || run.outputs) && (
@@ -188,7 +296,19 @@ export default function ValidationChecklist({
                           ) ?? replaceIdsForDisplay(item.message, stepLabels)}
                         </span>
                       )}
-                      {detailGas(item.details).length > 0 && (
+                      {key === 'simulation' && Object.entries(simulationSteps(item.details)).length > 0 && (
+                        <div className="grid gap-2 mt-2">
+                          {Object.entries(simulationSteps(item.details)).map(([stepId, step]) => (
+                            <div key={stepId} className="rounded border border-white/10 p-2">
+                              <div className="font-medium">{replaceIdsForDisplay(stepId, stepLabels)}</div>
+                              {step.gasUsed && <div className="mono-data mt-1">{step.gasUsed} gas</div>}
+                              <EventLogs logs={step.logs} abis={eventAbis} />
+                              <StorageChanges chainId={Number(chainId)} stepId={stepId} plan={plan} rpcSelection={rpcSelection} />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {key !== 'simulation' && detailGas(item.details).length > 0 && (
                         <details className="text-xs text-muted mt-2">
                           <summary className="cursor-pointer">
                             Per-step gas

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   DeploymentHookInfo,
   DeploymentPlan,
+  FrozenInputs,
   ValidationItem,
   ValidationReport,
 } from '@ignite/api';
@@ -114,6 +115,7 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
       : undefined
   );
   const [report, setReport] = useState<ValidationReport | null>(null);
+  const [frozenInputs, setFrozenInputs] = useState<FrozenInputs | undefined>();
   const [loading, setLoading] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -209,8 +211,10 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
         chains: response.data.chains,
         ...(response.data.run ? { run: response.data.run } : {}),
       });
+      setFrozenInputs(response.data.frozenCandidates);
     } catch (cause) {
       setReport(null);
+      setFrozenInputs(undefined);
       if (bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)) return;
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -489,6 +493,9 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
           run={report.run}
           chainInfo={chains}
           stepLabels={stepLabels}
+          plan={plan}
+          rpcSelection={rpcSelection}
+          frozenInputs={frozenInputs}
           onAcknowledge={acknowledge}
           onAcceptArtifactDrift={(drifts) => {
             for (const drift of drifts)

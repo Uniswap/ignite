@@ -54,4 +54,29 @@ describe('workflow validation checklist', () => {
     );
     expect(driftHtml).toContain('Accept drifted bytecode');
   });
+
+  it('renders collapsed per-step events and on-demand storage controls', () => {
+    const item = {
+      ok: true,
+      blocking: false,
+      message: 'Simulation completed',
+      details: {
+        tier: 'estimate',
+        perStep: { deploy: { status: 'ok', gasUsed: '42' } },
+      },
+    };
+    const html = renderToStaticMarkup(
+      <ValidationChecklist
+        chains={{
+          '1': { rpc: item, signers: item, args: item, estimation: item, balance: item, inputs: item, simulation: item },
+        }}
+        chainInfo={[]}
+        plan={{ schemaVersion: 1, contracts: [], steps: [], chains: [1], signers: {} }}
+        rpcSelection={{ '1': 'rpc' }}
+      />
+    );
+    expect(html).toContain('Events');
+    expect(html).toContain('Events need a simulating tier.');
+    expect(html).toContain('Get storage slot changes');
+  });
 });
