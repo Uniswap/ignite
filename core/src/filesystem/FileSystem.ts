@@ -111,6 +111,10 @@ export class FileSystem {
     return path.join(this.getProfilePath(profileId), 'config.json');
   }
 
+  getProfileAddressBookPath(profileId: string): string {
+    return path.join(this.getProfilePath(profileId), 'addressbook.json');
+  }
+
   getProfileReposPath(profileId: string): string {
     return path.join(this.getProfilePath(profileId), 'repos');
   }

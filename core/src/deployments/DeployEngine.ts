@@ -224,6 +224,7 @@ export class DeployEngine {
     idempotencyKey: string;
     workflow?: WorkflowRunBinding;
     workflowDocument?: WorkflowDocument;
+    expectedBookHash?: Record<string, string>;
   }): Promise<RunRecord> {
     return this.queued(this.launches, args.profileId, async () => {
       const existing = await this.deps.runStore.findByIdempotencyKey(
@@ -236,6 +237,10 @@ export class DeployEngine {
         explorerSelection: args.explorerSelection,
         ...(args.workflow && args.workflowDocument ? { workflow: { binding: args.workflow, document: args.workflowDocument } } : {}),
       });
+      for (const [source, currentHash] of Object.entries(validated.bookHashes ?? {})) {
+        if (args.expectedBookHash?.[source] !== currentHash)
+          throw new IgniteError('Address book changed since review', 'BOOK_OUT_OF_SYNC', { source, expected: args.expectedBookHash?.[source], actual: currentHash });
+      }
       if (
         Object.values(validated.report.chains).some((checklist) =>
           Object.values(checklist).some((item) => item.blocking && !item.ok)
@@ -255,7 +260,7 @@ export class DeployEngine {
         idempotencyKey: args.idempotencyKey,
         createdAt: now,
         updatedAt: now,
-        plan: globalThis.structuredClone(args.plan),
+        plan: globalThis.structuredClone(validated.resolvedPlan ?? args.plan),
         inputs: validated.frozen,
         ...(Object.keys(validated.contractTypes ?? {}).length ? { contractTypes: globalThis.structuredClone(validated.contractTypes) } : {}),
         rpcSelection: validated.rpcBindings,
@@ -264,6 +269,7 @@ export class DeployEngine {
           : {}),
         validation: validated.report,
         ...(args.workflow ? { workflow: globalThis.structuredClone(args.workflow) } : {}),
+        ...(validated.bookResolutions ? { bookResolutions: globalThis.structuredClone(validated.bookResolutions) } : {}),
         ...(Object.keys(validated.report.chains).length
           ? { simulationTiers: Object.fromEntries(Object.entries(validated.report.chains).flatMap(([key, checklist]) => {
               const tier = (checklist.simulation?.details as { tier?: 'simulateV1' | 'fork' | 'estimate' } | undefined)?.tier;
@@ -272,9 +278,9 @@ export class DeployEngine {
           : {}),
         status: 'running',
         lanes: Object.fromEntries(
-          args.plan.chains.map((chainId) => [
+          (validated.resolvedPlan ?? args.plan).chains.map((chainId) => [
             String(chainId),
-            makeLane(chainId, args.plan, validated.predicted?.[String(chainId)]),
+            makeLane(chainId, validated.resolvedPlan ?? args.plan, validated.predicted?.[String(chainId)]),
           ])
         ),
       };

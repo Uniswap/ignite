@@ -22,6 +22,7 @@ import type {
   Hex32,
   WorkflowDocument,
   WorkflowRunBinding,
+  BookResolutions,
 } from '@ignite/api';
 import { CREATE2_PROXY_ADDRESS, CREATE2_PROXY_RUNTIME_HASH } from '@ignite/api';
 import { ArtifactFreezeService } from './ArtifactFreezeService.js';
@@ -61,6 +62,7 @@ import {
   type PermissionGrant,
 } from '../plugins/trust/TrustManager.js';
 import { PluginType, type PluginMetadata } from '@ignite/plugin-types/types';
+import { resolveBookPointers } from '../addressBook/BookResolver.js';
 
 type Endpoint = { id: string; label?: string; url: string; stored?: boolean };
 
@@ -177,6 +179,9 @@ export async function validatePlan(
     string,
     Record<string, { predictedAddress: Hex; initcodeHash: Hex32; salt: Hex32 }>
   >;
+  resolvedPlan?: DeploymentPlan;
+  bookResolutions?: BookResolutions;
+  bookHashes?: Record<string, string>;
 }> {
   // Only byte-identical validation requests may share work: sharing a
   // profile alone can otherwise return a Review result for a different draft.
@@ -218,6 +223,9 @@ async function validatePlanOnce(
     string,
     Record<string, { predictedAddress: Hex; initcodeHash: Hex32; salt: Hex32 }>
   >;
+  resolvedPlan?: DeploymentPlan;
+  bookResolutions?: BookResolutions;
+  bookHashes?: Record<string, string>;
 }> {
   const defaults = defaultDeps();
   const deps: ValidationDeps = { ...defaults, ...overrides };
@@ -237,6 +245,21 @@ async function validatePlanOnce(
     ));
   } catch (error) {
     freezeError = error;
+  }
+
+  let resolvedPlan = plan;
+  let bookResolutions: BookResolutions | undefined;
+  let bookHashes: Record<string, string> | undefined;
+  if (!freezeError) {
+    const resolved = await resolveBookPointers(
+      plan,
+      frozen,
+      deps.profileId ?? 'default',
+      deps.workflow?.binding,
+    );
+    resolvedPlan = resolved.plan;
+    bookResolutions = resolved.bookResolutions;
+    bookHashes = resolved.bookHashes;
   }
 
   // Bundle capture intentionally happens after the all-or-nothing artifact
@@ -271,16 +294,16 @@ async function validatePlanOnce(
     Record<string, { predictedAddress: Hex; initcodeHash: Hex32; salt: Hex32 }>
   > = {};
   const run = deps.workflow ? await validateWorkflowRun(deps.workflow.binding, deps.resolveHookStatus) : undefined;
-  for (const chainId of plan.chains) {
+  for (const chainId of resolvedPlan.chains) {
     const key = String(chainId);
     const endpointId = rpcSelection[key];
     const endpoint = endpointId
       ? await deps.resolveRpcEndpoint(chainId, endpointId)
       : undefined;
     const rpc = await validateRpc(chainId, endpoint, deps, bindings);
-    const inputs = validateFrozenInputs(plan, frozen, freezeError, deps.workflow);
+    const inputs = validateFrozenInputs(resolvedPlan, frozen, freezeError, deps.workflow);
     const signerResults = validateSigners(
-      plan,
+      resolvedPlan,
       chainId,
       accountsSnapshot,
       accountsError
@@ -289,16 +312,16 @@ async function validatePlanOnce(
     let snapshotError: unknown;
     if (!freezeError) {
       try {
-        snapshot = await buildChainPredictions(plan, frozen, chainId, {
+        snapshot = await buildChainPredictions(resolvedPlan, frozen, chainId, {
           client: endpoint?.url ? deps.createClient(endpoint.url) : undefined,
           signers: signerResults.signers,
           deploymentTypes: deps.deploymentTypes,
         });
       } catch (error) { snapshotError = error; }
     }
-    const rawArgs = validateArgs(plan, chainId, frozen, freezeError, snapshot, snapshotError);
+    const rawArgs = validateArgs(resolvedPlan, chainId, frozen, freezeError, snapshot, snapshotError);
     const create2 = await validateCreate2(
-      plan,
+      resolvedPlan,
       chainId,
       frozen,
       endpoint?.url,
@@ -309,7 +332,7 @@ async function validatePlanOnce(
     );
     if (create2.predicted) predicted[key] = create2.predicted;
     const simulation = await validateSimulation(
-      plan,
+      resolvedPlan,
       chainId,
       frozen,
       endpoint?.url,
@@ -320,13 +343,13 @@ async function validatePlanOnce(
       contractTypes
     );
     const contractTypeItems = freezeError ? [] : [
-      ...contractTypeStaticItems(plan, frozen, contractTypes, chainId, contractTypeOrigins),
-      ...probeValidationItems(plan, contractTypes, simulation.outcome),
-      ...estimateWrapperItems(plan, chainId, (simulation.item.details as { tier?: 'simulateV1' | 'fork' | 'estimate' } | undefined)?.tier),
+      ...contractTypeStaticItems(resolvedPlan, frozen, contractTypes, chainId, contractTypeOrigins),
+      ...probeValidationItems(resolvedPlan, contractTypes, simulation.outcome),
+      ...estimateWrapperItems(resolvedPlan, chainId, (simulation.item.details as { tier?: 'simulateV1' | 'fork' | 'estimate' } | undefined)?.tier),
     ];
     const args = combineContractTypeItems(rawArgs, contractTypeItems);
     const balance = await validateBalance(
-      plan,
+      resolvedPlan,
       chainId,
       endpoint?.url,
       signerResults.signers,
@@ -336,7 +359,7 @@ async function validatePlanOnce(
       snapshot
     );
     const verification = await validateVerification(
-      plan,
+      resolvedPlan,
       chainId,
       frozen,
       freezeError,
@@ -365,6 +388,9 @@ async function validatePlanOnce(
     rpcBindings: bindings,
     explorerTargets,
     predicted,
+    resolvedPlan,
+    ...(bookResolutions ? { bookResolutions } : {}),
+    ...(bookHashes ? { bookHashes } : {}),
   };
 }
 

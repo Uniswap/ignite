@@ -1983,6 +1983,10 @@ export class RepoService {
     );
   }
 
+  isWritableWorkspace(pathOrUrl: string): boolean {
+    return !this.isReadOnlyWorkspace(pathOrUrl);
+  }
+
   private async writeRepoFileLocked(
     realRoot: string,
     filePath: string,

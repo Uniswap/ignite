@@ -34,6 +34,7 @@ import { contractTypeHandlers } from './contractTypes.js';
 import { workflowHandlers } from './workflows.js';
 import { pointerSuggestionHandlers } from './pointerSuggestions.js';
 import { workflowPromotionHandlers } from './workflowPromotion.js';
+import { addressBookHandlers } from './addressBook.js';
 
 // Register API documentation and schemas with Fastify
 export async function registerApi(app: FastifyInstance) {
@@ -120,6 +121,7 @@ async function registerRoutes(app: FastifyInstance) {
     ...workflowHandlers,
     ...pointerSuggestionHandlers,
     ...workflowPromotionHandlers,
+    ...addressBookHandlers,
   };
 
   checkHandlers(allHandlers);

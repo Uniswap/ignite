@@ -57,7 +57,7 @@ export interface DeploymentHandlerDeps {
           explorerSelection?: Record<string, string[]>;
           workflow?: { document: WorkflowDocument; binding: WorkflowRunBinding };
         }
-      ) => Promise<{ report: ValidateDeploymentData; frozen: unknown }>;
+        ) => Promise<{ report: ValidateDeploymentData; frozen: unknown; bookResolutions?: ValidateDeploymentData['bookResolutions']; bookHashes?: ValidateDeploymentData['bookHashes'] }>;
   getRun: (profileId: string, runId: string) => Promise<RunRecord | undefined>;
   listVerifications: (
     profileId: string,
@@ -134,6 +134,8 @@ export function createDeploymentHandlers(
             ? 404
             : error.code === ErrorCodes.STALE_RESOLVE
               ? 409
+              : error.code === 'BOOK_OUT_OF_SYNC'
+                ? 409
               : 400;
       return reply
         .status(status)
@@ -195,6 +197,8 @@ export function createDeploymentHandlers(
               frozenCandidates:
                 result.frozen as ValidateDeploymentData['frozenCandidates'],
               ...(result.report.run ? { run: result.report.run } : {}),
+              ...(result.bookResolutions ? { bookResolutions: result.bookResolutions } : {}),
+              ...(result.bookHashes ? { bookHashes: result.bookHashes } : {}),
             },
           });
       } catch (error) {
@@ -349,6 +353,7 @@ export function createDeploymentHandlers(
           explorerSelection: request.body.explorerSelection,
           name: request.body.name,
           idempotencyKey: request.body.idempotencyKey,
+          expectedBookHash: request.body.expectedBookHash,
           ...(workflow ? { workflow: workflow.binding, workflowDocument: workflow.document } : {}),
         });
         return reply.status(200).send({ data: { run } });
