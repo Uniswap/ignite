@@ -101,6 +101,9 @@ export interface DeployStep {
 }
 
 export interface ValueRef { $ref: { kind: 'step'; stepId: string } }
+export interface BookPointer { $book: { name: string } }
+export interface BookResolution { stepId: string; argPath: string; entry: string; address: Hex; source: 'local' | 'repo'; bookHash: string }
+export type BookResolutions = Record<string, BookResolution[]>;
 export interface EncodedCallValue { $encode: { contractId: string; fn: string; args?: ArgValues } }
 export interface WrapsRef { stepId: string; contractTypePluginId: string }
 export type LibraryBinding = { kind: 'address'; address: Hex } | { kind: 'step'; stepId: string };
@@ -137,6 +140,10 @@ const AddressSchema = z.string().regex(HEX_ADDRESS) as z.ZodType<Hex>;
 export const ValueRefSchema = z.object({ $ref: z.object({ kind: z.literal('step'), stepId: z.string().min(1) }) }) satisfies z.ZodType<ValueRef>;
 export function isValueRef(value: unknown): value is ValueRef {
   return ValueRefSchema.safeParse(value).success;
+}
+export const BookPointerSchema = z.object({ $book: z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/) }).strict() }).strict() satisfies z.ZodType<BookPointer>;
+export function isBookPointer(value: unknown): value is BookPointer {
+  return BookPointerSchema.safeParse(value).success;
 }
 
 export const ArgValuesSchema = z.record(z.string(), z.unknown());
@@ -284,6 +291,16 @@ export const DeploymentPlanSchema = createRequestSchema<DeploymentPlan>(
       if (Array.isArray(value)) value.forEach((entry, index) => visitRefs(entry, [...path, index]));
       else if (value && typeof value === 'object') Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => visitRefs(entry, [...path, key]));
     };
+    const visitBooks = (value: unknown, path: (string | number)[], allowed: boolean): void => {
+      if (value && typeof value === 'object' && !Array.isArray(value) && '$book' in (value as Record<string, unknown>)) {
+        if (!allowed) { ctx.addIssue({ code: 'custom', message: '$book is only valid inside step args', path }); return; }
+        if (!BookPointerSchema.safeParse(value).success)
+          ctx.addIssue({ code: 'custom', message: '$book value is malformed', path });
+        return;
+      }
+      if (Array.isArray(value)) value.forEach((entry, childIndex) => visitBooks(entry, [...path, childIndex], allowed));
+      else if (value && typeof value === 'object') Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => visitBooks(entry, [...path, key], allowed));
+    };
     // Fail-closed: anything carrying an `$encode` key must fully parse, so a
     // malformed marker cannot slip through as an ordinary object.
     const visitEncodes = (value: unknown, path: (string | number)[], allowed: boolean): void => {
@@ -308,6 +325,8 @@ export const DeploymentPlanSchema = createRequestSchema<DeploymentPlan>(
         // synthesis spec knows the `_data` position) and lives in core
         // validation, not here.
         visitRefs(step.args, ['steps', index, 'args']); visitRefs(step.argsPerChain, ['steps', index, 'argsPerChain']);
+        visitBooks(step.args, ['steps', index, 'args'], true); visitBooks(step.argsPerChain, ['steps', index, 'argsPerChain'], true);
+        visitBooks(step.libraries, ['steps', index, 'libraries'], false); visitBooks(step.librariesPerChain, ['steps', index, 'librariesPerChain'], false);
         visitEncodes(step.args, ['steps', index, 'args'], true); visitEncodes(step.argsPerChain, ['steps', index, 'argsPerChain'], true);
         if (step.strategy?.kind === 'plugin') visitEncodes(step.strategy.params, ['steps', index, 'strategy', 'params'], false);
         Object.entries(step.libraries ?? {}).forEach(([key, binding]) => { if (binding.kind === 'step') checkDeployId(binding.stepId, ['steps', index, 'libraries', key]); });
@@ -316,6 +335,8 @@ export const DeploymentPlanSchema = createRequestSchema<DeploymentPlan>(
         if (step.target.kind === 'step') checkDeployId(step.target.stepId, ['steps', index, 'target']);
         Object.entries(step.targetPerChain ?? {}).forEach(([chainId, target]) => { if (target.kind === 'step') checkDeployId(target.stepId, ['steps', index, 'targetPerChain', chainId]); });
         visitRefs(step.args, ['steps', index, 'args']); visitRefs(step.argsPerChain, ['steps', index, 'argsPerChain']);
+        visitBooks(step.args, ['steps', index, 'args'], true); visitBooks(step.argsPerChain, ['steps', index, 'argsPerChain'], true);
+        visitBooks(step.target, ['steps', index, 'target'], false); visitBooks(step.targetPerChain, ['steps', index, 'targetPerChain'], false);
         visitEncodes(step.args, ['steps', index, 'args'], true); visitEncodes(step.argsPerChain, ['steps', index, 'argsPerChain'], true);
       }
     });
@@ -586,6 +607,7 @@ export interface RunRecord {
   status: RunStatus;
   simulationTiers?: Record<string, 'simulateV1' | 'fork' | 'estimate'>;
   workflow?: WorkflowRunBinding;
+  bookResolutions?: BookResolutions;
   hookRuns?: Record<string, HookRunRecord>;
   repoArtifact?: RepoArtifactOutcome;
 }
@@ -852,6 +874,7 @@ export const RunRecordSchema = z.object({
   status: RunStatusSchema,
   simulationTiers: z.record(ChainIdKeySchema, z.enum(['simulateV1', 'fork', 'estimate'])).optional(),
   workflow: WorkflowRunBindingSchema.optional(),
+  bookResolutions: z.record(ChainIdKeySchema, z.array(z.object({ stepId: z.string().min(1), argPath: z.string().min(1), entry: z.string().min(1), address: AddressSchema, source: z.enum(['local', 'repo']), bookHash: z.string().regex(SHA256_HEX) }).strict())).optional(),
   hookRuns: z.record(z.string().min(1), HookRunRecordSchema).optional(),
   repoArtifact: RepoArtifactOutcomeSchema.optional(),
 }) satisfies z.ZodType<RunRecord>;
@@ -1041,12 +1064,15 @@ export interface ValidateDeploymentRequest {
   rpcSelection: RpcSelection;
   explorerSelection?: Record<string, string[]>;
   workflow?: WorkflowRunRequest;
+  expectedBookHash?: Record<string, string>;
 }
 
 export interface ValidateDeploymentData {
   chains: Record<string, ChainChecklist>;
   run?: ValidationReport['run'];
   frozenCandidates?: FrozenInputs;
+  bookResolutions?: BookResolutions;
+  bookHashes?: Record<string, string>;
 }
 
 // Server-authoritative preview: the client supplies draft plan context, never
@@ -1244,6 +1270,7 @@ export const ValidateDeploymentRequestSchema =
       rpcSelection: RpcSelectionSchema,
       explorerSelection: DeploymentExplorerSelectionSchema.optional(),
       workflow: WorkflowRunRequestSchema.optional(),
+      expectedBookHash: z.record(z.string().min(1), z.string().regex(SHA256_HEX)).optional(),
     }),
   );
 
@@ -1255,6 +1282,8 @@ export const ValidateDeploymentResponseSchema =
       chains: z.record(ChainIdKeySchema, ChainChecklistSchema),
       run: ValidationReportSchema.shape.run,
       frozenCandidates: z.record(z.string(), FrozenInputSchema).optional(),
+      bookResolutions: z.record(ChainIdKeySchema, z.array(z.object({ stepId: z.string().min(1), argPath: z.string().min(1), entry: z.string().min(1), address: AddressSchema, source: z.enum(['local', 'repo']), bookHash: z.string().regex(SHA256_HEX) }).strict())).optional(),
+      bookHashes: z.record(z.string().min(1), z.string().regex(SHA256_HEX)).optional(),
     }),
   );
 
@@ -1266,6 +1295,7 @@ export const CreateRunRequestSchema = createRequestSchema<CreateRunRequest>(
     rpcSelection: RpcSelectionSchema,
     explorerSelection: DeploymentExplorerSelectionSchema.optional(),
     workflow: WorkflowRunRequestSchema.optional(),
+    expectedBookHash: z.record(z.string().min(1), z.string().regex(SHA256_HEX)).optional(),
     name: z.string().min(1).optional(),
     idempotencyKey: z.string().min(1),
   }),

@@ -29,6 +29,7 @@ export * from "./explorers.js";
 export * from "./verifications.js";
 export * from "./workflows.js";
 export * from "./workflowEdit.js";
+export * from "./addressBook.js";
 
 import { systemRoutes } from "./system.js";
 import { profileRoutes } from "./profiles.js";
@@ -52,6 +53,7 @@ import { contractTypeRoutes } from "./contractTypes.js";
 import { explorerRoutes } from "./explorers.js";
 import { verificationRoutes } from "./verifications.js";
 import { workflowRoutes } from "./workflows.js";
+import { addressBookRoutes } from './addressBook.js';
 
 export interface IApiError {
   statusCode: 400 | 401 | 403 | 404 | 409 | 422 | 499 | 500 | 503;
@@ -102,6 +104,7 @@ const allRoutes = {
   ...explorerRoutes,
   ...verificationRoutes,
   ...workflowRoutes,
+  ...addressBookRoutes,
 } as const;
 
 export const v1Routes = allRoutes satisfies ValidateRoutes<typeof allRoutes>;

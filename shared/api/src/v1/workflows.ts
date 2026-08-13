@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { V1_BASE_PATH } from './constants.js';
 import { createApiResponseSchema } from '../utils/schema.js';
 import { JobStartedResponseSchema } from './jobs.js';
-import { DeploymentPlanSchema, type DeploymentPlan } from './deployments.js';
+import { BookPointerSchema, DeploymentPlanSchema, type DeploymentPlan } from './deployments.js';
 import { PluginVersionInfoSchema, type PluginVersionInfoData } from './plugins/versions.js';
 
 const CHAIN_ID_KEY = /^[1-9]\d*$/;
@@ -256,6 +256,10 @@ const WorkflowStepSchema = z.discriminatedUnion('kind', [
   if (step.kind === 'deploy' && step.strategy?.kind === 'plugin') payloadIssue(step.strategy.params, ctx, ['strategy', 'params']);
   const checkRefs = (value: unknown, path: (string | number)[]): void => {
     if (!value || typeof value !== 'object') return;
+    if (!Array.isArray(value) && '$book' in (value as Record<string, unknown>)) {
+      if (!BookPointerSchema.safeParse(value).success) ctx.addIssue({ code: 'custom', message: 'invalid strict $book value', path });
+      return;
+    }
     if (!Array.isArray(value) && '$ref' in (value as Record<string, unknown>)) {
       const parsed = ValueRefSchema.safeParse(value);
       if (!parsed.success) ctx.addIssue({ code: 'custom', message: 'invalid strict $ref value', path });
