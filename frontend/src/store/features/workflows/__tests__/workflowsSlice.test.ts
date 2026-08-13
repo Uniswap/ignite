@@ -11,6 +11,10 @@ import {
   workflowListRequested,
   workflowListLoaded,
   workflowListFailed,
+  localWorkflowListLoaded,
+  localWorkflowListRequested,
+  workflowDocumentLoaded,
+  LOCAL_WORKFLOW_REPO,
   workflowInstallStarted,
   workflowInstallFailed,
   workflowInstallSucceeded,
@@ -72,6 +76,22 @@ describe('workflowsSlice', () => {
     state = workflowsReducer(state, setCurrentProfile('profile-b'));
 
     expect(state.statusByProfileAndRepo).toEqual({});
+  });
+
+  it('clears local lists and documents on profile switch and drops a late prior-profile list', () => {
+    let state = workflowsReducer(undefined, localWorkflowListRequested({ profileId: 'profile-a', generation: 1 }));
+    state = workflowsReducer(state, localWorkflowListLoaded({ profileId: 'profile-a', generation: 1, workflows: [summary], truncated: false }));
+    state = workflowsReducer(state, workflowDocumentLoaded({ repoPathOrUrl: LOCAL_WORKFLOW_REPO, name: 'release', document: {} as never, raw: '{}', docHash: 'a'.repeat(64) }));
+    state = workflowsReducer(state, setCurrentProfile('profile-b'));
+    state = workflowsReducer(state, localWorkflowListLoaded({ profileId: 'profile-a', generation: 1, workflows: [summary], truncated: false }));
+
+    expect(state.byRepo[LOCAL_WORKFLOW_REPO]).toBeUndefined();
+    expect(state.documentsByKey[`${LOCAL_WORKFLOW_REPO}\0release`]).toBeUndefined();
+  });
+
+  it('uses a non-filesystem local sentinel', () => {
+    expect(LOCAL_WORKFLOW_REPO).toContain('\0');
+    expect(encodeURIComponent(LOCAL_WORKFLOW_REPO)).toContain('%00');
   });
 
   it('drops a stale status response without replacing the newer entry', () => {

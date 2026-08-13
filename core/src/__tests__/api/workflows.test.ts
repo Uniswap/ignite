@@ -8,6 +8,7 @@ import { RepoService } from '../../repos/RepoService.js';
 import type { FileSystem } from '../../filesystem/FileSystem.js';
 import type { ProfileManager } from '../../filesystem/ProfileManager.js';
 import { registerApi } from '../../api/index.js';
+import { LocalWorkflowStore } from '../../workflows/LocalWorkflowStore.js';
 
 const dirs: string[] = [];
 let app: FastifyInstance;
@@ -31,16 +32,37 @@ async function write(name: string, contents: string): Promise<void> {
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'ignite-workflows-')); dirs.push(root);
   const repos = new RepoService({ fileSystem: { getReposPath: () => '/unused' } as unknown as FileSystem, profiles: { getCurrentProfile: () => 'p1' } as unknown as ProfileManager });
-  const handlers = createWorkflowHandlers({ repos, devMode: () => false });
+  const localWorkflows = new LocalWorkflowStore({ fileSystem: { getProfileLocalWorkflowsPath: (profileId) => path.join(root, 'profiles', profileId, 'workflows', 'local') }, devMode: () => false });
+  const handlers = createWorkflowHandlers({ repos, devMode: () => false, localWorkflows, getProfileId: async () => 'p1' });
   app = fastify();
   app.get('/api/v1/repos/workflows', handlers.listWorkflows);
   app.get('/api/v1/repos/workflows/:name', handlers.getWorkflow);
   app.put('/api/v1/repos/workflows/:name', handlers.putWorkflow);
+  app.get('/api/v1/workflows/local', handlers.listLocalWorkflows);
+  app.get('/api/v1/workflows/local/:name', handlers.getLocalWorkflow);
+  app.put('/api/v1/workflows/local/:name', handlers.putLocalWorkflow);
   await app.ready();
 });
 afterAll(async () => { await Promise.all(dirs.map((dir) => fs.rm(dir, { recursive: true, force: true }))); });
 
 describe('workflow discovery/read/save API', () => {
+  it('lists, reads, and saves profile-local workflows without a repository', async () => {
+    const created = await app.inject({ method: 'PUT', url: '/api/v1/workflows/local/release', payload: { document: document() } });
+    expect(created.statusCode).toBe(200);
+    const list = await app.inject({ method: 'GET', url: '/api/v1/workflows/local' });
+    expect(list.json().data.workflows).toEqual([expect.objectContaining({ name: 'release', valid: true })]);
+    const read = await app.inject({ method: 'GET', url: '/api/v1/workflows/local/release' });
+    expect(read.json().data.document).toEqual(document());
+    const conflict = await app.inject({ method: 'PUT', url: '/api/v1/workflows/local/release', payload: { document: document() } });
+    expect(conflict.json()).toMatchObject({ code: 'WORKFLOW_BASE_HASH_REQUIRED' });
+  });
+
+  it('rejects Windows reserved device names through the local workflow API', async () => {
+    const response = await app.inject({ method: 'PUT', url: '/api/v1/workflows/local/CON', payload: { document: document() } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ code: 'WORKFLOW_NAME_INVALID', message: 'Local workflow name cannot be a Windows reserved device name' });
+  });
+
   it('lists valid and invalid files, reports oversized entries, and handles a missing directory', async () => {
     const emptyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ignite-workflows-empty-')); dirs.push(emptyRoot);
     expect((await app.inject({ method: 'GET', url: `/api/v1/repos/workflows?pathOrUrl=${encodeURIComponent(emptyRoot)}` })).json()).toEqual({ data: { workflows: [], truncated: false } });

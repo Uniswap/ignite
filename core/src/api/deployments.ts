@@ -40,6 +40,7 @@ import { sendCaughtError } from './utils/errors.js';
 import { RepoService } from '../repos/RepoService.js';
 import { WorkflowHttpError, readWorkflowDocument } from './workflows.js';
 import { InstalledWorkflowStore } from '../workflows/InstalledWorkflowStore.js';
+import { LocalWorkflowStore } from '../workflows/LocalWorkflowStore.js';
 
 type ProfileSource = { getCurrentProfile(): string };
 type RunIdParams = { runId: string };
@@ -73,6 +74,7 @@ export interface DeploymentHandlerDeps {
   deploymentTypes: Pick<DeploymentTypeService, 'prepare'>;
   readWorkflow: (repoPathOrUrl: string, name: string) => Promise<{ document: WorkflowDocument; raw: string; docHash: string }>;
   installedWorkflows: Pick<InstalledWorkflowStore, 'get'>;
+  localWorkflows: Pick<LocalWorkflowStore, 'read'>;
 }
 
 export function createDeploymentHandlers(
@@ -110,6 +112,7 @@ export function createDeploymentHandlers(
     readWorkflow:
       deps?.readWorkflow ?? ((repoPathOrUrl, name) => readWorkflowDocument(RepoService.getInstance(), repoPathOrUrl, name, process.env.NODE_ENV === 'development')),
     installedWorkflows: deps?.installedWorkflows ?? new InstalledWorkflowStore(),
+    localWorkflows: deps?.localWorkflows ?? new LocalWorkflowStore(),
   };
   const profileId = async () =>
     (await d.getProfileManager()).getCurrentProfile();
@@ -161,7 +164,15 @@ export function createDeploymentHandlers(
   // own current profile internally; that pre-existing behavior is out of scope.
   const workflowContext = async (profile: string, workflow: WorkflowRunRequest | undefined, plan: ValidateDeploymentRequest['plan']) => {
     if (!workflow) return undefined;
-    const read = await d.readWorkflow(workflow.repoPathOrUrl, workflow.name);
+    const read = workflow.local
+      ? await d.localWorkflows.read(profile, workflow.name)
+      : await d.readWorkflow(workflow.repoPathOrUrl, workflow.name);
+    if (workflow.local) {
+      const undeclared = workflow.hooks.filter((hook) => !read.document.outputs.hooks.includes(hook));
+      if (undeclared.length > 0) throw new IgniteError('Selected hooks are not declared by the workflow', 'WORKFLOW_HOOK_NOT_DECLARED', { pluginIds: undeclared });
+      validateExternalResolutions(plan, workflow.resolutions ?? []);
+      return { document: read.document, binding: { ...workflow, docHash: read.docHash } };
+    }
     const installed = await d.installedWorkflows.get(profile, workflow.repoPathOrUrl, workflow.name);
     if (!installed?.installed || installed.installed.docHash !== read.docHash)
       throw new WorkflowHttpError(409, 'WORKFLOW_OUT_OF_SYNC', `Workflow ${workflow.name} is out of sync; install or update it before running`);

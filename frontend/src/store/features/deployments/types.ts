@@ -99,6 +99,7 @@ export interface DeployDraftState {
   workflowRef?: {
     repoPathOrUrl: string;
     name: string;
+    local?: true;
     baseDocHash: string;
     docHash: string;
   };

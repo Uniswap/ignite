@@ -115,10 +115,12 @@ describe('Workflow document schema', () => {
   });
 
   it('accepts only minted UUIDv4 run ids on promotion wires', () => {
-    const target = { repoPathOrUrl: '/repo', name: 'release' };
+    const target = { kind: 'repo' as const, repoPathOrUrl: '/repo', name: 'release' };
     const runId = '11111111-1111-4111-8111-111111111111';
     expect(WorkflowPromoteRequestSchema.safeParse({ mode: 'preview', target, runId }).success).toBe(true);
     expect(WorkflowPromoteRequestSchema.safeParse({ mode: 'preview', target, runId: '../../../other-profile' }).success).toBe(false);
     expect(WorkflowPromoteRequestSchema.safeParse({ mode: 'apply', previewId: 'p', target, runId, hooks: [], adoptRunIds: ['../escape'] }).success).toBe(false);
+    expect(WorkflowPromoteRequestSchema.safeParse({ mode: 'preview', target: { kind: 'local', name: 'local-release' }, source: { kind: 'local', name: 'source-release' } }).success).toBe(true);
+    expect(WorkflowPromoteRequestSchema.safeParse({ mode: 'preview', target: { name: 'release' }, plan: document() }).success).toBe(false);
   });
 });

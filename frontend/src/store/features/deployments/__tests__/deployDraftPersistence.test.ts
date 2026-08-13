@@ -55,6 +55,24 @@ describe('deployDraftPersistence', () => {
     expect(loadDraft(storage)).toEqual(draft);
   });
 
+  it('preserves local workflow identity through storage', () => {
+    const storage = fakeStorage();
+    const draft = {
+      ...draftWithContracts(),
+      workflowRef: {
+        repoPathOrUrl: '\0local-workflows',
+        name: 'release',
+        local: true as const,
+        baseDocHash: 'a'.repeat(64),
+        docHash: 'a'.repeat(64),
+      },
+    };
+
+    saveDraft(draft, storage);
+
+    expect(loadDraft(storage)?.workflowRef).toEqual(draft.workflowRef);
+  });
+
   it('round-trips synthesized wrapper state, including the explicit empty initializer choice', () => {
     const storage = fakeStorage();
     let draft = deployDraftReducer(undefined, seedDraft([contract('token', 'Token')]));

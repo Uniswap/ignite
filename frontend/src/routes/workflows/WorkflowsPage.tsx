@@ -8,6 +8,7 @@ import { workflowsApi } from '../../store/features/workflows/workflowsApi';
 import { pluginsApi } from '../../store/features/plugins/pluginsSlice';
 import {
   workflowOriginsApprovalCleared,
+  LOCAL_WORKFLOW_REPO,
 } from '../../store/features/workflows/workflowsSlice';
 
 export default function WorkflowsPage() {
@@ -29,6 +30,7 @@ export default function WorkflowsPage() {
   );
 
   useEffect(() => {
+    if (profileId) workflowsApi.listLocal(profileId).forEach((action) => dispatch(action));
     repos.forEach((repo) => {
       workflowsApi.list(repo.pathOrUrl).forEach((action) => dispatch(action));
       if (profileId) {
@@ -58,14 +60,15 @@ export default function WorkflowsPage() {
     });
   const hasWorkflows = repos.some(
     (repo) => (workflowLists[repo.pathOrUrl]?.workflows.length ?? 0) > 0
-  );
+  ) || (workflowLists[LOCAL_WORKFLOW_REPO]?.workflows.length ?? 0) > 0;
+  const localWorkflows = workflowLists[LOCAL_WORKFLOW_REPO];
 
   return (
     <div className="text-[var(--text)]">
       <div className="mb-6">
         <h1 className="page-title">Workflows</h1>
         <p className="text-muted mt-2">
-          Persisted deployment workflows across your repositories.
+          Persisted deployment workflows in this profile and across your repositories.
         </p>
       </div>
 
@@ -78,6 +81,22 @@ export default function WorkflowsPage() {
         </div>
       ) : (
         <>
+          {(!localWorkflows || localWorkflows.loading || localWorkflows.workflows.length > 0 || localWorkflows.error) && (
+            <section className="card-milky overflow-hidden mb-6">
+              <div className="p-6 pb-3 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <h2 className="text-lg font-semibold">Local workflows</h2>
+                  <p className="text-muted mt-1">Stored privately in this profile.</p>
+                </div>
+                {(!localWorkflows || localWorkflows.loading) && <Loader2 size={18} className="animate-spin shrink-0" />}
+              </div>
+              {localWorkflows?.error ? <div className="px-6 pb-6 text-sm text-err">{localWorkflows.error}</div> : (
+                <div className="glass-list">
+                  {(localWorkflows?.workflows ?? []).map((workflow) => <WorkflowCard key={workflow.name} repoPathOrUrl={LOCAL_WORKFLOW_REPO} workflow={workflow} local />)}
+                </div>
+              )}
+            </section>
+          )}
           {visibleRepos.map((repo) => {
             const workflowList = workflowLists[repo.pathOrUrl];
             return (

@@ -97,6 +97,7 @@ export function workflowRunRequestFromDraft(
   return {
     repoPathOrUrl: draft.workflowRef.repoPathOrUrl,
     name: draft.workflowRef.name,
+    ...(draft.workflowRef.local ? { local: true as const } : {}),
     hooks,
     resolutions: draft.externalResolutions ?? [],
     ...(draft.acknowledgeArtifactDrift
