@@ -200,6 +200,9 @@ describe('DeployEngine', () => {
       getTxForProvenance: async () => ({ from: ADDRESS, to: null, input: '0x6000', value: 0n }),
       getCode: async () => '0x',
       rebroadcast: async () => TX_HASH,
+      // Keep the created-code probe fast so tests never sit out the
+      // production budget; probe-specific tests override it.
+      createdCodeProbe: { attempts: 2, intervalMs: 3 },
       ...deps,
     });
     engines.push(engine);
@@ -494,6 +497,61 @@ describe('DeployEngine', () => {
     const run = await launchDefault(harness, plan);
     await eventually(async () => (await harness.engine.get('p1', run.id))?.status === 'completed', 'dynamic create2 completed');
     expect(harness.executed[1].data.slice(0, 66)).toBe(salt);
+  });
+
+  it('confirms a deterministic deploy whose code visibility lags the receipt', async () => {
+    const salt = `0x${'57'.repeat(32)}` as const;
+    const plan = dynamicPlan({ kind: 'create2', salt });
+    let reads = 0;
+    const harness = makeEngine({
+      validate: async () => dynamicValidation(plan),
+      // Read 1 is the JIT collision check; the post-receipt probe starts at
+      // read 2 and must survive one stale answer before the code appears.
+      getCode: async () => ++reads > 2 ? '0x01' : '0x',
+      createdCodeProbe: { attempts: 4, intervalMs: 5 },
+    });
+    const run = await launchDefault(harness, plan);
+    await eventually(async () => (await harness.engine.get('p1', run.id))?.status === 'completed', 'laggy code visibility confirmed');
+    const step = (await harness.engine.get('p1', run.id))!.lanes['1'].steps[1];
+    expect(step.status).toBe('confirmed');
+    expect(step.address).toBe(step.predictedAddress);
+  });
+
+  it('pauses created-code-missing only after the probe budget is spent', async () => {
+    const salt = `0x${'58'.repeat(32)}` as const;
+    const plan = dynamicPlan({ kind: 'create2', salt });
+    let reads = 0;
+    const harness = makeEngine({
+      validate: async () => dynamicValidation(plan),
+      getCode: async () => { reads += 1; return '0x'; },
+      createdCodeProbe: { attempts: 3, intervalMs: 5 },
+    });
+    const run = await launchDefault(harness, plan);
+    await eventually(async () => (await harness.engine.get('p1', run.id))?.lanes['1'].pause?.reason === 'created-code-missing', 'probe budget exhausted');
+    // 1 JIT collision read + the full probe budget before the verdict.
+    expect(reads).toBeGreaterThanOrEqual(4);
+    expect((await harness.engine.get('p1', run.id))!.lanes['1'].steps[1].status).toBe('failed');
+  });
+
+  it('exits verdict-free when the engine shuts down mid-probe', async () => {
+    const salt = `0x${'59'.repeat(32)}` as const;
+    const plan = dynamicPlan({ kind: 'create2', salt });
+    let reads = 0;
+    const harness = makeEngine({
+      validate: async () => dynamicValidation(plan),
+      getCode: async () => { reads += 1; return '0x'; },
+      createdCodeProbe: { attempts: 5, intervalMs: 60_000 },
+    });
+    const run = await launchDefault(harness, plan);
+    await eventually(() => reads >= 2, 'probe started');
+    await harness.engine.shutdown();
+    const parked = (await harness.store.get('p1', run.id))!;
+    // No created-code-missing verdict may be written without evidence: the
+    // attempt keeps its submitted state and startup recovery re-derives the
+    // receipt from the persisted txHash/rawTx.
+    expect(parked.lanes['1'].pause).toBeUndefined();
+    expect(parked.lanes['1'].steps[1].status).toBe('broadcasting');
+    expect(parked.lanes['1'].steps[1].attempts[0].txStatus).toBeUndefined();
   });
 
   it('recovers a real attempt when restarted after atomic JIT persistence before send', async () => {
@@ -1358,6 +1416,7 @@ describe('final-review regressions', () => {
       writeArtifact: async () => undefined, getReceipt: async () => undefined,
       getTxForProvenance: async () => ({ from: ADDRESS, to: null, input: '0x6000', value: 0n }), getCode: async () => '0x',
       getStorageAt: async () => `0x${'0'.repeat(64)}` as `0x${string}`, call: async () => '0x', rebroadcast: async () => TX_HASH,
+      createdCodeProbe: { attempts: 2, intervalMs: 3 },
       ...deps,
     });
     return { engine, store };
@@ -1559,8 +1618,9 @@ describe('final-review regressions', () => {
       deploymentTypes: { prepare: async (_id, input) => ({ salt, predictedAddress: predictCreate2Address(salt, initcodeHashOf(input.initcode)), notes: [] }), list: async () => [], validate: async () => ({ ok: true }) },
       getCode: async () => {
         codeReads += 1;
-        // JIT collision check, then confirmation check, then recheck.
-        if (path === 'created-code-missing') return codeReads >= 3 ? '0x6001' : '0x';
+        // JIT collision check, then the two-attempt confirmation probe,
+        // then recheck.
+        if (path === 'created-code-missing') return codeReads >= 4 ? '0x6001' : '0x';
         return '0x6001';
       },
       getStorageAt: async () => `0x${'0'.repeat(24)}${ADDRESS.slice(2)}` as `0x${string}`,
