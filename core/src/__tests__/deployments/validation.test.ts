@@ -681,15 +681,19 @@ describe('storageSlotChanges', () => {
   it('rebuilds the schedule and delegates the requested step to a fork fake', async () => {
     const trace = vi.fn(async () => ({ storage: { [ADDRESS]: [] } }));
     const runner = { run: vi.fn(), storageSlotChanges: trace };
-    await expect(storageSlotChanges(plan(), { '1': 'rpc-1' }, 1, 'deploy-token', {
+    const makeForkRunner = vi.fn(async () => runner);
+    const getTransactionCount = vi.fn(async () => 0);
+    await expect(storageSlotChanges(plan(), { '1': 'rpc-1' }, 1, 'deploy-token', 123, {
       freezeContractTypes: vi.fn(async () => ({})),
       freezeInputs: vi.fn(async () => frozen),
       resolveRpcEndpoint: vi.fn(async () => ({ id: 'rpc-1', url: 'https://rpc.example/secret' })),
       listAccounts: vi.fn(async () => [{ pluginId: 'key', name: 'Key', state: 'ok', accounts: [{ id: 'account', address: ADDRESS }] }]),
-      createClient: vi.fn(() => ({ estimateGas: async () => 0n, getBalance: async () => 0n, estimateFeesPerGas: async () => ({}), getTransactionCount: async () => 0, getCode: async () => '0x' as `0x${string}` })),
+      createClient: vi.fn(() => ({ estimateGas: async () => 0n, getBalance: async () => 0n, estimateFeesPerGas: async () => ({}), getTransactionCount, getCode: async () => '0x' as `0x${string}` })),
       deploymentTypes: { prepare: vi.fn(), list: vi.fn(), validate: vi.fn() },
-      makeForkRunner: vi.fn(async () => runner),
+      makeForkRunner,
     })).resolves.toEqual({ storage: { [ADDRESS]: [] } });
+    expect(makeForkRunner).toHaveBeenCalledWith(expect.objectContaining({ forkBlockNumber: 123 }));
+    expect(getTransactionCount).toHaveBeenCalledWith(expect.objectContaining({ blockNumber: 123n }));
     expect(trace).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ stepId: 'deploy-token' })]), 'deploy-token');
   });
 });

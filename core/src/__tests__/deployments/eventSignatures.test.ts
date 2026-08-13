@@ -16,6 +16,19 @@ describe('event signature lookup', () => {
   });
 
   it('tolerates lookup failures', async () => {
-    await expect(lookupEventSignature(TOPIC, async () => { throw new Error('offline'); })).resolves.toBeUndefined();
+    const fetcher = vi.fn(async () => { throw new Error('offline'); });
+    await expect(lookupEventSignature(TOPIC, fetcher)).resolves.toBeUndefined();
+    await expect(lookupEventSignature(TOPIC, fetcher)).resolves.toBeUndefined();
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it('coalesces concurrent lookups for the same topic', async () => {
+    let resolve!: (response: Response) => void;
+    const fetcher = vi.fn(() => new Promise<Response>((done) => { resolve = done; }));
+    const first = lookupEventSignature(TOPIC, fetcher);
+    const second = lookupEventSignature(TOPIC, fetcher);
+    resolve(new Response(JSON.stringify({ results: [{ text_signature: 'Ping(uint256)' }] }), { status: 200 }));
+    await expect(Promise.all([first, second])).resolves.toEqual(['Ping(uint256)', 'Ping(uint256)']);
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 });

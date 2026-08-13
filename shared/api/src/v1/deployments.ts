@@ -477,6 +477,9 @@ export interface StorageSlotChangesRequest {
   rpcSelection: RpcSelection;
   chainId: number;
   stepId: string;
+  // The review simulation's chain snapshot. Omit to retain the prior
+  // latest-block behavior for older clients.
+  baseBlock?: number;
 }
 
 export interface StorageSlotChangesData {
@@ -1317,6 +1320,7 @@ export const StorageSlotChangesRequestSchema =
       rpcSelection: RpcSelectionSchema,
       chainId: z.number().int().positive(),
       stepId: z.string().min(1),
+      baseBlock: z.number().int().nonnegative().optional(),
     }).superRefine((request, ctx) => {
       if (!request.plan.chains.includes(request.chainId))
         ctx.addIssue({ code: 'custom', message: 'chainId must be included in plan.chains', path: ['chainId'] });

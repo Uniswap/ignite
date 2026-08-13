@@ -371,9 +371,28 @@ describe('deployment route handlers', () => {
       storageSlotChanges,
     });
     const res = reply();
-    await handlers.getStorageSlotChanges(request({ plan, rpcSelection: { '1': 'rpc' }, chainId: 1, stepId: 's' }) as never, res);
+    await handlers.getStorageSlotChanges(request({ plan, rpcSelection: { '1': 'rpc' }, chainId: 1, stepId: 's', baseBlock: 123 }) as never, res);
     expect(res.statusCode).toBe(200);
-    expect(storageSlotChanges).toHaveBeenCalledWith(plan, { '1': 'rpc' }, 1, 's', { profileId: 'one' });
+    expect(storageSlotChanges).toHaveBeenCalledWith(plan, { '1': 'rpc' }, 1, 's', 123, { profileId: 'one' });
+  });
+
+  it('rejects a second concurrent storage trace while the first is running', async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const handlers = createDeploymentHandlers({
+      engine: { launch: vi.fn(), resolveLane: vi.fn(), resume: vi.fn(), abort: vi.fn() } as never,
+      getProfileManager: async () => ({ getCurrentProfile: () => 'one' }),
+      storageSlotChanges: vi.fn(async () => { await pending; return { storage: {} }; }),
+    });
+    const body = { plan, rpcSelection: { '1': 'rpc' }, chainId: 1, stepId: 's' };
+    const first = handlers.getStorageSlotChanges(request(body) as never, reply());
+    await Promise.resolve();
+    const secondReply = reply();
+    await handlers.getStorageSlotChanges(request(body) as never, secondReply);
+    expect(secondReply.statusCode).toBe(409);
+    expect(secondReply.body).toMatchObject({ code: ErrorCodes.DEPLOYMENT_STORAGE_TRACE_BUSY });
+    finish();
+    await first;
   });
 
   it('returns a cached event signature lookup result', async () => {

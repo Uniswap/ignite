@@ -98,10 +98,11 @@ type Client = {
     maxFeePerGas?: bigint;
     maxPriorityFeePerGas?: bigint;
   }>;
-  getCode?(args: { address: Hex }): Promise<Hex>;
+  getCode?(args: { address: Hex; blockNumber?: bigint }): Promise<Hex>;
   getTransactionCount?(args: {
     address: Hex;
     blockTag?: 'latest';
+    blockNumber?: bigint;
   }): Promise<number | bigint>;
   getBlockNumber?(): Promise<number | bigint>;
   simulateBlocks?(args: unknown): Promise<unknown>;
@@ -159,6 +160,7 @@ export interface ValidationDeps {
   makeForkRunner: (opts: {
     rpcUrl: string;
     chainId: number;
+    forkBlockNumber?: number;
   }) => Promise<ForkRunner | undefined>;
   workflow?: { document: WorkflowDocument; binding: WorkflowRunBinding };
   resolveHookStatus: (pluginId: string) => Promise<'ready' | 'missing' | 'untrusted'>;
@@ -436,6 +438,7 @@ export async function storageSlotChanges(
   rpcSelection: RpcSelection,
   chainId: number,
   stepId: string,
+  baseBlock?: number,
   overrides?: Partial<ValidationDeps>,
 ): Promise<StorageSlotChangesData> {
   if (!plan.chains.includes(chainId)) throw new Error(`Chain ${chainId} is not in this plan`);
@@ -453,6 +456,7 @@ export async function storageSlotChanges(
     client,
     signers: signerResults.signers,
     deploymentTypes: deps.deploymentTypes,
+    ...(baseBlock === undefined ? {} : { blockNumber: BigInt(baseBlock) }),
   });
   if (predictions.nonceError) throw new Error(`Storage replay cannot read account nonces: ${predictions.nonceError}`);
   const schedulePredictions = Object.fromEntries(
@@ -464,7 +468,11 @@ export async function storageSlotChanges(
     confirmedExisting: predictions.confirmedExisting,
     predictions: schedulePredictions,
   });
-  const fork = await deps.makeForkRunner({ rpcUrl: endpoint.url, chainId });
+  const fork = await deps.makeForkRunner({
+    rpcUrl: endpoint.url,
+    chainId,
+    ...(baseBlock === undefined ? {} : { forkBlockNumber: baseBlock }),
+  });
   if (!fork) throw new Error('Storage slot changes require Docker and the foundry image');
   return fork.storageSlotChanges(schedule, stepId);
 }

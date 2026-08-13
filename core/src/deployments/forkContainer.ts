@@ -109,8 +109,12 @@ export function storageDiff(trace: unknown): Record<string, StorageSlotChange[]>
   return result;
 }
 
+export function storageTraceTarget(entry: ScheduleEntry): Hex | undefined {
+  return entry.address ?? entry.predictedAddress ?? entry.to ?? undefined;
+}
+
 export async function makeForkRunner(
-  opts: { rpcUrl: string; chainId: number },
+  opts: { rpcUrl: string; chainId: number; forkBlockNumber?: number },
   deps?: { docker?: ForkDocker }
 ): Promise<ForkRunner | undefined> {
   const rawDocker = new Docker();
@@ -142,7 +146,7 @@ export async function makeForkRunner(
       // The foundry image's default entrypoint wraps Cmd; override it or the
       // shell invocation never runs (container exits, RPC never comes up).
       Entrypoint: ['sh', '-c'],
-      Cmd: ['anvil --fork-url "$(cat /run/ignite-fork-url)" --host 0.0.0.0 --port 8545'],
+      Cmd: [`anvil --fork-url "$(cat /run/ignite-fork-url)" --host 0.0.0.0 --port 8545${opts.forkBlockNumber === undefined ? '' : ` --fork-block-number ${opts.forkBlockNumber}`}`],
       HostConfig: {
         AutoRemove: true,
         PortBindings: { '8545/tcp': [{ HostPort: '' }] },
@@ -160,6 +164,10 @@ export async function makeForkRunner(
     const cleanup = async () => {
       try {
         await owned.stop({ t: 1 });
+      } catch {
+        // A failed stop can leave a running container behind despite
+        // AutoRemove, so force removal just as setup-error cleanup does.
+        await owned.remove({ force: true, v: true }).catch(() => {});
       } finally {
         release();
         if (urlFile) await fs.rm(urlFile, { force: true }).catch(() => {});
@@ -256,6 +264,7 @@ export async function makeForkRunner(
             if (!entry.from || !entry.data || entry.value === undefined)
               throw new Error(`Schedule entry ${entry.stepId} is incomplete`);
             await rpc.request({ method: 'anvil_impersonateAccount', params: [entry.from] });
+            // Deliberately mirrors run(): replay must use the same funding.
             await rpc.request({ method: 'anvil_setBalance', params: [entry.from, hex(10n ** 24n)] });
             const hash = (await rpc.request({
               method: 'eth_sendTransaction',
@@ -271,7 +280,7 @@ export async function makeForkRunner(
             method: 'debug_traceTransaction',
             params: [targetHash, { tracer: 'prestateTracer', tracerConfig: { diffMode: true } }],
           });
-          const target = schedule[targetIndex]?.to ?? undefined;
+          const target = storageTraceTarget(schedule[targetIndex]!);
           return { ...(target ? { target } : {}), storage: storageDiff(trace) };
         } finally {
           await cleanup();
