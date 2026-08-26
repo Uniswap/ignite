@@ -222,44 +222,50 @@ describe('planFromDraft', () => {
     });
   });
 
-  it('maps fulfilled factory products without demanding the call fields', () => {
-    // The canonical shape: the transaction is a plain call step, and every
-    // product points at it — no product carries target or signature.
+  it('maps produced products and the producer call without transaction fields', () => {
+    // The canonical shape: the transaction is a plain call step carrying the
+    // frozen abiContractId, and every product points at it via producedBy —
+    // no product carries target, signature, salt, or acknowledgements.
     const draft: DeployDraftState = {
       contracts: [
-        { id: 'jar-art:jar', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/TokenJar.json', contractName: 'TokenJar', sourcePath: 'src/TokenJar.sol' },
-        { id: 'rel-art:releaser', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/ExchangeReleaser.json', contractName: 'ExchangeReleaser', sourcePath: 'src/ExchangeReleaser.sol' },
+        { id: 'comp-1:abi', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/Producer.json', contractName: 'Producer', sourcePath: 'src/Producer.sol' },
+        { id: 'comp-1:jar', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/TokenJar.json', contractName: 'TokenJar', sourcePath: 'src/TokenJar.sol' },
+        { id: 'comp-1:releaser', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/ExchangeReleaser.json', contractName: 'ExchangeReleaser', sourcePath: 'src/ExchangeReleaser.sol' },
       ],
       chains: [1], rpcSelection: {}, explorerSelection: {}, signers: {}, unseenIds: [],
       steps: [
         {
-          id: 'call-factory-1',
+          id: 'call-comp-1',
           kind: 'call',
           target: { kind: 'address', address: `0x${'21'.repeat(20)}` },
-          signature: 'deploy(address owner, bytes32 salt) returns (address jar, address releaser)',
+          signature: 'deploy(address,bytes32)',
+          abiContractId: 'comp-1:abi',
           args: { owner: `0x${'ab'.repeat(20)}`, salt: `0x${'11'.repeat(32)}` },
         },
-        { id: 'deploy-jar-art:jar', kind: 'deploy', contractId: 'jar-art:jar' },
-        { id: 'deploy-rel-art:releaser', kind: 'deploy', contractId: 'rel-art:releaser' },
+        { id: 'deploy-comp-1:jar', kind: 'deploy', contractId: 'comp-1:jar' },
+        { id: 'deploy-comp-1:releaser', kind: 'deploy', contractId: 'comp-1:releaser' },
       ],
       deployExtras: {
-        'deploy-jar-art:jar': { strategy: { kind: 'factory', fulfilledBy: 'call-factory-1', output: 'jar' } },
-        'deploy-rel-art:releaser': { strategy: { kind: 'factory', fulfilledBy: 'call-factory-1', output: 'releaser' } },
+        'deploy-comp-1:jar': { strategy: { kind: 'plugin', pluginId: 'call-products-plugin', producedBy: { stepId: 'call-comp-1', outputIndex: 0 } } },
+        // Stale prepared/acknowledged extras must never leak onto a produced
+        // strategy: the shared schema rejects them alongside producedBy.
+        'deploy-comp-1:releaser': { strategy: { kind: 'plugin', pluginId: 'call-products-plugin', producedBy: { stepId: 'call-comp-1', outputIndex: 1 } }, prepared: { '1': { salt: `0x${'55'.repeat(32)}`, predictedAddress: `0x${'66'.repeat(20)}`, initcodeHash: `0x${'77'.repeat(32)}`, notes: [] } }, acknowledged: { '1': { predictedAddress: `0x${'66'.repeat(20)}`, initcodeHash: `0x${'77'.repeat(32)}` } } },
       },
     };
 
     const plan = planFromDraft(draft, chains);
+    expect(plan.steps[0]).toMatchObject({ kind: 'call', abiContractId: 'comp-1:abi' });
     expect(plan.steps[1]).toEqual({
-      id: 'deploy-jar-art:jar',
+      id: 'deploy-comp-1:jar',
       kind: 'deploy',
-      contractId: 'jar-art:jar',
-      strategy: { kind: 'factory', fulfilledBy: 'call-factory-1', output: 'jar' },
+      contractId: 'comp-1:jar',
+      strategy: { kind: 'plugin', pluginId: 'call-products-plugin', producedBy: { stepId: 'call-comp-1', outputIndex: 0 } },
     });
     expect(plan.steps[2]).toEqual({
-      id: 'deploy-rel-art:releaser',
+      id: 'deploy-comp-1:releaser',
       kind: 'deploy',
-      contractId: 'rel-art:releaser',
-      strategy: { kind: 'factory', fulfilledBy: 'call-factory-1', output: 'releaser' },
+      contractId: 'comp-1:releaser',
+      strategy: { kind: 'plugin', pluginId: 'call-products-plugin', producedBy: { stepId: 'call-comp-1', outputIndex: 1 } },
     });
   });
 });

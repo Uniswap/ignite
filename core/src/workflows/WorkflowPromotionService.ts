@@ -288,6 +288,11 @@ function remapStepContractIds(step: unknown, sourceIds: Map<string, string>): vo
   const record = step as Record<string, unknown>;
   if (record.kind === 'deploy' && typeof record.contractId === 'string')
     record.contractId = sourceIds.get(record.contractId) ?? record.contractId;
+  // A producer call is the only reference to its frozen ABI source, so this id
+  // needs the same remap as a deploy contractId: promotion mints fresh source
+  // ids and an unremapped abiContractId would dangle in the saved document.
+  if (record.kind === 'call' && typeof record.abiContractId === 'string')
+    record.abiContractId = sourceIds.get(record.abiContractId) ?? record.abiContractId;
   remapEncodeContractIds(record, sourceIds);
 }
 

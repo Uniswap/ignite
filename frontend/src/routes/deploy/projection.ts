@@ -141,20 +141,41 @@ function projectStep(step: WorkflowStep, chains: number[], included: Record<stri
   return result as unknown as Step;
 }
 
+// A produced product is created by its producer call and by nothing else: no
+// per-chain resolution can stand in for a contract that is never deployed, so
+// excluding the producer excludes every product it declares. Folding that into
+// one inclusion map lets the product's own dependents fall back to pointer
+// resolution exactly like any other exclusion.
+function effectiveInclusion(document: WorkflowDocument, includedStepIds: Record<string, boolean>): Record<string, boolean> {
+  const orphaned = document.steps.filter((step) => step.kind === 'deploy' && step.strategy?.kind === 'plugin' && step.strategy.producedBy && includedStepIds[step.strategy.producedBy.stepId] === false);
+  return orphaned.length ? { ...includedStepIds, ...Object.fromEntries(orphaned.map((step) => [step.id, false])) } : includedStepIds;
+}
+
+// Every contract source a projected step still names. A producer call's frozen
+// ABI source is referenced only by abiContractId — never by a deploy step — so
+// leaving it out drops it from the plan's contracts and the plan schema then
+// rejects the abiContractId reference.
+function usedContractIds(step: Step): string[] {
+  if (step.kind === 'deploy') return [step.contractId];
+  return step.abiContractId ? [step.abiContractId] : [];
+}
+
 export function collectUnboundWorkflowSlots(input: Omit<WorkflowProjectionInput, 'resolutions'> & { resolutions?: ExternalResolution[] }): UnboundWorkflowSlot[] {
+  const included = effectiveInclusion(input.document, input.includedStepIds);
   const slots: UnboundWorkflowSlot[] = [];
   for (const step of input.document.steps) {
-    if (input.includedStepIds[step.id] === false) continue;
-    projectStep(step, input.chains, input.includedStepIds, input.resolutions ?? [], slots);
+    if (included[step.id] === false) continue;
+    projectStep(step, input.chains, included, input.resolutions ?? [], slots);
   }
   return slots.filter((slot, index, all) => all.findIndex((item) => item.stepId === slot.stepId && item.path === slot.path && item.chainId === slot.chainId) === index);
 }
 
 export function projectWorkflowPlan(input: WorkflowProjectionInput): DeploymentPlan {
+  const included = effectiveInclusion(input.document, input.includedStepIds);
   const steps = input.document.steps
-    .filter((step) => input.includedStepIds[step.id] !== false)
-    .map((step) => projectStep(step, input.chains, input.includedStepIds, input.resolutions));
-  const usedSources = new Set(steps.filter((step) => step.kind === 'deploy').map((step) => step.contractId));
+    .filter((step) => included[step.id] !== false)
+    .map((step) => projectStep(step, input.chains, included, input.resolutions));
+  const usedSources = new Set(steps.flatMap(usedContractIds));
   return {
     schemaVersion: 1,
     contracts: input.document.sources.filter((source) => usedSources.has(source.id)).map((source) => {

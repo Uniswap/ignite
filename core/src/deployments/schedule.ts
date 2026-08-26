@@ -2,9 +2,7 @@ import {
   encodeDeployData,
   encodeFunctionData,
   getContractAddress,
-  parseAbiItem,
   type Abi,
-  type AbiFunction,
   type AbiParameter,
 } from 'viem';
 import {
@@ -22,21 +20,16 @@ import {
   create2Calldata,
 } from './create2.js';
 import {
-  buildFactoryCalldata,
-  decodeFactoryProducts,
-  isFactoryStrategy,
-  mergeFactoryArgs,
-  mergeFactoryTarget,
-  productAddress,
+  decodeProducedAddresses,
+  isProducedProductStep,
+  isProducedStrategy,
   productInitcodeHash,
-  resolveFactoryAddress,
-} from './factory.js';
+} from './produced.js';
 import {
   callAbiItem,
   callTargetAbi,
   dynamicDeterministicStepIds,
   effectiveValue,
-  mergeArgs,
   mergeCallTarget,
   resolveSigner,
   resolveStepValues,
@@ -87,6 +80,8 @@ type SnapshotClient = {
   call?(args: {
     to: Hex;
     data: Hex;
+    account?: Hex;
+    value?: bigint;
   }): Promise<{ data?: Hex } | Hex | undefined>;
 };
 export function hasPredicted(
@@ -193,7 +188,10 @@ export function predictPlanAddresses(
     (step): step is DeployStep =>
       step.kind === 'deploy' &&
       !dynamic.has(step.id) &&
-      (step.strategy?.kind === 'create2' || step.strategy?.kind === 'plugin')
+      // Produced products have no salt or initcode commitment; their
+      // addresses come from the producer call, never from static prediction.
+      (step.strategy?.kind === 'create2' ||
+        (step.strategy?.kind === 'plugin' && !isProducedStrategy(step.strategy)))
   );
   while (remaining.length) {
     let firstRealError: unknown;
@@ -260,7 +258,18 @@ export async function buildChainPredictions(
   }
 ): Promise<ChainPredictions> {
   validateDependencies(plan);
-  const dynamic = dynamicDeterministicStepIds(plan, chainId);
+  const producedSteps = plan.steps.filter(isProducedProductStep);
+  const producedIds = new Set(producedSteps.map((step) => step.id));
+  // Produced products ARE runtime-dynamic (only the producer's pre-broadcast
+  // simulation yields their addresses), but they have nothing to mine: they
+  // are predicted — and degraded — through the producer eth_call below. This
+  // set means "provisional address comes from runtime salt mining", so it
+  // deliberately omits them while keeping every step that POINTS at one.
+  const dynamic = new Set(
+    [...dynamicDeterministicStepIds(plan, chainId)].filter(
+      (id) => !producedIds.has(id)
+    )
+  );
   const predictions = predictPlanAddresses(plan, frozen, chainId);
   const entries: Record<string, ProvisionalPrediction> = { ...predictions };
   const signers = new Map<string, Hex>();
@@ -297,60 +306,26 @@ export async function buildChainPredictions(
         }
       })
     );
-  // One eth_call of the deploy function yields every address that call would
-  // create, so all products of a call are predicted together. Steps that name
-  // a fulfilling step share its result rather than calling again.
-  const factorySteps = plan.steps.filter(
-    (step): step is DeployStep =>
-      step.kind === 'deploy' && isFactoryStrategy(step.strategy)
-  );
-  const decodedByCall = new Map<string, Record<string, Hex>>();
-  for (const step of factorySteps) {
-    const strategy = step.strategy as Extract<
-      NonNullable<DeployStep['strategy']>,
-      { kind: 'factory' }
-    >;
+  // One eth_call of the producer call yields every address that call would
+  // create, so all products of one producer are predicted together. Products
+  // naming the same producer share its result rather than calling again.
+  const decodedByCall = new Map<string, Map<number, Hex>>();
+  for (const step of producedSteps) {
+    const strategy = step.strategy;
     const absent = (reason: string) => {
       entries[step.id] = { absent: true, provisional: true, reason };
     };
-    const callerId = strategy.fulfilledBy ?? step.id;
+    const callerId = strategy.producedBy.stepId;
     if (!decodedByCall.has(callerId)) {
-      const caller =
-        callerId === step.id
-          ? step
-          : plan.steps.find((candidate) => candidate.id === callerId);
-      // The call that deploys is ordinarily a plain call step — the honest
-      // model, since no product should have to carry the transaction. A
-      // factory step may also carry its own call when it is the only product.
-      const call =
-        caller?.kind === 'call'
-          ? {
-              signature: caller.signature,
-              target: mergeCallTarget(caller, chainId),
-              args: mergeArgs(caller, chainId),
-            }
-          : isFactoryStrategy(
-                caller?.kind === 'deploy' ? caller.strategy : undefined
-              )
-            ? (() => {
-                const factoryStrategy = (caller as DeployStep)
-                  .strategy as Extract<
-                  NonNullable<DeployStep['strategy']>,
-                  { kind: 'factory' }
-                >;
-                return {
-                  signature: factoryStrategy.signature,
-                  target: mergeFactoryTarget(factoryStrategy, chainId),
-                  args: mergeFactoryArgs(factoryStrategy, chainId),
-                };
-              })()
-            : undefined;
-      if (!call?.signature || !call.target) {
-        absent(`step ${callerId} does not make a factory call`);
+      const caller = plan.steps.find(
+        (candidate) => candidate.id === callerId
+      );
+      if (caller?.kind !== 'call' || !caller.signature) {
+        absent(`step ${callerId} does not make a producer call`);
         continue;
       }
       if (!deps.client?.call) {
-        absent('product addresses need an RPC to simulate the factory call');
+        absent('product addresses need an RPC to simulate the producer call');
         continue;
       }
       try {
@@ -359,42 +334,43 @@ export async function buildChainPredictions(
           if (hasPredicted(entry)) return entry.predictedAddress;
           throw new Error(`Missing pointer ${id}`);
         };
-        const factoryAddress =
-          call.target.kind === 'address'
-            ? call.target.address
-            : resolvePointer(call.target.stepId);
-        const fn = parseAbiItem(`function ${call.signature}`) as AbiFunction;
+        // The frozen abiContractId ABI is authoritative for the function's
+        // inputs and outputs; the ordinary call resolver supplies target,
+        // arguments and pointers exactly as the run would.
+        const fn = callAbiItem(
+          caller,
+          chainId,
+          callTargetAbi(plan, caller, chainId, frozen)
+        );
+        if (!fn)
+          throw new Error(`producer call ${callerId} has no function signature`);
+        const target = mergeCallTarget(caller, chainId);
+        const to =
+          target.kind === 'address'
+            ? target.address
+            : resolvePointer(target.stepId);
         const data = encodeFunctionData({
           abi: [fn],
           functionName: fn.name,
           args: toConstructorArgs(
             fn.inputs,
-            resolveStepValues(
-              {
-                kind: 'deploy',
-                id: callerId,
-                contractId: '',
-                args: call.args,
-              } as never,
-              chainId,
-              resolvePointer,
-              fn.inputs,
-              { frozen, contracts: plan.contracts }
-            ).args,
+            resolveStepValues(caller, chainId, resolvePointer, fn.inputs, {
+              frozen,
+              contracts: plan.contracts,
+            }).args,
             'call'
           ) as never,
         });
+        const value = effectiveValue(caller, chainId);
         const raw = await deps.client.call({
-          to: factoryAddress,
+          to,
           data,
           ...(signers.get(callerId) ? { account: signers.get(callerId)! } : {}),
+          ...(value > 0n ? { value } : {}),
         });
         const result = typeof raw === 'string' ? raw : raw?.data;
-        if (!result) throw new Error('factory call returned no data');
-        decodedByCall.set(
-          callerId,
-          decodeFactoryProducts(call.signature, result)
-        );
+        if (!result) throw new Error('producer call returned no data');
+        decodedByCall.set(callerId, decodeProducedAddresses(fn, result));
       } catch (error) {
         absent(error instanceof Error ? error.message : String(error));
         continue;
@@ -402,13 +378,13 @@ export async function buildChainPredictions(
     }
     const products = decodedByCall.get(callerId);
     if (!products) {
-      absent('factory call produced no addresses');
+      absent('producer call produced no addresses');
       continue;
     }
-    const address = productAddress(products, strategy.output);
+    const address = products.get(strategy.producedBy.outputIndex);
     if (!address) {
       absent(
-        `the factory call returned no address named ${strategy.output ?? '(first)'}`
+        `the producer call returned no address at output ${strategy.producedBy.outputIndex}`
       );
       continue;
     }
@@ -563,11 +539,7 @@ export async function buildChainPredictions(
 
 function callerStrategyLabel(plan: DeploymentPlan, stepId: string): string {
   const step = plan.steps.find((candidate) => candidate.id === stepId);
-  if (step?.kind === 'call') return step.signature ?? stepId;
-  const strategy = step?.kind === 'deploy' ? step.strategy : undefined;
-  return (
-    (isFactoryStrategy(strategy) ? strategy.signature : undefined) ?? stepId
-  );
+  return (step?.kind === 'call' ? step.signature : undefined) ?? stepId;
 }
 
 export function ackIsFresh(
@@ -602,6 +574,10 @@ export function computeCreateAddresses(
   for (const step of plan.steps) {
     // Acknowledged-existing steps broadcast nothing and consume no nonce.
     if (skipTx.has(step.id)) continue;
+    // Nor does a produced product: its producer call sends the only
+    // transaction, so counting one here shifts every later plain-CREATE
+    // address off by the number of products.
+    if (isProducedProductStep(step)) continue;
     const from =
       signers.get(step.id) ??
       (resolveSigner(plan, step, chainId)?.address as Hex | undefined);
@@ -676,12 +652,21 @@ export function buildSchedule(
       };
     }
     const strategy = step.strategy ?? { kind: 'create' as const };
-    const data = isFactoryStrategy(strategy)
-      ? ('0x' as Hex)
-      : buildInitcode(step, frozen[step.contractId]!, chainId, addresses, {
-          frozen,
-          contracts: plan.contracts,
-        });
+    // A produced product's deployment is performed by its producer call; it
+    // sends nothing itself and only carries the address that call will
+    // create when the caller supplied provisional review predictions.
+    if (isProducedStrategy(strategy)) {
+      const predicted = predictions[step.id]?.predictedAddress;
+      return {
+        stepId: step.id,
+        kind: 'existing',
+        ...(predicted ? { address: predicted, predictedAddress: predicted } : {}),
+      };
+    }
+    const data = buildInitcode(step, frozen[step.contractId]!, chainId, addresses, {
+      frozen,
+      contracts: plan.contracts,
+    });
     // 'existing' requires OBSERVED code, not just a fresh acknowledgment —
     // the caller (simulation) verifies via eth_getCode; execution deploys
     // when code is absent, so the schedule must include that tx (F7). When
@@ -698,37 +683,6 @@ export function buildSchedule(
         address: predictions[step.id]!.predictedAddress,
         predictedAddress: predictions[step.id]!.predictedAddress,
       };
-    if (isFactoryStrategy(strategy)) {
-      // A product whose deployment is performed by another step's call sends
-      // nothing itself; it only carries the address that call will create.
-      if (strategy.fulfilledBy) {
-        const predicted = predictions[step.id]?.predictedAddress;
-        return {
-          stepId: step.id,
-          kind: 'existing',
-          ...(predicted
-            ? { address: predicted, predictedAddress: predicted }
-            : {}),
-        };
-      }
-      const factoryData = buildFactoryCalldata(
-        step as never,
-        chainId,
-        addresses,
-        { frozen, contracts: plan.contracts }
-      );
-      return {
-        stepId: step.id,
-        kind: 'tx',
-        from,
-        to: resolveFactoryAddress(strategy, chainId, addresses),
-        data: factoryData,
-        value: effectiveValue(step, chainId),
-        ...(predictions[step.id]
-          ? { predictedAddress: predictions[step.id].predictedAddress }
-          : {}),
-      };
-    }
     return strategy.kind === 'create'
       ? {
           stepId: step.id,

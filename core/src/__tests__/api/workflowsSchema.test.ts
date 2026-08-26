@@ -39,6 +39,26 @@ function document() {
   };
 }
 
+// A call-products composition as promotion saves it: the producer call is the
+// only reference to the frozen factory ABI source, and each product is a deploy
+// step whose contract is created by that earlier call.
+function producedDocument() {
+  const repo = { url: 'https://github.com/example/jar.git', commit, ref: 'v1.0.0', refKind: 'tag' as const };
+  return {
+    schemaVersion: 1 as const,
+    sources: [
+      { id: 'factory', repo, frameworkId: 'foundry', sourcePath: 'src/Factory.sol', contractName: 'Factory', artifactPath: 'out/Factory.sol/Factory.json' },
+      { id: 'jar', repo, frameworkId: 'foundry', sourcePath: 'src/Jar.sol', contractName: 'Jar', artifactPath: 'out/Jar.sol/Jar.json' },
+    ],
+    steps: [
+      { id: 'spawn', kind: 'call' as const, target: { kind: 'address' as const, address: `0x${'44'.repeat(20)}` }, signature: 'deploy(address)', args: { owner: `0x${'55'.repeat(20)}` }, abiContractId: 'factory' },
+      { id: 'product', kind: 'deploy' as const, contractId: 'jar', strategy: { kind: 'plugin' as const, pluginId: 'tjar', producedBy: { stepId: 'spawn', outputIndex: 0 } } },
+    ],
+    requiredPlugins: [{ id: 'foundry', version: '1.0.0' }, { id: 'tjar', version: '1.0.0' }],
+    outputs: { hooks: [] },
+  };
+}
+
 describe('Workflow document schema', () => {
   it('round-trips a maximal valid document and validates closure', () => {
     const parsed = makeWorkflowDocumentSchema().parse(document());
@@ -112,6 +132,34 @@ describe('Workflow document schema', () => {
     // installed plugin version independently.
     expect(validateWorkflowClosure(makeWorkflowDocumentSchema().parse({ ...parsed, requiredPlugins: [{ id: 'oz-uups', version: '1.2.3' }] }))).toEqual([]);
     expect(makeWorkflowDocumentSchema().safeParse({ ...d, sources: [{ ...contractTypeSource, contentHash: 'not-a-hash' }] }).success).toBe(false);
+  });
+
+  // Produced mode carries the same structural rules as the plan schema, but a
+  // workflow is a committed, hand-editable document: a violation must be an
+  // install-time error located in the document the author wrote, not a later
+  // index-based plan error against a plan they never saw.
+  it('accepts a produced composition and rejects every produced-mode structural violation', () => {
+    const produced = producedDocument();
+    expect(makeWorkflowDocumentSchema().parse(produced)).toEqual(produced);
+    expect(validateWorkflowClosure(makeWorkflowDocumentSchema().parse(produced))).toEqual([]);
+    const withSteps = (steps: unknown[]) => makeWorkflowDocumentSchema().safeParse({ ...produced, steps });
+    const [spawn, product] = produced.steps;
+    expect(withSteps([spawn, { ...product, strategy: { ...product.strategy, producedBy: { stepId: 'missing', outputIndex: 0 } } }]).error?.issues[0]).toMatchObject({ message: 'producedBy must reference a call step', path: ['steps', 1, 'strategy', 'producedBy', 'stepId'] });
+    expect(withSteps([spawn, { ...product, strategy: { ...product.strategy, producedBy: { stepId: 'deploy-factory', outputIndex: 0 } } }, { id: 'deploy-factory', kind: 'deploy', contractId: 'factory' }]).error?.issues[0]).toMatchObject({ message: 'producedBy must reference a call step' });
+    expect(withSteps([product, spawn]).error?.issues[0]).toMatchObject({ message: 'producedBy must reference an earlier call step', path: ['steps', 0, 'strategy', 'producedBy', 'stepId'] });
+    const { abiContractId: _abi, ...abiFree } = spawn;
+    expect(withSteps([abiFree, product]).error?.issues[0]).toMatchObject({ message: 'a producer call requires abiContractId', path: ['steps', 0, 'abiContractId'] });
+    expect(withSteps([{ ...spawn, abiContractId: 'not-a-source' }, product]).error?.issues[0]).toMatchObject({ message: 'step abiContractId must reference a source', path: ['steps', 0, 'abiContractId'] });
+    for (const [field, value] of [
+      ['value', '1'],
+      ['valuePerChain', { '1': '1' }],
+      ['gasOverrides', { gasLimit: '1' }],
+      ['gasOverridesPerChain', { '1': { gasLimit: '1' } }],
+      ['libraries', { 'src/Lib.sol:Lib': { kind: 'address', address: `0x${'33'.repeat(20)}` } }],
+      ['librariesPerChain', { '1': { 'src/Lib.sol:Lib': { kind: 'address', address: `0x${'33'.repeat(20)}` } } }],
+    ] as const) {
+      expect(withSteps([spawn, { ...product, [field]: value }]).error?.issues[0]).toMatchObject({ message: `${field} is not valid on a produced deployment step`, path: ['steps', 1, field] });
+    }
   });
 
   it('accepts only minted UUIDv4 run ids on promotion wires', () => {

@@ -1,6 +1,8 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import type {
+  ComposedCallProducts,
   ContractTypeInfo,
+  DeploymentTypeBinding,
   Hex,
   Hex32,
   LibraryBinding,
@@ -15,15 +17,14 @@ import type {
   DraftCallStep,
   DraftDeployExtras,
   DeployDraftState,
+  DeploymentCompositionDraft,
   DraftContract,
   DraftStep,
-  FactoryDraftSetup,
   GasOverrideKey,
   SetArgPayload,
   SetChainArgOverridePayload,
 } from './types';
 import { cloneJson } from '../../../utils/cloneJson';
-import { productsOf } from '../../../utils/factorySignatures';
 
 const initialState: DeployDraftState = {
   contracts: [],
@@ -129,6 +130,16 @@ function stepDependsOn(
       )
     );
   }
+  // `producedBy` is the strictest dependency in the draft: a product carries
+  // no transaction of its own, so without its producer it cannot be deployed,
+  // predicted, or even assembled into a plan. It must be a first-class edge
+  // here or every consumer (prediction invalidation, the workflow exclusion
+  // warning, dangling-reference cleanup) silently misses it.
+  if (
+    extras?.strategy.kind === 'plugin' &&
+    extras.strategy.producedBy?.stepId === stepId
+  )
+    return true;
   return (
     Object.values(extras?.libraries ?? {}).some(
       (binding) => binding.kind === 'step' && binding.stepId === stepId
@@ -139,6 +150,25 @@ function stepDependsOn(
       )
     )
   );
+}
+
+/**
+ * The deploy steps `callStepId` produces, in step order. Exported so every
+ * surface that must treat a producer call as structural — its own step card,
+ * the workflow include label, the removal guard — asks one question instead
+ * of re-deriving the `producedBy` scan and drifting from it.
+ */
+export function producedStepIdsFor(
+  state: Pick<DeployDraftState, 'steps' | 'deployExtras'>,
+  callStepId: string
+): string[] {
+  return state.steps.flatMap((step) => {
+    if (step.kind !== 'deploy') return [];
+    const strategy = state.deployExtras[step.id]?.strategy;
+    return strategy?.kind === 'plugin' && strategy.producedBy?.stepId === callStepId
+      ? [step.id]
+      : [];
+  });
 }
 
 // A prediction is a property of the complete dependency closure, not merely
@@ -165,7 +195,9 @@ function invalidatePredictions(state: DeployDraftState, stepId: string): void {
     if (!extras) continue;
     delete extras.prepared;
     delete extras.acknowledged;
-    if (extras.strategy.kind === 'plugin') extras.needsPrepare = true;
+    // Produced-mode plugin steps are never prepared: their addresses come
+    // from the producer call, so a re-mine chip would misdescribe them.
+    if (extras.strategy.kind === 'plugin' && !extras.strategy.producedBy) extras.needsPrepare = true;
     else delete extras.needsPrepare;
   }
 }
@@ -177,7 +209,7 @@ function pruneChainPredictions(state: DeployDraftState, chainId: number): void {
     delete extras.acknowledged?.[key];
     if (extras.prepared && Object.keys(extras.prepared).length === 0) {
       delete extras.prepared;
-      if (extras.strategy.kind === 'plugin') extras.needsPrepare = true;
+      if (extras.strategy.kind === 'plugin' && !extras.strategy.producedBy) extras.needsPrepare = true;
     }
     if (extras.acknowledged && Object.keys(extras.acknowledged).length === 0)
       delete extras.acknowledged;
@@ -243,6 +275,93 @@ function clearDanglingReferences(
       }
     }
   }
+  // Fail-safe only: removeCallStep refuses to remove a producer, so a
+  // dangling producedBy can arise solely from a bug path. A product without
+  // its producer is meaningless — it carries no transaction of its own — so
+  // it is removed outright rather than left to fail plan assembly.
+  for (const stepId of producedStepIdsFor(state, removedStepId))
+    removeStepAndSource(state, stepId);
+}
+
+function referencesEncodedContract(
+  value: unknown,
+  contractIds: Set<string>
+): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const encoded = (value as { $encode?: { contractId?: unknown } }).$encode;
+  if (encoded && typeof encoded.contractId === 'string' && contractIds.has(encoded.contractId))
+    return true;
+  if (Array.isArray(value))
+    return value.some((item) => referencesEncodedContract(item, contractIds));
+  return Object.values(value).some((item) =>
+    referencesEncodedContract(item, contractIds)
+  );
+}
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+const compositionCallId = (compositionId: string) => `call-${compositionId}`;
+const compositionAbiContractId = (compositionId: string) => `${compositionId}:abi`;
+// Product keys are plugin-supplied and only charset-checked
+// (/^[a-zA-Z][a-zA-Z0-9._-]*$/ server-side), so 'abi' is a legal key: minting
+// product ids as `${compositionId}:${key}` put them in the same namespace as
+// the host's frozen producer ABI id and let a product named 'abi' take it
+// over, pointing the producer call at the wrong ABI. The `product:` segment
+// is unforgeable — no key can contain a colon — so host-minted and
+// plugin-derived ids can never meet.
+const compositionProductContractId = (compositionId: string, key: string) => `${compositionId}:product:${key}`;
+const compositionProductStepId = (compositionId: string, key: string) => `deploy-${compositionProductContractId(compositionId, key)}`;
+
+/**
+ * Why `applyComposition` would refuse to materialize `composition` into the
+ * current draft, or undefined when it can. Exported so the composer screen
+ * can surface the reason instead of dispatching a silently ignored action:
+ * a reducer cannot answer its caller, and advancing the wizard past a
+ * refused materialization would strand the user on a contract-less draft.
+ */
+export function compositionMaterializationProblem(
+  state: DeployDraftState,
+  composition: ComposedCallProducts
+): string | undefined {
+  const draft = state.composition;
+  if (!draft) return 'No composition is in progress';
+  const { producer, products } = composition;
+  if (!draft.artifacts[producer.abiArtifactField])
+    return 'Pick the producer contract';
+  const address = draft.values[producer.targetField];
+  if (typeof address !== 'string' || !ADDRESS.test(address))
+    return 'Enter the producer address';
+  const unmapped = products.filter((product) => !draft.artifacts[product.artifactField]);
+  if (unmapped.length > 0)
+    return `Map each produced contract to an artifact: ${unmapped.map((product) => product.key).join(', ')}`;
+  // Recomposition may replace only ids this composition owns, and must fail
+  // closed — not silently clear the dependency — when a step the user added
+  // still points at an owned id that would disappear.
+  const keptStepIds = new Set([
+    compositionCallId(draft.compositionId),
+    ...products.map((product) => compositionProductStepId(draft.compositionId, product.key)),
+  ]);
+  const removedStepIds = draft.ownedStepIds.filter((id) => !keptStepIds.has(id));
+  const keptContractIds = new Set([
+    compositionAbiContractId(draft.compositionId),
+    ...products.map((product) => compositionProductContractId(draft.compositionId, product.key)),
+  ]);
+  const removedContractIds = new Set(draft.ownedContractIds.filter((id) => !keptContractIds.has(id)));
+  if (removedStepIds.length === 0 && removedContractIds.size === 0) return undefined;
+  const owned = new Set(draft.ownedStepIds);
+  for (const step of state.steps) {
+    if (owned.has(step.id)) continue;
+    const removed = removedStepIds.find((id) =>
+      stepDependsOn(step, state.deployExtras[step.id], id)
+    );
+    if (removed) return `Recomposing would remove ${removed}, which ${step.id} still references`;
+    if (
+      referencesEncodedContract(step.args, removedContractIds) ||
+      referencesEncodedContract(step.argsPerChain, removedContractIds)
+    )
+      return `Recomposing would remove a contract that ${step.id} still encodes against`;
+  }
+  return undefined;
 }
 
 const deployDraftSlice = createSlice({
@@ -424,10 +543,10 @@ const deployDraftSlice = createSlice({
       // the wizard, so those contracts are seen by definition. Only additions
       // to an already-active draft feed the sidebar badge.
       const wasEmpty = state.contracts.length === 0;
-      // Deploying plain contracts abandons an un-materialized factory setup:
-      // otherwise the wizard would show the factory step over contracts that
-      // are not its products.
-      if (wasEmpty) delete state.factorySetup;
+      // Deploying plain contracts abandons an un-materialized composition:
+      // otherwise the wizard would show the composer over contracts that are
+      // not its products.
+      if (wasEmpty) delete state.composition;
       const existing = new Set(state.contracts.map((contract) => contract.id));
       for (const contract of action.payload) {
         if (existing.has(contract.id)) continue;
@@ -489,12 +608,12 @@ const deployDraftSlice = createSlice({
         state.steps.splice(fromIndex, 0, step);
         return;
       }
-      // Likewise a factory product may never precede the call that deploys
-      // it: fulfilledBy must resolve to an earlier step.
+      // Likewise a produced product may never precede the call that creates
+      // it: producedBy must resolve to an earlier step.
       if (state.steps.some((candidate, index) => {
         if (candidate.kind !== 'deploy') return false;
         const strategy = state.deployExtras[candidate.id]?.strategy;
-        return strategy?.kind === 'factory' && Boolean(strategy.fulfilledBy) && index <= state.steps.findIndex((item) => item.id === strategy.fulfilledBy);
+        return strategy?.kind === 'plugin' && strategy.producedBy !== undefined && index <= state.steps.findIndex((item) => item.id === strategy.producedBy!.stepId);
       })) {
         state.steps.splice(toIndex, 1);
         state.steps.splice(fromIndex, 0, step);
@@ -533,14 +652,10 @@ const deployDraftSlice = createSlice({
         (step) => step.id === action.payload && step.kind === 'call'
       );
       if (index === -1) return;
-      // A fulfilling call cannot be removed from under its products — they
-      // carry no transaction of their own. The Factory step is where the
-      // flow is unmade.
-      if (state.steps.some((step) => {
-        if (step.kind !== 'deploy') return false;
-        const strategy = state.deployExtras[step.id]?.strategy;
-        return strategy?.kind === 'factory' && strategy.fulfilledBy === action.payload;
-      })) return;
+      // A producer call cannot be removed from under its products — they
+      // carry no transaction of their own. Recomposition is where the
+      // generated set is unmade.
+      if (producedStepIdsFor(state, action.payload).length > 0) return;
       const [removed] = state.steps.splice(index, 1);
       const affected = state.steps
         .filter(
@@ -552,144 +667,196 @@ const deployDraftSlice = createSlice({
       clearDanglingReferences(state, removed.id);
       for (const stepId of affected) invalidatePredictions(state, stepId);
     },
-    startFactoryDraft: {
-      reducer(state, action: PayloadAction<{ callStepId: string }>) {
+    startComposition: {
+      reducer(
+        state,
+        action: PayloadAction<{ pluginId: string; compositionId: string }>
+      ) {
         // The entry point is hidden while a draft is active; this guard makes
-        // the reducer safe against a stale link regardless.
-        if (state.contracts.length > 0 || state.factorySetup) return state;
+        // the reducer safe against a stale link regardless. The empty shell
+        // this reducer itself mints is deliberately NOT protected: refusing on
+        // a composition's mere existence is what let a shell abandoned for one
+        // plugin answer another plugin's entry point and render its composer.
+        if (state.contracts.length > 0 || compositionInProgress(state.composition))
+          return state;
         return {
           ...initialState,
-          factorySetup: { callStepId: action.payload.callStepId },
-        };
-      },
-      prepare() {
-        return {
-          payload: {
-            callStepId: `call-factory-${globalThis.crypto.randomUUID()}`,
+          composition: {
+            pluginId: action.payload.pluginId,
+            compositionId: action.payload.compositionId,
+            values: {},
+            artifacts: {},
+            ownedContractIds: [],
+            ownedStepIds: [],
           },
         };
       },
+      prepare(pluginId: string) {
+        return {
+          payload: { pluginId, compositionId: globalThis.crypto.randomUUID() },
+        };
+      },
     },
-    setFactorySetup(
+    setCompositionValue(
       state,
-      action: PayloadAction<Partial<Omit<FactoryDraftSetup, 'callStepId'>>>
+      action: PayloadAction<{ key: string; value?: unknown }>
     ) {
-      const setup = state.factorySetup;
-      if (!setup) return;
-      const patch = action.payload;
-      // A different factory means a different ABI: everything derived from
-      // the old one is meaningless.
-      if (patch.source && patch.source.id !== setup.source?.id) {
-        delete setup.signature;
-        delete setup.payable;
-        delete setup.products;
-      }
-      if (patch.signature !== undefined && patch.signature !== setup.signature) {
-        delete setup.products;
-        // Post-generation the call step carries the committed structure:
-        // switch its function immediately and drop args keyed to the old
-        // parameters — encoding them against the new function would silently
-        // mismatch.
-        const call = state.steps.find(
-          (step): step is DraftCallStep =>
-            step.id === setup.callStepId && step.kind === 'call'
-        );
-        if (call) {
-          call.signature = patch.signature;
-          if (patch.payable) call.payable = true;
-          else delete call.payable;
-          delete call.args;
-          delete call.argsPerChain;
-        }
-      }
-      const record = setup as unknown as Record<string, unknown>;
-      for (const [key, value] of Object.entries(patch)) {
-        if (value === undefined) delete record[key];
-        else record[key] = value;
-      }
+      const draft = state.composition;
+      if (!draft) return;
+      if (action.payload.value === undefined) delete draft.values[action.payload.key];
+      else draft.values[action.payload.key] = action.payload.value;
     },
-    setFactoryProduct(
+    setCompositionArtifact(
       state,
-      action: PayloadAction<{ output: string; source: DraftContract }>
+      action: PayloadAction<{ key: string; source?: DraftContract }>
     ) {
-      const setup = state.factorySetup;
-      if (!setup) return;
-      setup.products ??= {};
-      setup.products[action.payload.output] = action.payload.source;
+      const draft = state.composition;
+      if (!draft) return;
+      if (action.payload.source === undefined) delete draft.artifacts[action.payload.key];
+      else draft.artifacts[action.payload.key] = action.payload.source;
     },
-    applyFactorySetup(state) {
-      const setup = state.factorySetup;
-      if (!setup?.signature) return;
-      const outputs = productsOf(setup.signature);
-      if (outputs.length === 0) return;
-      const mappings = outputs.map((output) => {
-        const artifact = setup.products?.[output];
-        return artifact
-          ? { output, artifact, contractId: `${artifact.id}:${output}` }
-          : undefined;
-      });
-      // Fail closed on a partial mapping: generating some products but not
-      // others would leave returned contracts silently untracked.
-      if (mappings.some((entry) => entry === undefined)) return;
-      const callId = setup.callStepId;
-      if (!state.steps.some((step) => step.id === callId && step.kind === 'call')) {
+    // Materializes a complete server-composed call-products template into
+    // ordinary draft steps. The server owns field validation; the host owns
+    // every generated id (composition-namespaced and deterministic, so a
+    // re-apply reconciles rather than accumulates).
+    applyComposition(
+      state,
+      action: PayloadAction<{
+        binding: DeploymentTypeBinding;
+        composition: ComposedCallProducts;
+      }>
+    ) {
+      const draft = state.composition;
+      if (!draft) return;
+      const { binding, composition } = action.payload;
+      // Fail closed with NO mutation: partial materialization would leave
+      // produced contracts silently untracked or user dependencies dangling.
+      if (compositionMaterializationProblem(state, composition)) return;
+      const { producer, products } = composition;
+      const abiContractId = compositionAbiContractId(draft.compositionId);
+      const callId = compositionCallId(draft.compositionId);
+      const address = draft.values[producer.targetField] as Hex;
+      // The selected producer source is frozen under a composition-owned id;
+      // the call references it via abiContractId so a literal or later
+      // overridden target keeps the authoritative parameter names.
+      const abiSource = { ...cloneJson(draft.artifacts[producer.abiArtifactField]), id: abiContractId };
+      const abiIndex = state.contracts.findIndex((contract) => contract.id === abiContractId);
+      if (abiIndex === -1) state.contracts.push(abiSource);
+      else state.contracts[abiIndex] = abiSource;
+      const call = state.steps.find(
+        (step): step is DraftCallStep => step.id === callId && step.kind === 'call'
+      );
+      if (!call) {
         // Created argument-less on purpose: the call's arguments are filled
         // on its step card in Steps, where the full editor lives.
         state.steps.unshift({
           id: callId,
           kind: 'call',
-          target: setup.address
-            ? { kind: 'address', address: setup.address }
-            : null,
-          signature: setup.signature,
-          ...(setup.payable ? { payable: true } : {}),
+          target: { kind: 'address', address },
+          signature: producer.signature,
+          ...(producer.payable ? { payable: true } : {}),
+          abiContractId,
         });
-      }
-      const generated = state.steps.filter((step) => {
-        if (step.kind !== 'deploy') return false;
-        const strategy = state.deployExtras[step.id]?.strategy;
-        return strategy?.kind === 'factory' && strategy.fulfilledBy === callId;
-      });
-      for (const step of generated) {
-        const strategy = state.deployExtras[step.id]?.strategy;
-        const output = strategy?.kind === 'factory' ? strategy.output : undefined;
-        const wanted = mappings.find((entry) => entry?.output === output);
-        if (wanted && step.kind === 'deploy' && wanted.contractId === step.contractId) continue;
-        invalidatePredictions(state, step.id);
-        removeStepAndSource(state, step.id);
-      }
-      const callIndex = state.steps.findIndex((step) => step.id === callId);
-      for (const entry of mappings) {
-        if (!entry) continue;
-        const stepId = `deploy-${entry.contractId}`;
-        if (state.steps.some((step) => step.id === stepId)) continue;
-        if (!state.contracts.some((contract) => contract.id === entry.contractId)) {
-          state.contracts.push({ ...entry.artifact, id: entry.contractId });
+      } else {
+        // Re-applying materializes from composer state: the target follows
+        // the composer's address field. Argument edits survive only while
+        // the function is unchanged — args keyed to the old parameters would
+        // silently encode against the new function.
+        call.target = { kind: 'address', address };
+        call.abiContractId = abiContractId;
+        if (call.signature !== producer.signature) {
+          call.signature = producer.signature;
+          delete call.args;
+          delete call.argsPerChain;
         }
-        // Insert after the call and the products already in place so a fresh
-        // generation lists products in declared output order.
-        let at = callIndex;
-        while (at + 1 < state.steps.length) {
-          const next = state.steps[at + 1];
-          const strategy =
-            next.kind === 'deploy'
-              ? state.deployExtras[next.id]?.strategy
-              : undefined;
-          if (strategy?.kind === 'factory' && strategy.fulfilledBy === callId) at += 1;
-          else break;
+        if (producer.payable) call.payable = true;
+        else {
+          delete call.payable;
+          // A call value is only reachable while `payable` is set — the value
+          // input and the per-chain overrides render behind it, and a
+          // producer's payable flag is the composer's to decide, not the
+          // card's. Left behind, the value makes plan assembly emit a call
+          // with a value and no payable flag, which CallStepSchema rejects
+          // ("call value requires payable: true"), with nothing on screen to
+          // edit. Same rule as setWrapperInitializer.
+          delete call.value;
+          delete call.valuePerChain;
         }
-        state.steps.splice(at + 1, 0, {
-          id: stepId,
-          kind: 'deploy',
-          contractId: entry.contractId,
-        });
-        state.deployExtras[stepId] = {
-          strategy: { kind: 'factory', fulfilledBy: callId, output: entry.output },
+      }
+      const desired = products.map((product) => {
+        const contractId = compositionProductContractId(draft.compositionId, product.key);
+        return {
+          contractId,
+          stepId: compositionProductStepId(draft.compositionId, product.key),
+          source: { ...cloneJson(draft.artifacts[product.artifactField]), id: contractId },
+          outputIndex: product.outputIndex,
+          params: product.params,
         };
+      });
+      const desiredByStepId = new Map(desired.map((entry) => [entry.stepId, entry]));
+      // Replace only owned generated steps, and keep a product (with the
+      // user's constructor declarations) only while it still clones the same
+      // artifact — a swapped selection means a different contract.
+      for (const stepId of draft.ownedStepIds) {
+        if (stepId === callId) continue;
+        const wanted = desiredByStepId.get(stepId);
+        const existing = wanted && state.contracts.find((contract) => contract.id === wanted.contractId);
+        if (wanted && existing && JSON.stringify(existing) === JSON.stringify(wanted.source)) continue;
+        invalidatePredictions(state, stepId);
+        removeStepAndSource(state, stepId);
       }
-      // The call step owns the address from here; stale staging would shadow
-      // operator edits on the next apply.
-      delete setup.address;
+      const staleContractIds = new Set(
+        draft.ownedContractIds.filter(
+          (id) => id !== abiContractId && !desired.some((entry) => entry.contractId === id)
+        )
+      );
+      state.contracts = state.contracts.filter((contract) => !staleContractIds.has(contract.id));
+      const callIndex = state.steps.findIndex((step) => step.id === callId);
+      for (const entry of desired) {
+        if (!state.contracts.some((contract) => contract.id === entry.contractId)) {
+          state.contracts.push(entry.source);
+        }
+        if (!state.steps.some((step) => step.id === entry.stepId)) {
+          // Insert after the call and the products already in place so a
+          // fresh materialization lists products in declared product order.
+          let at = callIndex;
+          while (at + 1 < state.steps.length) {
+            const next = state.steps[at + 1];
+            const strategy =
+              next.kind === 'deploy'
+                ? state.deployExtras[next.id]?.strategy
+                : undefined;
+            if (strategy?.kind === 'plugin' && strategy.producedBy?.stepId === callId) at += 1;
+            else break;
+          }
+          state.steps.splice(at + 1, 0, {
+            id: entry.stepId,
+            kind: 'deploy',
+            contractId: entry.contractId,
+          });
+        }
+        const strategy: DraftDeployExtras['strategy'] = {
+          kind: 'plugin',
+          pluginId: draft.pluginId,
+          ...(entry.params ? { params: cloneJson(entry.params) } : {}),
+          producedBy: { stepId: callId, outputIndex: entry.outputIndex },
+        };
+        const current = state.deployExtras[entry.stepId]?.strategy;
+        // A changed output index or params means a different produced
+        // address: dependents' predictions are stale.
+        if (current && JSON.stringify(current) !== JSON.stringify(strategy)) {
+          invalidatePredictions(state, entry.stepId);
+        }
+        state.deployExtras[entry.stepId] = { strategy };
+      }
+      // Materialization happens inside the open wizard, so unlike
+      // addContracts it marks nothing unseen: the user is looking at it.
+      draft.binding = cloneJson(binding);
+      draft.ownedContractIds = [abiContractId, ...desired.map((entry) => entry.contractId)];
+      draft.ownedStepIds = [callId, ...desired.map((entry) => entry.stepId)];
+    },
+    clearComposition(state) {
+      delete state.composition;
     },
     toggleChain(state, action: PayloadAction<number>) {
       const chainId = action.payload;
@@ -1140,10 +1307,11 @@ export const {
   moveStep,
   addCallStep,
   removeCallStep,
-  startFactoryDraft,
-  setFactorySetup,
-  setFactoryProduct,
-  applyFactorySetup,
+  startComposition,
+  setCompositionValue,
+  setCompositionArtifact,
+  applyComposition,
+  clearComposition,
   toggleChain,
   selectRpc,
   setExplorerSelection,
@@ -1178,6 +1346,31 @@ export const {
 
 export const deployDraftReducer = deployDraftSlice.reducer;
 export { initialState as deployDraftInitialState };
+
+/**
+ * Whether a composition holds work worth resuming. `startComposition` mints
+ * a draft carrying nothing but ids the moment the composer opens, so merely
+ * visiting the composer and backing out leaves a truthy but empty draft
+ * behind. Anything gating an entry point on "a session is in progress" must
+ * ask this instead of testing `composition` for existence: treating the empty
+ * shell as a session left the Deployments header offering only "Manage
+ * deployment → composer" with no route back to a plain deployment.
+ *
+ * Inside the wizard the plain existence check is still correct: an empty
+ * composition is exactly what the composer station exists to fill in.
+ */
+export function compositionInProgress(
+  composition: DeploymentCompositionDraft | undefined
+): boolean {
+  if (!composition) return false;
+  // Empty strings are excluded deliberately: a half-typed-then-cleared
+  // address field must not count as meaningful work on its own.
+  return Boolean(
+    Object.values(composition.values).some((value) => value !== undefined && value !== '') ||
+      Object.keys(composition.artifacts).length > 0 ||
+      composition.ownedStepIds.length > 0
+  );
+}
 
 export function workflowDependentsForExclusion(
   state: DeployDraftState,

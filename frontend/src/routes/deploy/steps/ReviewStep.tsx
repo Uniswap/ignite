@@ -424,6 +424,7 @@ export default function ReviewStep({ plan, validation }: ReviewStepProps) {
               stepId,
               address,
               provisionalLabel,
+              provisionalDetail,
               unavailableLabel,
             }) => {
               const contractId = draft.steps.find(
@@ -433,9 +434,13 @@ export default function ReviewStep({ plan, validation }: ReviewStepProps) {
                 draft.contracts.find((contract) => contract.id === contractId)
                   ?.contractName ?? decodeUrlEncodingForDisplay(stepId);
               return (
+                // Wrapping, not one line: a chip naming a producer signature
+                // is wider than the address it annotates, and an unwrapped row
+                // widens the whole page until the launch button leaves the
+                // viewport.
                 <div
                   key={`${stepId}-${chainId}`}
-                  className="list-row flex gap-3"
+                  className="list-row flex flex-wrap items-center gap-x-3 gap-y-1"
                 >
                   <span className="font-medium">{name}{wrapperStepIds.has(stepId) && ' (wrapper)'}</span>
                   <span className="text-muted">
@@ -443,7 +448,9 @@ export default function ReviewStep({ plan, validation }: ReviewStepProps) {
                       ?.name ?? `Chain ${chainId}`}
                   </span>
                   {provisionalLabel && (
-                    <span className="chip">{provisionalLabel}</span>
+                    <span className="chip" title={provisionalDetail}>
+                      {provisionalLabel}
+                    </span>
                   )}
                   <span
                     className={address ? 'mono-data ml-auto' : 'text-muted ml-auto'}

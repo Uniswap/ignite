@@ -28,7 +28,9 @@ function assertValid(doc: WorkflowDocument): WorkflowDocument {
 }
 
 function requiredStepRefs(step: WorkflowDocument['steps'][number]): string[] {
-  if (step.kind === 'deploy') return step.wraps ? [step.wraps.stepId] : [];
+  // A produced product exists only because its producer call creates it, so
+  // the producedBy edge is as required as wraps or a call's step target.
+  if (step.kind === 'deploy') return [...(step.wraps ? [step.wraps.stepId] : []), ...(step.strategy?.kind === 'plugin' && step.strategy.producedBy ? [step.strategy.producedBy.stepId] : [])];
   return [step.target, ...Object.values(step.targetPerChain ?? {})].flatMap((target) => target.kind === 'step' ? [target.stepId] : []);
 }
 
@@ -93,7 +95,11 @@ export function mintSourceId(doc: WorkflowDocument, contractName: string): strin
 
 export function cascadeRemoveSource(doc: WorkflowDocument, sourceId: string): { doc: WorkflowDocument; removedStepIds: string[]; clearedRefs: ClearedWorkflowRef[] } {
   const next = clone(doc);
-  const removed = new Set(next.steps.filter((step) => step.kind === 'deploy' && step.contractId === sourceId).map((step) => step.id));
+  const producerIds = new Set(next.steps.flatMap((step) => step.kind === 'deploy' && step.strategy?.kind === 'plugin' && step.strategy.producedBy ? [step.strategy.producedBy.stepId] : []));
+  // A producer call resolves its function against the frozen ABI source it
+  // names, so removing that source removes the call (and cascades to its
+  // products). An ordinary call only loses authoritative parameter names.
+  const removed = new Set(next.steps.filter((step) => step.kind === 'deploy' ? step.contractId === sourceId : step.abiContractId === sourceId && producerIds.has(step.id)).map((step) => step.id));
   let changed = true;
   while (changed) {
     changed = false;
@@ -109,6 +115,7 @@ export function cascadeRemoveSource(doc: WorkflowDocument, sourceId: string): { 
     const step = next.steps[index];
     const stepPath = `$.steps[${index}]`;
     if (step.kind === 'deploy') clearLibraries(step, stepPath, removed, clearedRefs);
+    if (step.kind === 'call' && step.abiContractId === sourceId) { clearedRefs.push({ stepId: step.id, path: `${stepPath}.abiContractId` }); delete step.abiContractId; }
     clearArgReferences(step.args, `${stepPath}.args`, removed, sourceId, clearedRefs, true);
     clearArgReferences(step.argsPerChain, `${stepPath}.argsPerChain`, removed, sourceId, clearedRefs, true);
     if (step.kind === 'deploy' && step.strategy?.kind === 'plugin') clearArgReferences(step.strategy.params, `${stepPath}.strategy.params`, removed, sourceId, clearedRefs, false);

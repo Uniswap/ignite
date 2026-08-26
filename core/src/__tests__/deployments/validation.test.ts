@@ -446,7 +446,7 @@ describe('validatePlan', () => {
       steps: [{ ...deploy, strategy: { kind: 'plugin', pluginId: 'hook', salt, prepared: { '1': { initcodeHash: hash, predictedAddress } } } }],
     }), { '1': 'rpc-1' }, deps({
       freezeInputs: vi.fn(async () => ({ token: { ...frozen.token, runtimeBytecode: `0x60${'zz'.repeat(20)}00`, runtimeBytecodeLinkReferences: { 'src/R.sol': { R: [{ start: 1, length: 20 }] } } } })),
-      deploymentTypes: { list: vi.fn(async () => [{ pluginId: 'hook', label: 'Hook', description: 'Hook', params: [], validateSupported: true }]), validate },
+      deploymentTypes: { list: vi.fn(async () => [{ pluginId: 'hook', pluginVersion: '1.0.0', label: 'Hook', description: 'Hook', execution: 'create2' as const, params: [], validateSupported: true, composeSupported: false }]), validate },
       createClient: vi.fn(() => ({ estimateGas: vi.fn(async () => 100n), getBalance: vi.fn(async () => 10_000n), estimateFeesPerGas: vi.fn(async () => ({ maxFeePerGas: 10n, maxPriorityFeePerGas: 1n })), getCode: vi.fn(async ({ address }: { address: string }) => address.toLowerCase() === CREATE2_PROXY_ADDRESS.toLowerCase() ? CREATE2_PROXY_RUNTIME_CODE : '0x') })),
     }));
     expect(validate).toHaveBeenCalledWith('hook', expect.objectContaining({ runtimeBytecode: `0x60${'0000000000000000000000000000000000000002'}00` }));

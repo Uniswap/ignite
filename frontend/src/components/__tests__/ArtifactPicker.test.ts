@@ -61,9 +61,9 @@ describe('ArtifactPicker version pins', () => {
   });
 
   it('omits the contract-type source section when the caller opts out', () => {
-    // In the factory flow the section reads as a classification field ("is
-    // this immutable?") and a bare proxy template is never the right answer,
-    // so the flow hides it. Everywhere else stays unchanged by default.
+    // In the composer's product mapping the section reads as a classification
+    // field ("is this immutable?") and a bare proxy template is never the
+    // right answer, so it is hidden. Everywhere else stays unchanged.
     const originalDocument = globalThis.document;
     Object.defineProperty(globalThis, 'document', {
       configurable: true,
@@ -113,7 +113,7 @@ describe('ArtifactPicker version pins', () => {
 describe('repoChoicesFor', () => {
   it('offers the session workspace as a first-class repository', () => {
     // In a fresh setup the workspace is often the ONLY repo — without it the
-    // picker renders "No options found" and the factory flow dead-ends.
+    // picker renders "No options found" and the composer dead-ends.
     const choices = repoChoicesFor({
       session: { pathOrUrl: '/workspace', initialized: true, frameworks: [], versions: [] },
       local: [], cloned: [], versionGroups: [], pinned: [],

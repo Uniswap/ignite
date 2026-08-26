@@ -41,6 +41,26 @@ describe('execution schedule', () => {
     expect(addresses.size).toBe(0);
   });
 
+  it('produced products consume no nonce, so a later create keeps its own', () => {
+    // The producer call sends the only transaction of the pair. Counting a
+    // nonce for each product shifted every later plain-create address.
+    const produced: DeploymentPlan = {
+      ...plan,
+      contracts: [...plan.contracts, { id: 'jar', repoPathOrUrl: '/repo', frameworkId: 'f', artifactPath: 'y', contractName: 'Jar', sourcePath: 'Jar.sol' }, { id: 'abi', repoPathOrUrl: '/repo', frameworkId: 'f', artifactPath: 'z', contractName: 'Factory', sourcePath: 'Factory.sol' }],
+      steps: [
+        { id: 'spawn', kind: 'call', target: { kind: 'address', address: '0x0000000000000000000000000000000000000099' }, signature: 'deploy()', abiContractId: 'abi' },
+        { id: 'jar-product', kind: 'deploy', contractId: 'jar', strategy: { kind: 'plugin', pluginId: 'factory', producedBy: { stepId: 'spawn', outputIndex: 0 } } },
+        { id: 'after', kind: 'deploy', contractId: 'c' },
+      ],
+    };
+    const producedFrozen: FrozenInputs = { ...frozen, jar: frozen.c, abi: frozen.c };
+    const signers = new Map<string, `0x${string}`>([['spawn', from], ['jar-product', from], ['after', from]]);
+    const addresses = computeCreateAddresses(produced, producedFrozen, 1, signers, new Map([[from, 7]]));
+    // spawn (7) -> after (8); the product never occupies 8.
+    expect(addresses.get('after')).toBe(getContractAddress({ from, nonce: 8n }));
+    expect(addresses.has('jar-product')).toBe(false);
+  });
+
   it('create2 tx entries target the canonical proxy', () => {
     const salt = `0x${'11'.repeat(32)}` as const;
     const c2plan: DeploymentPlan = { ...plan, steps: [{ id: 'create', kind: 'deploy', contractId: 'c', strategy: { kind: 'create2', salt } }] };

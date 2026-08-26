@@ -1,7 +1,7 @@
 // @ts-expect-error Vitest is supplied by the repository test command via npx.
 import { describe, expect, it } from 'vitest';
 import type { Lane, VerificationTask } from '@ignite/api';
-import { displayAttempt, splitLaneVerificationTasks } from '../LanePanel';
+import { displayAttempt, splitLaneVerificationTasks, stepAddressPresentation } from '../LanePanel';
 
 const address = '0x0000000000000000000000000000000000000001';
 
@@ -41,5 +41,52 @@ describe('LanePanel helpers', () => {
     const result = splitLaneVerificationTasks([captured], capturedLane, new Set(['deploy-token']));
     expect(result.byStep['deploy-token']).toEqual([captured]);
     expect(result.orphans).toEqual([]);
+  });
+});
+
+describe('stepAddressPresentation', () => {
+  const expected = '0x0000000000000000000000000000000000000011' as `0x${string}`;
+  const recorded = '0x0000000000000000000000000000000000000022' as `0x${string}`;
+
+  it('labels a produced product before confirmation as expected, not predicted', () => {
+    // An eth_call result is not proof of what the mined transaction created.
+    expect(stepAddressPresentation({ expectedAddress: expected })).toMatchObject({
+      value: expected,
+      chip: { label: 'expected', ok: false },
+    });
+  });
+
+  it('confirms a produced product observed at its expected address', () => {
+    expect(
+      stepAddressPresentation({
+        address: expected,
+        expectedAddress: expected,
+        addressProvenance: { kind: 'observed-at-expected', expectedAddress: expected, observedAt: '2026-01-01T00:00:00.000Z' },
+      })
+    ).toMatchObject({ value: expected, chip: { label: 'expected ✓', ok: true } });
+  });
+
+  it('never relabels an operator-recorded address as a prediction', () => {
+    const presented = stepAddressPresentation({
+      address: recorded,
+      expectedAddress: expected,
+      addressProvenance: { kind: 'operator-recorded', expectedAddress: expected, recordedAddress: recorded, recordedAt: '2026-01-01T00:00:00.000Z', note: 'nonce raced' },
+    });
+    expect(presented).toMatchObject({
+      value: recorded,
+      chip: { label: 'operator-recorded', ok: false },
+    });
+    expect(presented?.chip?.title).toContain('nonce raced');
+  });
+
+  it('keeps the CREATE2 prediction chips unchanged', () => {
+    expect(stepAddressPresentation({ predictedAddress: expected })).toMatchObject({
+      chip: { label: 'predicted', ok: false },
+    });
+    expect(
+      stepAddressPresentation({ address: expected, predictedAddress: expected })
+    ).toMatchObject({ chip: { label: 'predicted ✓', ok: true } });
+    expect(stepAddressPresentation({ address: expected })?.chip).toBeUndefined();
+    expect(stepAddressPresentation({})).toBeUndefined();
   });
 });

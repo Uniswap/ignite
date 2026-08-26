@@ -86,6 +86,24 @@ function SignerFillAction({
   );
 }
 
+// The burn address, checksummed per EIP-55. Kept beside the signer fill
+// because address args that must be unusable-but-non-zero (renounced owner,
+// disabled recipient) are otherwise 42 characters of hand-typed zeroes.
+export const DEAD_ADDRESS = '0x000000000000000000000000000000000000dEaD';
+
+function DeadFillAction({ onFill }: { onFill: (address: string) => void }) {
+  return (
+    <button
+      type="button"
+      className="btn btn-sm btn-secondary"
+      aria-label="Fill with the dead address"
+      onClick={() => onFill(DEAD_ADDRESS)}
+    >
+      Use dead address
+    </button>
+  );
+}
+
 function inputHint(type: string): string {
   if (/^u?int/.test(type)) return 'Decimal integer';
   if (type === 'address') return '0x… address';
@@ -220,7 +238,10 @@ export default function AbiArgField({
           <span className="text-sm font-medium">
             {label} <span className="mono-data text-muted">{input.type}</span>
           </span>
-          <SignerFillAction options={signerOptions} onFill={onChange} />
+          <span className="flex items-center gap-2">
+            <SignerFillAction options={signerOptions} onFill={onChange} />
+            <DeadFillAction onFill={onChange} />
+          </span>
         </div>
         {eligibleSteps && (
           <PointerValue

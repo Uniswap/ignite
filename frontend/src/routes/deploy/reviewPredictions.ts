@@ -15,10 +15,42 @@ export interface ReviewPredictedAddress {
   // chip off this rather than off `provisional`, because "provisional" claims
   // an address will firm up and a row with no address has none to firm up.
   provisionalLabel?: string;
+  // The untruncated note behind a shortened `provisionalLabel`, for the chip's
+  // tooltip. Only set when the two actually differ, so a render site can pass
+  // it straight to `title` and get no tooltip when there is nothing more to say.
+  provisionalDetail?: string;
   unavailableReason?: string;
   // The stand-in shown where the address would go. Computed here because two
   // render sites composed the same sentence independently and could drift.
   unavailableLabel?: string;
+}
+
+/**
+ * Collapses the argument list of a signature mentioned in a note. A produced
+ * product's note names the whole producer function — every parameter plus the
+ * return tuple — and the chip that carries it is `white-space: nowrap`, so the
+ * untouched text sets the review card's min-content width and pushes both the
+ * predicted address and the launch button off screen. The full text stays
+ * available as a tooltip; notes with no argument list are returned unchanged.
+ */
+export function compactSignatureNote(note: string): string {
+  const open = note.indexOf('(');
+  return open === -1 ? note : `${note.slice(0, open)}(…)`;
+}
+
+function provisionalChip(entry: PredictedEntryInfo): {
+  provisionalLabel: string;
+  provisionalDetail?: string;
+} {
+  if (entry.kind === 'create')
+    return { provisionalLabel: 'provisional — depends on signer nonce' };
+  const note = entry.notes?.length ? entry.notes[0] : undefined;
+  if (!note) return { provisionalLabel: 'provisional — mined during run' };
+  const compact = compactSignatureNote(note);
+  return {
+    provisionalLabel: `provisional — ${compact}`,
+    ...(compact === note ? {} : { provisionalDetail: `provisional — ${note}` }),
+  };
 }
 
 /** Narrows the open validation details record at the UI boundary. */
@@ -54,16 +86,7 @@ export function reviewPredictedAddresses(
                     stepId,
                     address: entry.predictedAddress,
                     provisional,
-                    ...(provisional
-                      ? {
-                          provisionalLabel:
-                            entry.kind === 'create'
-                              ? 'provisional — depends on signer nonce'
-                              : entry.notes?.length
-                                ? `provisional — ${entry.notes[0]}`
-                                : 'provisional — mined during run',
-                        }
-                      : {}),
+                    ...(provisional ? provisionalChip(entry) : {}),
                   },
                 ];
               }

@@ -244,6 +244,68 @@ describe.skipIf(!ready)('plan engine: CREATE2, pointers, calls, plugins', () => 
     expect((await validate(stale, [CHAIN_A])).report.chains[String(CHAIN_A)].create2).toMatchObject({ ok: false, blocking: true, code: 'DEPLOYMENT_TYPE_COMMITMENT_STALE' });
   }, 420_000);
 
+  it('composes through an installed call-products plugin and freezes its binding', async () => {
+    // The installed-plugin proof for the call-products execution mode. Scope
+    // is deliberately the compose + binding contract: the fixture repo has no
+    // contract whose function spawns another (and this suite never invokes
+    // forge to add one), so the producer RUN path stays covered by the
+    // deployEngine unit suite; what only an installed plugin can prove — the
+    // container round-trip, descriptor normalization, manifest gating, and
+    // service cross-checks against a real registry identity — is proven here.
+    await deploymentTypeInstaller.install({
+      kind: 'local',
+      contextDir: PLUGINS_DIR,
+      dockerfile: 'examples/stub-call-products/Dockerfile',
+    });
+    await TrustManager.getInstance().setTrust('stub-call-products', 'trusted', { repoWrite: false, net: false, secrets: [] });
+    DeploymentTypeService.getInstance().invalidate();
+    try {
+      const info = (await DeploymentTypeService.getInstance().list(true)).find((entry) => entry.pluginId === 'stub-call-products');
+      expect(info).toMatchObject({ execution: 'call-products', composeSupported: true, validateSupported: false });
+
+      // A real fixture artifact through the real freeze pipeline: none of the
+      // fixture contracts spawns anything, so the plugin's honest answer is a
+      // blocker — and the revision echoes untouched.
+      const producer = contracts().find((entry) => entry.id === 'box')!;
+      const blocked = await DeploymentTypeService.getInstance().compose('default', {
+        pluginId: 'stub-call-products', compositionId: 'itest-blocked', revision: 1,
+        values: {}, artifacts: { producer },
+      });
+      expect(blocked.revision).toBe(1);
+      expect(blocked.blocker).toMatch(/no state-changing function/i);
+      expect(blocked.composition).toBeUndefined();
+
+      // A spawner-shaped ABI through the SAME installed container (only the
+      // freeze is injected; artifact resolution is covered above and in unit
+      // tests): the service cross-checks the composition and derives the
+      // executable signature and payability from the authoritative ABI.
+      const spawnAbi = [{ type: 'function', name: 'spawn', stateMutability: 'nonpayable', inputs: [{ name: 'owner', type: 'address' }], outputs: [{ name: 'child', type: 'address' }] }];
+      const spawner = new DeploymentTypeService({
+        freezeInputs: async (_profileId, sources) => Object.fromEntries(sources.map((source) => [source.id, {
+          abi: spawnAbi, creationBytecode: '0x6000',
+          compiler: { pluginId: 'foundry', version: '1', settingsHash: 'a'.repeat(64) },
+          artifactHash: 'a'.repeat(64), repoDirty: false,
+        }])),
+      });
+      const composed = await spawner.compose('default', {
+        pluginId: 'stub-call-products', compositionId: 'itest-composed', revision: 2,
+        values: { target: SIGNER_A, spawnFunction: 'spawn(address)' },
+        artifacts: { producer, spawned: contracts().find((entry) => entry.id === 'counter')! },
+      });
+      expect(composed.revision).toBe(2);
+      expect(composed.binding).toMatchObject({ pluginId: 'stub-call-products', execution: 'call-products' });
+      expect(composed.composition).toEqual({
+        producer: { abiArtifactField: 'producer', targetField: 'target', functionField: 'spawnFunction', signature: 'spawn(address)', payable: false },
+        products: [{ key: 'spawned', artifactField: 'spawned', outputIndex: 0 }],
+      });
+      // Launch freezes exactly the reviewed identity the composer returned.
+      expect(await spawner.launchBinding('stub-call-products')).toEqual(composed.binding);
+    } finally {
+      DeploymentTypeService.getInstance().invalidate();
+      await deploymentTypeInstaller.uninstall('stub-call-products').catch(() => {});
+    }
+  }, 420_000);
+
   it('deploys a transparent wrapper atomically, captures its ProxyAdmin, and projects it', async () => {
     const type = await ContractTypeService.getInstance().frozenDescriptor('oz-transparent');
     const plan: DeploymentPlan = {

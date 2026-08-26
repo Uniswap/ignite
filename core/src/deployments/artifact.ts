@@ -1,7 +1,7 @@
 // Sanitized, portable deployment artifact projection. Run records are the
 // complete private audit source; this document is safe to commit/share.
 import path from 'node:path';
-import { isInitcodeStrategy } from './factory.js';
+import { isInitcodeStrategy, isProducedStrategy } from './produced.js';
 import type {
   DeploymentArtifact,
   DeploymentArtifactAttempt,
@@ -88,11 +88,11 @@ export function renderArtifact(
           const strategy = step?.kind === 'deploy' ? step.strategy ?? { kind: 'create' as const } : undefined;
           const dynamic = step?.kind === 'deploy' && dynamicDeterministicStepIds(run.plan, lane.chainId).has(step.id);
           const effectiveSalt = isInitcodeStrategy(strategy)
+            // A produced product is salted by its producer, not the proxy;
+            // only the initcode-submitting modes have a salt to report.
             ? (dynamic ? laneStep.salt : strategy.saltPerChain?.[key] ?? strategy.salt)
-            // A factory product is salted by the factory, not the proxy; only
-            // the raw-CREATE2 prediction mode has a salt to report.
-            // A factory salts its own product; the plan holds no salt for it.
             : undefined;
+          const binding = strategy?.kind === 'plugin' ? run.deploymentTypeBindings?.[strategy.pluginId] : undefined;
           const proxy = step?.kind === 'deploy' && step.wraps
             ? renderProxy(run, lane.chainId, step, laneStep)
             : undefined;
@@ -112,14 +112,20 @@ export function renderArtifact(
             ...(step ? { gasOverrides: sanitizeValue(mergeGas(step, lane.chainId)) } : {}),
             ...(signer ? { signerAddress: signer.address } : {}),
             ...(laneStep.address ? { address: laneStep.address } : {}),
+            // Same truth distinctions as run state: an operator-recorded
+            // address must never render as a prediction.
+            ...(laneStep.addressProvenance ? { addressProvenance: laneStep.addressProvenance } : {}),
             ...(laneStep.unresolvedTx
               ? { unresolvedTx: sanitizeValue(laneStep.unresolvedTx) }
               : {}),
             ...(strategy ? { strategy: {
               kind: strategy.kind,
               ...(strategy.kind === 'plugin' ? { pluginId: sanitizeText(strategy.pluginId) } : {}),
+              ...(binding ? { pluginVersion: sanitizeText(binding.pluginVersion), descriptorHash: binding.descriptorHash } : {}),
               ...(effectiveSalt ? { salt: effectiveSalt } : {}),
               ...(laneStep.predictedAddress ? { predictedAddress: laneStep.predictedAddress } : {}),
+              ...(laneStep.expectedAddress ? { expectedAddress: laneStep.expectedAddress } : {}),
+              ...(isProducedStrategy(strategy) ? { producedBy: strategy.producedBy } : {}),
               ...(dynamic && laneStep.notes?.length ? { notes: laneStep.notes.map(sanitizeText) } : {}),
             } } : {}),
             ...(step?.kind === 'deploy' && expected?.libraries ? { libraries: Object.entries(expected.libraries).map(([key, address]) => {
@@ -171,6 +177,9 @@ export function renderArtifact(
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
     ...(run.workflow ? { workflow: { name: sanitizeText(run.workflow.name), docHash: run.workflow.docHash } } : {}),
+    ...(Object.keys(run.deploymentTypeBindings ?? {}).length
+      ? { deploymentTypes: Object.values(run.deploymentTypeBindings!).map((binding) => ({ ...binding, pluginId: sanitizeText(binding.pluginId), pluginVersion: sanitizeText(binding.pluginVersion) })) }
+      : {}),
     contracts,
     validation: sanitizeValue(run.validation),
     lanes,
@@ -292,6 +301,9 @@ function renderAttempt(
     ...(attempt.resolution ? { resolution: attempt.resolution } : {}),
     ...(attempt.edits ? { edits: sanitizeValue(attempt.edits) } : {}),
     ...(attempt.expected ? { expected: sanitizeValue(attempt.expected) } : {}),
+    ...(attempt.resolutionData
+      ? { resolutionData: { recordedAddress: attempt.resolutionData.recordedAddress, ...(attempt.resolutionData.note ? { note: sanitizeText(attempt.resolutionData.note) } : {}) } }
+      : {}),
   };
 }
 

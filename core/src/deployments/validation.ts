@@ -40,7 +40,7 @@ import {
   callTargetAbi,
 } from './resolver.js';
 import { ackIsFresh, buildChainPredictions, buildInitcode, buildRuntimeCode, hasPredicted, type ChainPredictions } from './schedule.js';
-import { isFactoryStrategy, mergeFactoryArgs } from './factory.js';
+import { isProducedProductStep, isProducedStrategy } from './produced.js';
 import {
   simulateChain,
   type SimulationOutcome,
@@ -101,8 +101,9 @@ type Client = {
     maxPriorityFeePerGas?: bigint;
   }>;
   getCode?(args: { address: Hex }): Promise<Hex>;
-  // Factory products predicted by a helper resolve through one eth_call.
-  call?(args: { to: Hex; data: Hex; account?: Hex }): Promise<{ data?: Hex } | Hex | undefined>;
+  // Produced products resolve through one eth_call of their producer call —
+  // the exact from/to/data/value the run would use.
+  call?(args: { to: Hex; data: Hex; account?: Hex; value?: bigint }): Promise<{ data?: Hex } | Hex | undefined>;
   getTransactionCount?(args: {
     address: Hex;
     blockTag?: 'latest';
@@ -795,49 +796,48 @@ function validateArgs(
         toConstructorArgs(fn.inputs, resolveStepValues(step, chainId, resolveRef, fn.inputs, { frozen, contracts: plan.contracts }).args, 'call');
         continue;
       }
-      if (isFactoryStrategy(step.strategy)) {
-        // A factory supplies its product's constructor arguments itself, so
-        // demanding them here rejects every valid factory plan. What needs
-        // checking is the call that deploys: a fulfilledBy product's call is
-        // an ordinary call step already covered above, and a step carrying
-        // its own call gets the same discipline against the deploy function.
-        const strategy = step.strategy;
-        if (strategy.fulfilledBy) continue;
-        if (!strategy.signature)
+      if (isProducedStrategy(step.strategy)) {
+        // A producer supplies its product's constructor arguments itself, so
+        // demanding them here rejects every valid produced plan — a product's
+        // own args are verification declarations that may be incomplete. The
+        // call that deploys is an ordinary call step already covered above.
+        // What must hold structurally is that the producer's frozen ABI
+        // actually returns an address at this product's output index.
+        const producedBy = step.strategy.producedBy;
+        const producer = plan.steps.find(
+          (candidate) => candidate.id === producedBy.stepId
+        );
+        if (producer?.kind !== 'call')
+          return failure(
+            'PRODUCED_PRODUCER_INVALID',
+            `Produced step ${stepLabel(plan, step.id)} names ${producedBy.stepId}, which is not a call step`
+          );
+        const producerFn = callAbiItem(producer, chainId, callTargetAbi(plan, producer, chainId, frozen));
+        if (!producerFn)
           return failure(
             'SIGNATURE_NOT_IN_ABI',
-            `Factory step ${stepLabel(plan, step.id)} carries no deploy function`
+            `Producer call ${stepLabel(plan, producer.id)} carries no function signature`
           );
-        const fn = parseAbiItem(`function ${strategy.signature}`) as AbiFunction;
-        const merged = mergeFactoryArgs(strategy, chainId);
-        const known = new Set(
-          fn.inputs.map((entry, index) => entry.name || `arg${index}`)
-        );
-        const unknown = Object.keys(merged).filter((key) => !known.has(key));
-        if (unknown.length)
+        const output = producerFn.outputs[producedBy.outputIndex];
+        if (!output || output.type !== 'address')
           return failure(
-            'UNKNOWN_ARGUMENT',
-            `Unknown factory call arguments for ${stepLabel(plan, step.id)}`,
-            { fields: unknown }
+            'PRODUCED_OUTPUT_NOT_ADDRESS',
+            `Producer call ${stepLabel(plan, producer.id)} returns no address at output ${producedBy.outputIndex}`,
+            { stepId: step.id, outputIndex: producedBy.outputIndex }
           );
-        const missing = missingArgKeys([...fn.inputs], merged);
-        if (missing.length)
-          return failure(
-            'MISSING_ARGUMENT',
-            `Factory call arguments are missing for ${stepLabel(plan, step.id)}`,
-            { fields: missing }
-          );
-        toConstructorArgs(
-          fn.inputs,
-          resolveStepValues(
-            { ...step, args: merged, argsPerChain: undefined },
-            chainId,
-            resolveRef,
-            fn.inputs,
-            { frozen, contracts: plan.contracts }
-          ).args,
-          'call'
+        const duplicate = plan.steps.some(
+          (candidate) =>
+            candidate.id !== step.id &&
+            isProducedProductStep(candidate) &&
+            candidate.strategy.producedBy.stepId === producedBy.stepId &&
+            candidate.strategy.producedBy.outputIndex === producedBy.outputIndex
         );
+        if (duplicate)
+          return failure(
+            'PRODUCED_OUTPUT_DUPLICATE',
+            `Two products claim output ${producedBy.outputIndex} of producer ${stepLabel(plan, producer.id)}`,
+            { stepId: step.id, outputIndex: producedBy.outputIndex }
+          );
         continue;
       }
       const input = frozen[step.contractId];
@@ -902,7 +902,7 @@ function contractTypeProbes(plan: DeploymentPlan, contractTypes: Record<string, 
     const probe = contractTypes[wrapper.wraps.contractTypePluginId]?.descriptor.validation.probe;
     if (!probe) return [];
     try {
-      const fn = parseAbiItem(`function ${probe.call}`) as import('viem').AbiFunction;
+      const fn = parseAbiItem(`function ${probe.call}`) as AbiFunction;
       return [{ stepId: wrapper.wraps.stepId, data: encodeFunctionData({ abi: [fn], functionName: fn.name }) }];
     } catch { return []; }
   });
@@ -947,22 +947,49 @@ async function validateCreate2(
     { predictedAddress: Hex; initcodeHash: Hex32; salt: Hex32 }
   >;
 }> {
+  // Every produced strategy must resolve to an installed descriptor that
+  // declares call-products execution: a missing or mode-mismatched plugin
+  // blocks validation. CREATE2-mode plugin steps keep their existing checks
+  // inside the deterministic loop below (dynamic steps stay degraded, not
+  // blocked, exactly as before this execution discriminator existed).
+  const producedSteps = plan.steps.filter(isProducedProductStep);
+  if (producedSteps.length) {
+    let installedTypes: Awaited<ReturnType<typeof deps.deploymentTypes.list>>;
+    try {
+      installedTypes = await deps.deploymentTypes.list();
+    } catch (error) {
+      return { item: failure('DEPLOYMENT_TYPE_OP_FAILED', safeMessage(error, 'Deployment types could not be listed')) };
+    }
+    for (const step of producedSteps) {
+      const info = installedTypes.find((entry) => entry.pluginId === step.strategy.pluginId);
+      if (!info)
+        return { item: failure('DEPLOYMENT_TYPE_PLUGIN_MISSING', `Deployment-type plugin ${step.strategy.pluginId} is not installed`) };
+      if (info.execution !== 'call-products')
+        return {
+          item: failure(
+            'DEPLOYMENT_TYPE_EXECUTION_MISMATCH',
+            `Deployment-type plugin ${step.strategy.pluginId} declares ${info.execution} execution but ${stepLabel(plan, step.id)} is a produced deployment`
+          ),
+        };
+    }
+  }
   const deterministic = plan.steps.filter(
     (step): step is import('@ignite/api').DeployStep =>
       step.kind === 'deploy' &&
-      (step.strategy?.kind === 'create2' || step.strategy?.kind === 'plugin')
+      (step.strategy?.kind === 'create2' ||
+        (step.strategy?.kind === 'plugin' && !isProducedStrategy(step.strategy)))
   );
   if (!deterministic.length) {
-    // Factory products have no initcode and no proxy to check, but their
-    // predicted addresses are still the review's address picture — the plain
+    // Produced products have no initcode and no proxy to check, but their
+    // expected addresses are still the review's address picture — the plain
     // early return used to drop them whenever no create2/plugin step existed.
     const predicted: Record<string, PredictedEntryInfo> = {};
     // An absent prediction computed a reason and then threw it away, so a
-    // failed factory call rendered as nothing at all — indistinguishable from
+    // failed producer call rendered as nothing at all — indistinguishable from
     // "this feature does not exist". Carry the reason through `degraded`.
     const degradedSteps: ProvisionalStepInfo[] = [];
     for (const step of plan.steps) {
-      if (step.kind !== 'deploy' || !isFactoryStrategy(step.strategy)) continue;
+      if (!isProducedProductStep(step)) continue;
       const entry = snapshot?.entries[step.id];
       if (hasPredicted(entry)) predicted[step.id] = { ...entry, provisional: true };
       else if (entry && 'absent' in entry)
@@ -976,8 +1003,8 @@ async function validateCreate2(
         // every prediction failed it would otherwise announce predicted
         // addresses over a list that reads "unavailable" all the way down.
         Object.keys(predicted).length
-          ? 'Factory product addresses are predicted'
-          : 'Factory product addresses could not be predicted',
+          ? 'Produced product addresses are expected'
+          : 'Produced product addresses could not be predicted',
         {
           predicted,
           ...(degradedSteps.length ? { provisionalSteps: degradedSteps } : {}),
@@ -1042,6 +1069,15 @@ async function validateCreate2(
             item: failure(
               'DEPLOYMENT_TYPE_PLUGIN_MISSING',
               `Deployment-type plugin ${strategy.pluginId} is not installed`
+            ),
+          };
+        // A call-products plugin cannot back a per-step CREATE2 strategy —
+        // its contract has no prepare/validate operations to call.
+        if (info.execution !== 'create2')
+          return {
+            item: failure(
+              'DEPLOYMENT_TYPE_EXECUTION_MISMATCH',
+              `Deployment-type plugin ${strategy.pluginId} declares ${info.execution} execution but ${stepLabel(plan, step.id)} is a CREATE2 deployment`
             ),
           };
         const prepared = strategy.prepared?.[String(chainId)];
@@ -1112,11 +1148,11 @@ async function validateCreate2(
           ),
         };
     }
-    // Factory steps are in neither `deterministic` nor, ordinarily,
-    // `snapshot.dynamic` — so an absent factory prediction reached no list at
+    // Produced products are in neither `deterministic` nor, ordinarily,
+    // `snapshot.dynamic` — so an absent produced prediction reached no list at
     // all and vanished from review. Collect them explicitly.
-    const factoryDegraded: ProvisionalStepInfo[] = plan.steps.flatMap((step) => {
-      if (step.kind !== 'deploy' || !isFactoryStrategy(step.strategy)) return [];
+    const producedDegraded: ProvisionalStepInfo[] = plan.steps.flatMap((step) => {
+      if (!isProducedProductStep(step)) return [];
       const entry = snapshot.entries[step.id];
       return entry && 'absent' in entry
         ? [{ stepId: step.id, degraded: entry.reason }]
@@ -1127,7 +1163,7 @@ async function validateCreate2(
       return hasPredicted(entry)
         ? { stepId: step.id, predictedAddress: entry.predictedAddress, ...(entry.notes?.length ? { note: entry.notes.join('; ') } : {}) }
         : { stepId: step.id, degraded: entry && 'reason' in entry ? entry.reason : 'prediction unavailable' };
-    }), ...factoryDegraded];
+    }), ...producedDegraded];
     const reviewPredicted: Record<string, PredictedEntryInfo> = Object.fromEntries(Object.entries(snapshot.entries).flatMap(([id, entry]) => hasPredicted(entry) ? [[id, { ...entry, ...(entry.provisional ? { provisional: true } : {}) }]] : []));
     // Review shows the whole address picture: plain creates are nonce-derived
     // facts-to-be, so they carry the provisional marker with a create kind

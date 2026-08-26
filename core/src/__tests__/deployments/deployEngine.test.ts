@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { encodeFunctionResult, getContractAddress, keccak256 } from 'viem';
+import { encodeAbiParameters, encodeFunctionResult, getContractAddress, keccak256, parseAbi } from 'viem';
 import type {
   DeploymentPlan,
   DeployStep,
@@ -35,6 +35,10 @@ const RECEIPT = {
   gasUsed: '21000',
   effectiveGasPrice: '1000000000',
 };
+
+// launch freezes a reviewed deployment-type binding for every plugin
+// strategy in the plan; CREATE2-mode fixtures share this identity.
+const create2Binding = async (pluginId: string) => ({ pluginId, pluginVersion: '1.0.0', execution: 'create2' as const, descriptorHash: HASH });
 
 function makePlan(overrides?: Partial<DeploymentPlan>): DeploymentPlan {
   return {
@@ -350,7 +354,7 @@ describe('DeployEngine', () => {
     const plan = dynamicPlan({ kind: 'plugin', pluginId: 'hook' });
     const harness = makeEngine({
       validate: async () => dynamicValidation(plan),
-      deploymentTypes: { prepare, list: async () => [{ pluginId: 'hook', label: 'Hook', description: '', params: [], validateSupported: false }], validate: vi.fn() },
+      deploymentTypes: { prepare, list: async () => [{ pluginId: 'hook', pluginVersion: '1.0.0', execution: 'create2' as const, label: 'Hook', description: '', params: [], validateSupported: false, composeSupported: false }], validate: vi.fn(), launchBinding: create2Binding },
       getCode: async (_url, address) => address.toLowerCase() === predicted?.toLowerCase() && ++reads > 1 ? '0x01' : '0x',
     });
     const run = await launchDefault(harness, plan);
@@ -367,7 +371,7 @@ describe('DeployEngine', () => {
     const plan = dynamicPlan({ kind: 'plugin', pluginId: 'hook' });
     const harness = makeEngine({
       validate: async () => dynamicValidation(plan),
-      deploymentTypes: { prepare: vi.fn(async () => ({ salt, predictedAddress: ADDRESS, notes: [] })), list: async () => [], validate: vi.fn() },
+      deploymentTypes: { prepare: vi.fn(async () => ({ salt, predictedAddress: ADDRESS, notes: [] })), list: async () => [], validate: vi.fn(), launchBinding: create2Binding },
     });
     const run = await launchDefault(harness, plan);
     await eventually(async () => (await harness.engine.get('p1', run.id))?.lanes['1'].status === 'paused', 'mismatch paused');
@@ -383,7 +387,7 @@ describe('DeployEngine', () => {
       .mockImplementation(async (_pluginId: string, input: { initcode: `0x${string}` }) => ({ salt, predictedAddress: predictCreate2Address(salt, initcodeHashOf(input.initcode)), notes: [] }));
     const harness = makeEngine({
       validate: async () => dynamicValidation(plan),
-      deploymentTypes: { prepare, list: async () => [], validate: vi.fn() },
+      deploymentTypes: { prepare, list: async () => [], validate: vi.fn(), launchBinding: create2Binding },
     });
     const run = await launchDefault(harness, plan);
     await eventually(async () => (await harness.engine.get('p1', run.id))?.lanes['1'].status === 'paused', 'prepare paused');
@@ -417,7 +421,7 @@ describe('DeployEngine', () => {
         chain.balance = { ok: false, blocking: false, message: 'balance unknown' };
         return result;
       },
-      deploymentTypes: { prepare: vi.fn(async () => { throw new Error('bad flags'); }), list: async () => [], validate: vi.fn() },
+      deploymentTypes: { prepare: vi.fn(async () => { throw new Error('bad flags'); }), list: async () => [], validate: vi.fn(), launchBinding: create2Binding },
     });
     const run = await launchDefault(harness, plan);
     await eventually(async () => (await harness.engine.get('p1', run.id))?.lanes['1'].pause?.reason === 'estimation', 'degraded launch reached JIT');
@@ -430,7 +434,7 @@ describe('DeployEngine', () => {
     const prepare = vi.fn(async (_pluginId: string, input: { initcode: `0x${string}` }) => ({ salt, predictedAddress: predictCreate2Address(salt, initcodeHashOf(input.initcode)), notes: ['collision'] }));
     const harness = makeEngine({
       validate: async () => dynamicValidation(plan),
-      deploymentTypes: { prepare, list: async () => [], validate: vi.fn() },
+      deploymentTypes: { prepare, list: async () => [], validate: vi.fn(), launchBinding: create2Binding },
       getCode: async () => '0x01',
     });
     const run = await launchDefault(harness, plan);
@@ -473,7 +477,7 @@ describe('DeployEngine', () => {
     strategy.acknowledgeDeployed = { '1': { predictedAddress, initcodeHash: initcodeHashOf(initcode) } };
     const harness = makeEngine({
       validate: async () => dynamicValidation(plan),
-      deploymentTypes: { prepare: vi.fn(async () => ({ salt, predictedAddress, notes: [] })), list: async () => [], validate: vi.fn() },
+      deploymentTypes: { prepare: vi.fn(async () => ({ salt, predictedAddress, notes: [] })), list: async () => [], validate: vi.fn(), launchBinding: create2Binding },
       getCode: async () => '0x01',
     });
     const run = await launchDefault(harness, plan);
@@ -503,7 +507,7 @@ describe('DeployEngine', () => {
     let sends = 0;
     const first = makeEngine({
       validate: async () => dynamicValidation(plan),
-      deploymentTypes: { prepare, list: async () => [], validate: vi.fn() },
+      deploymentTypes: { prepare, list: async () => [], validate: vi.fn(), launchBinding: create2Binding },
       executeTx: async (args, ctx) => {
         sends += 1;
         if (sends === 1) { await args.onPhase?.('broadcasting', { tx: { nonce: 0 }, rawTx: RAW_TX, txHash: TX_HASH }); return { txHash: TX_HASH, ...RECEIPT }; }
@@ -517,7 +521,7 @@ describe('DeployEngine', () => {
     }, 'JIT attempt persisted');
     await first.engine.shutdown();
     let recoveryReads = 0;
-    const second = makeEngine({ runStore: first.store, deploymentTypes: { prepare, list: async () => [], validate: vi.fn() }, getCode: async () => ++recoveryReads === 1 ? '0x' : '0x01' });
+    const second = makeEngine({ runStore: first.store, deploymentTypes: { prepare, list: async () => [], validate: vi.fn(), launchBinding: create2Binding }, getCode: async () => ++recoveryReads === 1 ? '0x' : '0x01' });
     await second.engine.recoverOnStartup();
     const recovered = (await second.engine.get('p1', run.id))!;
     const step = recovered.lanes['1'].steps[1];
@@ -543,7 +547,7 @@ describe('DeployEngine', () => {
     strategy.prepared = { '1': { initcodeHash: prediction.initcodeHash, predictedAddress: prediction.predictedAddress } };
     const harness = makeEngine({
       validate: async () => ({ ...dynamicValidation(plan), predicted: { '1': { 'step-2': prediction } } }),
-      deploymentTypes: { prepare: vi.fn(async (_id, input) => { await gate.promise; return { salt, predictedAddress: predictCreate2Address(salt, initcodeHashOf(input.initcode)), notes: [] }; }), list: async () => [], validate: vi.fn() },
+      deploymentTypes: { prepare: vi.fn(async (_id, input) => { await gate.promise; return { salt, predictedAddress: predictCreate2Address(salt, initcodeHashOf(input.initcode)), notes: [] }; }), list: async () => [], validate: vi.fn(), launchBinding: create2Binding },
       getCode: async (_url, address) => address.toLowerCase() === prediction.predictedAddress.toLowerCase() ? '0x01' : '0x',
     });
     const run = await launchDefault(harness, plan);
@@ -568,7 +572,7 @@ describe('DeployEngine', () => {
     strategy.prepared = { '1': { initcodeHash: initcodeHashOf(staticInitcode), predictedAddress: staticPrediction } };
     const harness = makeEngine({
       validate: async () => dynamicValidation(plan),
-      deploymentTypes: { prepare: vi.fn(async (_id, input) => ({ salt: jitSalt, predictedAddress: predictCreate2Address(jitSalt, initcodeHashOf(input.initcode)), notes: ['old JIT'] })), list: async () => [], validate: vi.fn() },
+      deploymentTypes: { prepare: vi.fn(async (_id, input) => ({ salt: jitSalt, predictedAddress: predictCreate2Address(jitSalt, initcodeHashOf(input.initcode)), notes: ['old JIT'] })), list: async () => [], validate: vi.fn(), launchBinding: create2Binding },
       getCode: async () => '0x01',
     });
     const run = await launchDefault(harness, plan);
@@ -1288,6 +1292,697 @@ describe('DeployEngine', () => {
     await expect(launchDefault(harness, makePlan({ chains: [1] }))).rejects.toMatchObject({ code: ErrorCodes.DEPLOYMENT_VALIDATION_FAILED });
     expect((await harness.store.list('p1')).runs).toHaveLength(0);
   });
+
+  it('recheck of a mined timed-out receipt resumes the lane to completion', async () => {
+    // The mainnet stall: a slow tx pauses receipt-timeout, the operator
+    // rechecks once the tx mined — reconcile confirms the step, but the lane
+    // then needs its driver restarted and the stale pause cleared, or the
+    // record reads "running" forever while nothing executes.
+    const harness = makeEngine({ getReceipt: async () => ({ ...RECEIPT }) });
+    const { run, attemptId, chainId } = await seedPausedRun(harness, { reason: 'receipt-timeout', submitted: true });
+    await harness.engine.resolveLane('p1', run.id, chainId, { action: 'recheck', attemptId, commandId: crypto.randomUUID() });
+    await eventually(async () => (await harness.store.get('p1', run.id))?.lanes[String(chainId)]?.status === 'completed', 'lane completed after recheck');
+    const lane = (await harness.store.get('p1', run.id))!.lanes[String(chainId)];
+    expect(lane.pause).toBeUndefined();
+    expect(lane.steps.map((step) => step.status)).toEqual(['confirmed', 'confirmed']);
+  });
+
+  it('confirm-hash of a mid-plan receipt resumes the lane to completion', async () => {
+    // A confirmation that lands mid-plan leaves the lane 'running' with no
+    // driver: nothing executes the remaining steps, resolveLane rejects every
+    // verb as STALE_RESOLVE (no pause exists any more), resume() skips
+    // non-paused lanes, and abort() only force-terminates paused/pending ones
+    // — the run is wedged until a restart re-claims it as 'interrupted'.
+    const harness = makeEngine({ capability: 'sign-and-send', getReceipt: async () => RECEIPT });
+    const { run, attemptId, chainId } = await seedPausedRun(harness, { reason: 'needs-review', submitted: true });
+    await harness.engine.resolveLane('p1', run.id, chainId, { action: 'confirm-hash', attemptId, commandId: crypto.randomUUID(), txHash: TX_HASH });
+    await eventually(async () => (await harness.store.get('p1', run.id))?.lanes[String(chainId)]?.status === 'completed', 'lane completed after confirm-hash');
+    const lane = (await harness.store.get('p1', run.id))!.lanes[String(chainId)];
+    expect(lane.pause).toBeUndefined();
+    expect(lane.steps.map((step) => step.status)).toEqual(['confirmed', 'confirmed']);
+  });
+
+  it('resume restarts the driver after a mid-plan receipt confirmation on both signer paths', async () => {
+    // Sign-only: a persisted rawTx + hash that already mined.
+    const signOnly = makeEngine({ getReceipt: async () => RECEIPT });
+    const mined = await seedPausedRun(signOnly, { reason: 'interrupted', submitted: true });
+    await signOnly.engine.resume('p1', mined.run.id);
+    await eventually(async () => (await signOnly.store.get('p1', mined.run.id))?.lanes['1']?.status === 'completed', 'sign-only lane completed after resume');
+    expect((await signOnly.store.get('p1', mined.run.id))!.lanes['1'].steps.map((step) => step.status)).toEqual(['confirmed', 'confirmed']);
+
+    // Sign-and-send paused on rpc: a durable hash with no raw bytes, so the
+    // attempt can only be reconciled from its receipt, never rebroadcast.
+    let rebroadcasts = 0;
+    const signAndSend = makeEngine({ capability: 'sign-and-send', getReceipt: async () => RECEIPT, rebroadcast: async () => { rebroadcasts += 1; return TX_HASH; } });
+    const inFlight = await seedPausedRun(signAndSend, { reason: 'rpc', submitted: true });
+    await signAndSend.store.mutate('p1', inFlight.run.id, (current) => {
+      delete current.lanes['1'].steps[0].attempts[0]!.rawTx;
+    });
+    await signAndSend.engine.resume('p1', inFlight.run.id);
+    await eventually(async () => (await signAndSend.store.get('p1', inFlight.run.id))?.lanes['1']?.status === 'completed', 'sign-and-send lane completed after resume');
+    expect((await signAndSend.store.get('p1', inFlight.run.id))!.lanes['1'].steps.map((step) => step.status)).toEqual(['confirmed', 'confirmed']);
+    expect(rebroadcasts).toBe(0);
+  });
+
+  describe('produced deployments', () => {
+    // All-digit addresses sidestep checksum casing in string comparisons.
+    const FACTORY = '0x0000000000000000000000000000000000000301' as const;
+    const JAR = '0x1111111111111111111111111111111111111111' as const;
+    const RELEASER = '0x2222222222222222222222222222222222222222' as const;
+    const OTHER = '0x3333333333333333333333333333333333333333' as const;
+    const ZERO = '0x0000000000000000000000000000000000000000' as const;
+    // Call steps store the canonical input-only signature; names, outputs and
+    // payability come from the frozen abiContractId ABI.
+    const DEPLOY_SIG = 'deploy(address)';
+    const DEPLOY_ABI = parseAbi(['function deploy(address owner) returns (address jar, address releaser)']);
+    const TRANSFER_ABI = { type: 'function', name: 'transferOwnership', stateMutability: 'nonpayable', inputs: [{ name: 'newOwner', type: 'address' }], outputs: [] };
+    const PRODUCTS_RESULT = encodeFunctionResult({ abi: DEPLOY_ABI, functionName: 'deploy', result: [JAR, RELEASER] });
+    const producedBinding = async (pluginId: string) => ({ pluginId, pluginVersion: '1.0.0', execution: 'call-products' as const, descriptorHash: HASH });
+    const producedTypes = () => ({ prepare: vi.fn(), validate: vi.fn(), list: async () => [], launchBinding: vi.fn(producedBinding) });
+
+    // The composer's shape: an ordinary call step performs the deploy, the two
+    // products point back at it via producedBy, and a follow-up call targets a
+    // product — the exact plan a TJAR jar+releaser deployment produces.
+    function producedPlan(): DeploymentPlan {
+      return makePlan({ chains: [1], contracts: [
+        ...makePlan().contracts,
+        { id: 'factory-abi', repoPathOrUrl: 'repo', frameworkId: 'f', artifactPath: 'a3', contractName: 'Factory', sourcePath: 'Factory.sol' },
+      ], steps: [
+        { id: 'factory-call', kind: 'call', target: { kind: 'address', address: FACTORY }, signature: DEPLOY_SIG, args: { owner: ADDRESS }, abiContractId: 'factory-abi' },
+        { id: 'jar-product', kind: 'deploy', contractId: 'c1', strategy: { kind: 'plugin', pluginId: 'factory', producedBy: { stepId: 'factory-call', outputIndex: 0 } } },
+        { id: 'releaser-product', kind: 'deploy', contractId: 'c2', strategy: { kind: 'plugin', pluginId: 'factory', producedBy: { stepId: 'factory-call', outputIndex: 1 } } },
+        { id: 'handoff', kind: 'call', target: { kind: 'step', stepId: 'releaser-product' }, signature: 'transferOwnership(address)', args: { newOwner: ADDRESS } },
+      ] as DeploymentPlan['steps'] });
+    }
+    function producedValidation(plan: DeploymentPlan) {
+      const result = validated(plan);
+      // The producer resolves its function against the frozen abiContractId
+      // ABI, and the follow-up call against the product's frozen ABI.
+      (result.frozen['factory-abi'] as { abi: unknown }).abi = DEPLOY_ABI;
+      (result.frozen.c2 as { abi: unknown }).abi = [TRANSFER_ABI];
+      return result;
+    }
+    function recordingExecuteTx(executed: Array<{ to?: string | null; data: string }>, events?: string[]) {
+      return async (args: { to?: `0x${string}` | null; data: `0x${string}`; onPhase?: (phase: 'built' | 'signed' | 'broadcasting', data?: unknown) => Promise<void> | void }) => {
+        events?.push('broadcast');
+        executed.push({ to: args.to, data: args.data });
+        await args.onPhase?.('built', { tx: { nonce: executed.length } });
+        await args.onPhase?.('broadcasting', { tx: { nonce: executed.length }, rawTx: RAW_TX, txHash: TX_HASH });
+        return { txHash: TX_HASH, ...RECEIPT };
+      };
+    }
+    // Product code appears only once the producer has broadcast; the
+    // pre-broadcast occupied check must see empty addresses.
+    function productCode(executed: { length: number }) {
+      return async (_url: string, address: `0x${string}`) =>
+        (((address === JAR || address === RELEASER) && executed.length > 0 ? '0x6001' : '0x') as `0x${string}`);
+    }
+
+    it('commits product addresses from one exact pre-broadcast simulation', async () => {
+      const events: string[] = [];
+      const calls: Array<{ to?: string; from?: string; value?: bigint }> = [];
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: producedTypes(),
+        call: async (_url: string, args: { to: `0x${string}`; data: `0x${string}`; from?: `0x${string}` }) => { events.push('simulate'); calls.push(args); return PRODUCTS_RESULT as `0x${string}`; },
+        getCode: productCode(executed),
+        executeTx: recordingExecuteTx(executed, events) as never,
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed');
+      const lane = (await harness.store.get('p1', run.id))!.lanes['1'];
+      // Confirmed at the expected address with observed provenance — never a
+      // predictedAddress, which belongs to CREATE/CREATE2 modes.
+      expect(lane.steps[1]).toMatchObject({ status: 'confirmed', address: JAR, expectedAddress: JAR, addressProvenance: { kind: 'observed-at-expected', expectedAddress: JAR } });
+      expect(lane.steps[2]).toMatchObject({ status: 'confirmed', address: RELEASER, expectedAddress: RELEASER, addressProvenance: { kind: 'observed-at-expected', expectedAddress: RELEASER } });
+      expect(lane.steps[1].predictedAddress).toBeUndefined();
+      // One simulation serves every product of the call, with the signer as
+      // sender — sender-scoped factory salts (TJAR) derive different products
+      // for a different from.
+      expect(calls).toEqual([expect.objectContaining({ to: FACTORY, from: ADDRESS })]);
+      expect(events[0]).toBe('simulate');
+      // The follow-up call resolved its target through the product's address.
+      expect(executed).toHaveLength(2);
+      expect(executed[1]!.to).toBe(RELEASER);
+    });
+
+    it('pauses the producer before broadcast when the simulation fails, and retry recovers', async () => {
+      let healthy = false;
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: producedTypes(),
+        call: async () => { if (!healthy) throw new Error('boom'); return PRODUCTS_RESULT as `0x${string}`; },
+        getCode: productCode(executed),
+        executeTx: recordingExecuteTx(executed) as never,
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'paused', 'lane paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      // Pre-broadcast, on the producer, with retry available — never a
+      // confirmed producer call whose products are unrecoverable.
+      expect(paused.pause).toMatchObject({ reason: 'estimation', stepIndex: 0 });
+      expect(executed).toHaveLength(0);
+      expect(paused.steps[1]!.expectedAddress).toBeUndefined();
+      healthy = true;
+      await harness.engine.resolveLane('p1', run.id, 1, { action: 'retry', attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID() });
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed after retry');
+      expect(executed).toHaveLength(2);
+    });
+
+    it.each([
+      ['duplicate product addresses', [JAR, JAR] as const, /both resolve to/],
+      ['a zero product address', [ZERO, RELEASER] as const, /no usable address at output 0/],
+    ])('pauses estimation pre-broadcast on %s', async (_label, result, message) => {
+      // The whole output set is accepted or rejected together: a simulation
+      // that cannot name every distinct nonzero product commits nothing.
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: producedTypes(),
+        call: async () => encodeFunctionResult({ abi: DEPLOY_ABI, functionName: 'deploy', result: result as never }),
+        getCode: productCode(executed),
+        executeTx: recordingExecuteTx(executed) as never,
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'paused', 'lane paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(paused.pause).toMatchObject({ reason: 'estimation', stepIndex: 0, error: expect.stringMatching(message) });
+      expect(executed).toHaveLength(0);
+      expect(paused.steps[1]!.expectedAddress).toBeUndefined();
+    });
+
+    it('pauses produced-address-occupied before broadcast and allows only retry, edit, and abort', async () => {
+      let occupied = true;
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: async (_url: string, address: `0x${string}`) => {
+          if (address === JAR && occupied) return '0x6001' as const;
+          return productCode(executed)('', address);
+        },
+        executeTx: recordingExecuteTx(executed) as never,
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'paused', 'occupied paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      // The existing contract is not a product of this call: nothing was
+      // broadcast, no expected address was persisted, and there is no
+      // accept/skip path that would claim it is.
+      expect(paused.pause).toMatchObject({ reason: 'produced-address-occupied', stepIndex: 0 });
+      expect(executed).toHaveLength(0);
+      expect(paused.steps[1]!.expectedAddress).toBeUndefined();
+      for (const action of ['skip', 'accept-deployed', 'recheck'] as const) {
+        await expect(
+          harness.engine.resolveLane('p1', run.id, 1, { action, attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID() } as ResolveLaneRequest)
+        ).rejects.toMatchObject({ code: ErrorCodes.ILLEGAL_RESOLVE });
+      }
+      occupied = false;
+      await harness.engine.resolveLane('p1', run.id, 1, { action: 'retry', attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID() });
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed after retry');
+      expect(executed).toHaveLength(2);
+    });
+
+    it('pauses pointer-unresolved when a product has no persisted expected address', async () => {
+      // The producer commits expected addresses before it broadcasts, so a
+      // product reached without one means the producer call never executed
+      // inside this run (e.g. a record recovered from before that commit).
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: producedTypes(),
+        call: async () => { throw new Error('boom'); },
+        getCode: productCode(executed),
+        executeTx: recordingExecuteTx(executed) as never,
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'paused', 'producer paused');
+      const attemptId = crypto.randomUUID();
+      await harness.store.mutate('p1', run.id, (current) => {
+        const lane = current.lanes['1'];
+        lane.steps[0].status = 'confirmed';
+        lane.steps[0].attempts.push({ id: crypto.randomUUID(), startedAt: new Date(0).toISOString(), txHash: TX_HASH });
+        lane.steps[1].attempts = [{ id: attemptId, startedAt: new Date(0).toISOString() }];
+        lane.currentStepIndex = 1;
+        lane.pause = { reason: 'interrupted', stepIndex: 1, error: 'seeded interruption', attemptId };
+      });
+      await harness.engine.resume('p1', run.id);
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.pause?.reason === 'pointer-unresolved', 'product fail closed');
+      expect((await harness.store.get('p1', run.id))!.lanes['1'].pause?.error).toContain('no expected address');
+    });
+
+    it('pauses produced-code-missing after a successful receipt; recheck stays read-only and confirms', async () => {
+      let jarVisible = false;
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const enqueued: Enqueued[] = [];
+      const harness = makeEngine({
+        validate: async (p) => verifiableProducedValidation(p),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: async (_url: string, address: `0x${string}`) => {
+          if (address === JAR) return (jarVisible ? '0x6001' : '0x') as `0x${string}`;
+          return productCode(executed)('', address);
+        },
+        executeTx: recordingExecuteTx(executed) as never,
+        verificationQueue: recordingQueue(enqueued),
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.pause?.reason === 'produced-code-missing', 'code-missing paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      // The producer's receipt and the committed expectations are preserved:
+      // pausing must not fabricate success or rewrite the transaction facts.
+      expect(paused.pause?.stepIndex).toBe(1);
+      expect(paused.steps[0]).toMatchObject({ status: 'confirmed', attempts: [expect.objectContaining({ txHash: TX_HASH })] });
+      expect(paused.steps[1]!.expectedAddress).toBe(JAR);
+      // Only recheck, record-deployed-address, and abort-lane are legal here.
+      for (const action of ['retry', 'skip', 'accept-deployed'] as const) {
+        await expect(
+          harness.engine.resolveLane('p1', run.id, 1, { action, attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID() } as ResolveLaneRequest)
+        ).rejects.toMatchObject({ code: ErrorCodes.ILLEGAL_RESOLVE });
+      }
+      // A recheck with no code yet changes nothing and never rebroadcasts.
+      await harness.engine.resolveLane('p1', run.id, 1, { action: 'recheck', attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID() });
+      const still = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(still.pause).toMatchObject({ reason: 'produced-code-missing', attemptId: paused.pause!.attemptId });
+      jarVisible = true;
+      await harness.engine.resolveLane('p1', run.id, 1, { action: 'recheck', attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID() });
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed after recheck');
+      const lane = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(lane.steps[1]).toMatchObject({ status: 'confirmed', address: JAR, addressProvenance: { kind: 'observed-at-expected', expectedAddress: JAR } });
+      // Read-only by contract: the only broadcasts remain the producer call
+      // and the follow-up call — recheck sent nothing.
+      expect(executed).toHaveLength(2);
+      await eventually(() => enqueued.some((entry) => entry.stepId === 'jar-product'), 'recheck enqueued verification');
+      expect(enqueued.find((entry) => entry.stepId === 'jar-product')).toMatchObject({ address: JAR, creationTxHash: TX_HASH });
+    });
+
+    it('confirm-hash on an interrupted producer runs the products its broadcast already committed', async () => {
+      // The mainline crash path: core dies while a sign-and-send producer
+      // submission is in flight, startup recovery converts the interrupted
+      // lane to needs-review, and the operator supplies the mined hash. The
+      // products' expected addresses were committed BEFORE the broadcast, so
+      // a restarted driver is the only thing standing between that
+      // confirmation and a finished plan.
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const harness = makeEngine({
+        capability: 'sign-and-send',
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: productCode(executed),
+        executeTx: recordingExecuteTx(executed) as never,
+        getReceipt: async () => ({ ...RECEIPT, contractAddress: null }),
+        getTxForProvenance: async () => ({ from: ADDRESS, to: FACTORY, input: executed[0]!.data as `0x${string}`, value: 0n }),
+      });
+      const gate = createGate();
+      const gated = makeEngine({
+        runStore: harness.store,
+        capability: 'sign-and-send',
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: productCode(executed),
+        // A sign-and-send provider exposes a hash but no raw bytes, then the
+        // process dies before the receipt is ever seen.
+        executeTx: (async (args: { to?: `0x${string}` | null; data: `0x${string}`; onPhase?: (phase: string, data?: unknown) => Promise<void> | void }, ctx: { signal: AbortSignal }) => {
+          executed.push({ to: args.to, data: args.data });
+          await args.onPhase?.('built', { tx: { nonce: 1 } });
+          await args.onPhase?.('broadcasting', { tx: { nonce: 1 }, txHash: TX_HASH });
+          return holdUntilAborted(gate.promise, ctx.signal);
+        }) as never,
+      });
+      const run = await launchDefault(gated, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.steps[0]?.status === 'broadcasting', 'producer in flight');
+      await gated.engine.shutdown();
+      gate.release();
+      // Durably committed pre-broadcast, exactly what makes the confirmation
+      // sufficient to finish the plan.
+      expect((await harness.store.get('p1', run.id))!.lanes['1'].steps[1]!.expectedAddress).toBe(JAR);
+
+      await harness.engine.recoverOnStartup();
+      const recovered = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(recovered.pause).toMatchObject({ reason: 'needs-review', stepIndex: 0 });
+      await harness.engine.resolveLane('p1', run.id, 1, { action: 'confirm-hash', attemptId: recovered.pause!.attemptId, commandId: crypto.randomUUID(), txHash: TX_HASH });
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed after producer confirm-hash');
+      const lane = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(lane.pause).toBeUndefined();
+      expect(lane.steps.map((step) => step.status)).toEqual(['confirmed', 'confirmed', 'confirmed', 'confirmed']);
+      expect(lane.steps[1]).toMatchObject({ address: JAR, addressProvenance: { kind: 'observed-at-expected', expectedAddress: JAR } });
+      expect(lane.steps[2]).toMatchObject({ address: RELEASER, addressProvenance: { kind: 'observed-at-expected', expectedAddress: RELEASER } });
+      // The producer was never re-sent: the only further broadcast is the
+      // follow-up call, resolved through the product's address.
+      expect(executed).toHaveLength(2);
+      expect(executed[1]!.to).toBe(RELEASER);
+    });
+
+    it('record-deployed-address reconciles a stale expected address with operator provenance', async () => {
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const enqueued: Enqueued[] = [];
+      const harness = makeEngine({
+        validate: async (p) => verifiableProducedValidation(p),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        // Mutable factory state moved the jar: code appears at OTHER, never
+        // at the simulated JAR address.
+        getCode: async (_url: string, address: `0x${string}`) => {
+          if (address === JAR) return '0x' as const;
+          if (address === OTHER && executed.length > 0) return '0x6001' as const;
+          return productCode(executed)('', address);
+        },
+        executeTx: recordingExecuteTx(executed) as never,
+        verificationQueue: recordingQueue(enqueued),
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.pause?.reason === 'produced-code-missing', 'code-missing paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      await harness.engine.resolveLane('p1', run.id, 1, {
+        action: 'record-deployed-address', attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID(),
+        address: OTHER, note: 'factory nonce advanced between simulation and inclusion',
+      });
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed after reconciliation');
+      const lane = (await harness.store.get('p1', run.id))!.lanes['1'];
+      // Honest facts: the final address is the operator's attestation, the
+      // expected address stays what the simulation committed, and provenance
+      // says exactly which is which.
+      expect(lane.steps[1]).toMatchObject({
+        status: 'confirmed',
+        address: OTHER,
+        expectedAddress: JAR,
+        addressProvenance: { kind: 'operator-recorded', expectedAddress: JAR, recordedAddress: OTHER, note: 'factory nonce advanced between simulation and inclusion' },
+      });
+      const settled = lane.steps[1].attempts.find((entry) => entry.id === paused.pause!.attemptId)!;
+      expect(settled).toMatchObject({ resolution: 'record-deployed-address', resolutionData: { recordedAddress: OTHER }, endedAt: expect.any(String) });
+      // Verification still attributes the PRODUCER transaction even though
+      // the final address was manually reconciled.
+      await eventually(() => enqueued.some((entry) => entry.stepId === 'jar-product'), 'reconciled product enqueued');
+      expect(enqueued.find((entry) => entry.stepId === 'jar-product')).toMatchObject({ address: OTHER, creationTxHash: TX_HASH });
+      // The lane advanced past the product and finished the plan.
+      expect(executed).toHaveLength(2);
+    });
+
+    it('rejects an invalid recorded address without touching persisted facts', async () => {
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const harness = makeEngine({
+        validate: async (p) => producedValidation(p),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: async (_url: string, address: `0x${string}`) => {
+          if (address === JAR || address === OTHER) return '0x' as const;
+          return productCode(executed)('', address);
+        },
+        executeTx: recordingExecuteTx(executed) as never,
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.pause?.reason === 'produced-code-missing', 'code-missing paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      await expect(
+        harness.engine.resolveLane('p1', run.id, 1, {
+          action: 'record-deployed-address', attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID(), address: OTHER,
+        })
+      ).rejects.toMatchObject({ code: ErrorCodes.ILLEGAL_RESOLVE });
+      // Fails without mutation: the pause, the expected address, the missing
+      // final address, and the producer receipt are all unchanged.
+      const after = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(after.pause).toMatchObject({ reason: 'produced-code-missing', attemptId: paused.pause!.attemptId });
+      expect(after.steps[1]).toMatchObject({ expectedAddress: JAR });
+      expect(after.steps[1].address).toBeUndefined();
+      expect(after.steps[1].addressProvenance).toBeUndefined();
+      expect(after.steps[0].attempts[0]).toMatchObject({ txHash: TX_HASH });
+    });
+
+    it('forbids skip and accept-deployed for a paused producer with products', async () => {
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: producedTypes(),
+        call: async () => { throw new Error('boom'); },
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'paused', 'producer paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(paused.pause).toMatchObject({ reason: 'estimation', stepIndex: 0 });
+      // Skipping the producer would strand every product depending on it.
+      for (const action of ['skip', 'accept-deployed'] as const) {
+        await expect(
+          harness.engine.resolveLane('p1', run.id, 1, { action, attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID() } as ResolveLaneRequest)
+        ).rejects.toMatchObject({ code: ErrorCodes.ILLEGAL_RESOLVE });
+      }
+    });
+
+    it('freezes the reviewed deployment-type binding on the run at launch', async () => {
+      const types = producedTypes();
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: types,
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: productCode(executed),
+        executeTx: recordingExecuteTx(executed) as never,
+      });
+      const run = await launchDefault(harness, producedPlan());
+      expect(types.launchBinding).toHaveBeenCalledExactlyOnceWith('factory');
+      expect(run.deploymentTypeBindings).toEqual({
+        factory: { pluginId: 'factory', pluginVersion: '1.0.0', execution: 'call-products', descriptorHash: HASH },
+      });
+    });
+
+    it('fails launch when the installed descriptor mode mismatches the produced strategy', async () => {
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: { ...producedTypes(), launchBinding: vi.fn(async (pluginId: string) => ({ pluginId, pluginVersion: '1.0.0', execution: 'create2' as const, descriptorHash: HASH })) },
+      });
+      await expect(launchDefault(harness, producedPlan())).rejects.toMatchObject({ code: ErrorCodes.DEPLOYMENT_VALIDATION_FAILED });
+      expect((await harness.store.list('p1')).runs).toHaveLength(0);
+    });
+
+    it('fails launch when the descriptor drifted since authoring', async () => {
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: { ...producedTypes(), launchBinding: vi.fn(async () => { throw new Error('Deployment type factory changed its descriptor since it was reviewed — recompose or re-validate the deployment'); }) },
+      });
+      await expect(launchDefault(harness, producedPlan())).rejects.toThrow(/changed its descriptor/);
+      expect((await harness.store.list('p1')).runs).toHaveLength(0);
+    });
+
+    it('never pauses a completed lane because the artifact failed to render', async () => {
+      // The OP incident: the lane truthfully completed, then writeArtifact
+      // threw (schema gap) inside the same mutate and manufactured a
+      // 'broadcast' pause pointing past the end of the lane — a state no
+      // resolve verb can process. Record-keeping failures must stay out of
+      // lane truth; the artifact re-renders on demand.
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const harness = makeEngine({
+        validate: async (plan) => producedValidation(plan),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: productCode(executed),
+        executeTx: recordingExecuteTx(executed) as never,
+        writeArtifact: async () => { throw new Error('artifact render failed'); },
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed despite artifact failure');
+      // Drain the lane promise before asserting: the incident's pause was
+      // written moments AFTER the lane persisted as completed, so a read at
+      // first-completed races past the regression.
+      await harness.engine.shutdown();
+      const lane = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(lane.pause).toBeUndefined();
+      expect(lane.status).toBe('completed');
+      expect(lane.steps.every((step) => step.status === 'confirmed')).toBe(true);
+    });
+
+    // The auto-verification tests observe the queue through the injected
+    // dep; explorer targets and bundle hashes come from the validate stub
+    // exactly as validatePlan would supply them.
+    type Enqueued = {
+      stepId: string;
+      contractId: string;
+      address: string;
+      creationTxHash: string;
+      encodedConstructorArgs: string;
+    };
+    function recordingQueue(enqueued: Enqueued[]): DeployEngineDeps['verificationQueue'] {
+      return {
+        enqueueForConfirmedStep: async (_profileId, _run, _chainId, stepId, contractId, address, creationTxHash, encodedConstructorArgs) => {
+          enqueued.push({ stepId, contractId, address, creationTxHash, encodedConstructorArgs });
+        },
+        enqueueContractTypeCapture: async () => {},
+      };
+    }
+    function verifiableProducedValidation(plan: DeploymentPlan) {
+      const result = producedValidation(plan);
+      for (const id of ['c1', 'c2'] as const) (result.frozen[id] as { bundleHash?: string }).bundleHash = HASH;
+      (result.frozen.c2 as { abi: unknown }).abi = [
+        { type: 'constructor', inputs: [{ name: 'jar', type: 'address' }, { name: 'threshold', type: 'uint256' }] },
+        TRANSFER_ABI,
+      ];
+      return {
+        ...result,
+        explorerTargets: { '1': [{ entryId: 'e1', url: 'https://scan.local', verifierPluginId: 'etherscan', label: 'Scan' }] },
+      };
+    }
+
+    it('auto-verifies produced products from declared constructor args when they confirm', async () => {
+      const plan = producedPlan();
+      // The jar's constructor takes nothing — verification needs no
+      // declaration. The releaser declares its producer-supplied arguments:
+      // a pointer at the sibling product and a literal.
+      (plan.steps[2] as DeployStep).args = {
+        jar: { $ref: { kind: 'step', stepId: 'jar-product' } },
+        threshold: '5',
+      };
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const enqueued: Enqueued[] = [];
+      const harness = makeEngine({
+        validate: async (p) => verifiableProducedValidation(p),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: productCode(executed),
+        executeTx: recordingExecuteTx(executed) as never,
+        verificationQueue: recordingQueue(enqueued),
+      });
+      const run = await launchDefault(harness, plan);
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed');
+      // Enqueues are fire-and-forget after the confirming mutate persists.
+      await eventually(() => enqueued.length >= 2, 'both products enqueued');
+      expect(enqueued).toHaveLength(2);
+      expect(enqueued[0]).toMatchObject({
+        stepId: 'jar-product',
+        contractId: 'c1',
+        address: JAR,
+        creationTxHash: TX_HASH,
+        encodedConstructorArgs: '0x',
+      });
+      expect(enqueued[1]).toMatchObject({
+        stepId: 'releaser-product',
+        contractId: 'c2',
+        address: RELEASER,
+        creationTxHash: TX_HASH,
+        encodedConstructorArgs: encodeAbiParameters(
+          [{ name: 'jar', type: 'address' }, { name: 'threshold', type: 'uint256' }],
+          [JAR, 5n]
+        ),
+      });
+    });
+
+    it('skips auto-verification for a product whose constructor args are undeclared', async () => {
+      // The releaser's constructor takes arguments but the step declares
+      // none — Ignite cannot reconstruct what the producer encoded, so the
+      // product must be left for manual verification without disturbing
+      // the lane or the jar's enqueue.
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      const enqueued: Enqueued[] = [];
+      const harness = makeEngine({
+        validate: async (p) => verifiableProducedValidation(p),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: productCode(executed),
+        executeTx: recordingExecuteTx(executed) as never,
+        verificationQueue: recordingQueue(enqueued),
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed');
+      await eventually(() => enqueued.length >= 1, 'jar enqueued');
+      // Drain the fire-and-forget enqueues before asserting the releaser
+      // stayed out of the queue.
+      await harness.engine.shutdown();
+      expect(enqueued).toEqual([expect.objectContaining({ stepId: 'jar-product', encodedConstructorArgs: '0x' })]);
+    });
+
+    it('rejects an edit that leaves a produced product declaration unencodable', async () => {
+      // Legacy stray args on untouched products are tolerated (test below),
+      // but an edit that TOUCHES a product's declared constructor args must
+      // leave a declaration that still encodes against the frozen ABI —
+      // otherwise a typo silently costs the product its auto-verification.
+      const harness = makeEngine({
+        validate: async (p) => verifiableProducedValidation(p),
+        deploymentTypes: producedTypes(),
+        call: async () => { throw new Error('boom'); },
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'paused', 'lane paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      await expect(
+        harness.engine.resolveLane('p1', run.id, 1, {
+          action: 'edit',
+          attemptId: paused.pause!.attemptId,
+          commandId: crypto.randomUUID(),
+          edits: { argsByStep: { 'releaser-product': { jar: 'not-an-address', threshold: '5' } } },
+        })
+      ).rejects.toMatchObject({ code: ErrorCodes.ILLEGAL_RESOLVE });
+    });
+
+    it('accepts an edit that completes a produced product declaration with a pending pointer', async () => {
+      // The declared jar pointer resolves only after the producer call runs;
+      // an edit made during the pre-broadcast pause must not be rejected
+      // for that — the declaration is exactly as resolvable as the plan.
+      const harness = makeEngine({
+        validate: async (p) => verifiableProducedValidation(p),
+        deploymentTypes: producedTypes(),
+        call: async () => { throw new Error('boom'); },
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'paused', 'lane paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      const resolved = await harness.engine.resolveLane('p1', run.id, 1, {
+        action: 'edit',
+        attemptId: paused.pause!.attemptId,
+        commandId: crypto.randomUUID(),
+        edits: { argsByStep: { 'releaser-product': { jar: { $ref: { kind: 'step', stepId: 'jar-product' } }, threshold: '5' } } },
+      });
+      expect(resolved.id).toBe(run.id);
+    });
+
+    it('accepts edits while paused on a producer simulation failure', async () => {
+      const plan = producedPlan();
+      // Stray declarations left on unrun products must not make the edit
+      // validator dry-build initcode the product does not have.
+      (plan.steps[2] as DeployStep).args = { _resource: '' };
+      const harness = makeEngine({
+        validate: async (p) => {
+          const result = producedValidation(p);
+          (result.frozen.c2 as { abi: unknown }).abi = [{ type: 'constructor', inputs: [{ name: '_resource', type: 'address' }] }, TRANSFER_ABI];
+          return result;
+        },
+        deploymentTypes: producedTypes(),
+        call: async () => { throw new Error('boom'); },
+      });
+      const run = await launchDefault(harness, plan);
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'paused', 'lane paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(paused.pause).toMatchObject({ reason: 'estimation', stepIndex: 0 });
+      // Product addresses resolve at runtime, so pointers at them must not
+      // reject an unrelated edit (RPC endpoint, gas) during the pause.
+      const resolved = await harness.engine.resolveLane('p1', run.id, 1, { action: 'edit', attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID(), edits: { gas: { gasLimit: '500000' } } });
+      expect(resolved.id).toBe(run.id);
+    });
+
+    it('accepts edits while a downstream plain-create points at an unrun product', async () => {
+      // A plain-create step is never runtime-dynamic, so the dynamic-only
+      // carve-out did not cover it: its unresolvable pointer at a product that
+      // has not been produced yet rejected EVERY edit — including the edit to
+      // the producer's own arguments that this pause exists to invite.
+      const plan = producedPlan();
+      plan.contracts = [...plan.contracts, { id: 'c-after', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'After.json', contractName: 'After', sourcePath: 'After.sol' }];
+      plan.steps = [...plan.steps, { id: 'after', kind: 'deploy', contractId: 'c-after', args: { jar: { $ref: { kind: 'step', stepId: 'jar-product' } } } }];
+      const harness = makeEngine({
+        validate: async (p) => {
+          const result = producedValidation(p);
+          result.frozen['c-after'] = { ...result.frozen.c1!, abi: [{ type: 'constructor', inputs: [{ name: 'jar', type: 'address' }] }] as never };
+          return result;
+        },
+        deploymentTypes: producedTypes(),
+        call: async () => { throw new Error('boom'); },
+      });
+      const run = await launchDefault(harness, plan);
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'paused', 'lane paused');
+      const paused = (await harness.store.get('p1', run.id))!.lanes['1'];
+      const resolved = await harness.engine.resolveLane('p1', run.id, 1, { action: 'edit', attemptId: paused.pause!.attemptId, commandId: crypto.randomUUID(), edits: { gas: { gasLimit: '500000' } } });
+      expect(resolved.id).toBe(run.id);
+    });
+  });
 });
 
 function createGate(): { promise: Promise<void>; release: () => void } {
@@ -1556,7 +2251,7 @@ describe('final-review regressions', () => {
     const salt = `0x${'77'.repeat(32)}` as const;
     let codeReads = 0;
     const harness = makeCaptureEngine({
-      deploymentTypes: { prepare: async (_id, input) => ({ salt, predictedAddress: predictCreate2Address(salt, initcodeHashOf(input.initcode)), notes: [] }), list: async () => [], validate: async () => ({ ok: true }) },
+      deploymentTypes: { prepare: async (_id, input) => ({ salt, predictedAddress: predictCreate2Address(salt, initcodeHashOf(input.initcode)), notes: [] }), list: async () => [], validate: async () => ({ ok: true }), launchBinding: create2Binding },
       getCode: async () => {
         codeReads += 1;
         // JIT collision check, then confirmation check, then recheck.

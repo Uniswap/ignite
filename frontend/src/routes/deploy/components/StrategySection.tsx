@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { keccak256, stringToHex } from 'viem';
 import type { DeploymentTypeInfo, ValidationReport } from '@ignite/api';
 import Select from '../../../components/Select';
-import FactoryStrategyFields from './FactoryStrategyFields';
 import { apiClient } from '../../../store/api/client';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import {
@@ -53,13 +52,14 @@ export default function StrategySection({ stepId, report }: { stepId: string; re
   }, []);
   const selected =
     strategy.kind === 'plugin' ? `plugin:${strategy.pluginId}` : strategy.kind;
+  // A produced product's strategy is composition provenance, not an operator
+  // choice: it renders as explanation, never as a selector.
+  const produced = strategy.kind === 'plugin' && strategy.producedBy !== undefined;
   const selectStrategy = (value: string) => {
     if (value === 'create')
       dispatch(setStrategy({ stepId, strategy: { kind: 'create' } }));
     else if (value === 'create2')
       dispatch(setStrategy({ stepId, strategy: { kind: 'create2' } }));
-    else if (value === 'factory')
-      dispatch(setStrategy({ stepId, strategy: { kind: 'factory' } }));
     else
       dispatch(
         setStrategy({
@@ -104,45 +104,41 @@ export default function StrategySection({ stepId, report }: { stepId: string; re
   const predictionRows = stepPredictionRows(report, stepId);
   return (
     <section className="grid gap-3">
-      <label className="grid gap-1">
-        <span className="eyebrow">Deployment strategy</span>
-        <Select
-          value={selected}
-          requireSelection
-          options={[
-            { value: 'create', label: 'Create' },
-            { value: 'create2', label: 'Create2' },
-            // The per-step Factory door is retired in favour of the
-            // "Deploy via factory" flow; the option is listed only while the
-            // step already carries the strategy (hydrated workflows, existing
-            // drafts) so the Select can still display and leave it.
-            ...(strategy.kind === 'factory'
-              ? [{ value: 'factory', label: 'Factory (call an existing factory)' }]
-              : []),
-            ...types.map((item) => ({
-              value: `plugin:${item.pluginId}`,
-              label: item.label,
-            })),
-          ]}
-          onValueChange={selectStrategy}
-        />
-      </label>
-      {strategy.kind === 'factory' &&
-        (strategy.fulfilledBy ? (
+      {produced ? (
+        <div className="grid gap-1">
+          <span className="eyebrow">Deployment strategy</span>
           <p className="text-sm text-muted">
-            Deployed by this run&apos;s factory call
-            {strategy.output ? (
-              <>
-                {' '}
-                as output <span className="mono-data">{strategy.output}</span>
-              </>
-            ) : null}
-            . The call&apos;s address and arguments live on its step; the
-            Factory step changes the function and product mapping.
+            Created by this run&apos;s producer call as output{' '}
+            <span className="mono-data">
+              #{strategy.kind === 'plugin' ? strategy.producedBy?.outputIndex : ''}
+            </span>
+            . The call&apos;s address and arguments live on its step; recompose
+            to change the function or product mapping.
           </p>
-        ) : (
-          <FactoryStrategyFields stepId={stepId} strategy={strategy} />
-        ))}
+        </div>
+      ) : (
+        <label className="grid gap-1">
+          <span className="eyebrow">Deployment strategy</span>
+          <Select
+            value={selected}
+            requireSelection
+            options={[
+              { value: 'create', label: 'Create' },
+              { value: 'create2', label: 'Create2' },
+              // Call-products plugins never appear here: they compose a call
+              // plus products through the composer entry point, not a
+              // per-step deterministic deployment.
+              ...types
+                .filter((item) => item.execution === 'create2')
+                .map((item) => ({
+                  value: `plugin:${item.pluginId}`,
+                  label: item.label,
+                })),
+            ]}
+            onValueChange={selectStrategy}
+          />
+        </label>
+      )}
       {strategy.kind === 'create2' && (
         <>
           <label className="grid gap-1">
@@ -212,7 +208,7 @@ export default function StrategySection({ stepId, report }: { stepId: string; re
           )}
         </>
       )}
-      {plugin?.params.map((field) => {
+      {!produced && plugin?.params.map((field) => {
         const value =
           strategy.kind === 'plugin' ? strategy.params?.[field.key] : undefined;
         const change = (next: unknown) =>
@@ -260,10 +256,10 @@ export default function StrategySection({ stepId, report }: { stepId: string; re
           </label>
         );
       })}
-      {/* Factory products are predicted by the validation-time eth_call of
-          the deploy function; the prepare endpoint deliberately rejects them
-          ("Only create2 and plugin steps can be prepared"). */}
-      {strategy.kind !== 'create' && strategy.kind !== 'factory' && staticChains.length > 0 && (
+      {/* Produced products are predicted by the validation-time eth_call of
+          the producer function; the prepare endpoint has nothing to mine for
+          them. */}
+      {strategy.kind !== 'create' && !produced && staticChains.length > 0 && (
         <div className="flex gap-2 items-center">
           <button
             type="button"
@@ -284,7 +280,7 @@ export default function StrategySection({ stepId, report }: { stepId: string; re
           )}
         </div>
       )}
-      {strategy.kind !== 'create' && strategy.kind !== 'factory' && dynamicChains.length > 0 && (
+      {strategy.kind !== 'create' && !produced && dynamicChains.length > 0 && (
         <p className="text-xs text-muted">
           Salt is mined during the run against live addresses on:{' '}
           {dynamicChainNames.join(', ')}. The predicted address below is
@@ -315,12 +311,14 @@ export default function StrategySection({ stepId, report }: { stepId: string; re
         <div className="grid gap-1">
           <span className="eyebrow">Predicted address (from validation)</span>
           {predictionRows.map((row) => (
-            <div key={`${row.stepId}-${row.chainId}`} className="flex gap-2 items-center text-xs">
+            <div key={`${row.stepId}-${row.chainId}`} className="flex flex-wrap gap-x-2 gap-y-1 items-center text-xs">
               <span className={row.address ? 'mono-data' : 'text-muted'}>
                 {row.chainId}: {row.address ?? row.unavailableLabel}
               </span>
               {row.provisionalLabel && (
-                <span className="chip">{row.provisionalLabel}</span>
+                <span className="chip" title={row.provisionalDetail}>
+                  {row.provisionalLabel}
+                </span>
               )}
             </div>
           ))}

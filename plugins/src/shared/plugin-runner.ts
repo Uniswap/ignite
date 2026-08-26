@@ -4,18 +4,24 @@ import type { CompilerOperations } from "./base/compiler/types.js";
 import type { RpcProviderOperations } from "./base/rpc-provider/types.js";
 import type { SignerProviderOperations } from "./base/signer-provider/types.js";
 import type { VerifierOperations } from "./base/verifier/types.js";
-import type { DeploymentTypeOperations } from "./base/deployment-type/types.js";
+import type {
+  CallProductsDeploymentTypeOperations,
+  DeploymentTypeOperations,
+} from "./base/deployment-type/types.js";
 import type { DeploymentHookOperations } from "./base/deployment-hook/types.js";
 import type { ContractTypeOperations } from "./base/contract-type/types.js";
 import { frameResult } from "./utils/protocol.js";
 
 // Built-in plugins are compiler or rpc-provider plugins (the repo-manager
 // tier was deleted — repos are host data managed by core's RepoService).
+// The two deployment-type families intersect soundly because their
+// describeDeploymentType entries are structurally identical.
 export type AllOperations = CompilerOperations &
   RpcProviderOperations &
   SignerProviderOperations &
   VerifierOperations &
   DeploymentTypeOperations &
+  CallProductsDeploymentTypeOperations &
   DeploymentHookOperations &
   ContractTypeOperations;
 

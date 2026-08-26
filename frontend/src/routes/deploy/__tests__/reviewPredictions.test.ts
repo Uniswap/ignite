@@ -61,9 +61,9 @@ describe('reviewPredictedAddresses', () => {
     ]);
   });
 
-  it('labels a factory product with its own prediction note, not "mined"', () => {
-    // Nothing is mined for a factory product: its address came back from the
-    // deploy function's eth_call. The entry's note says so — show that.
+  it('labels a produced product with its own prediction note, not "mined"', () => {
+    // Nothing is mined for a produced product: its address came back from the
+    // producer function's eth_call. The entry's note says so — show that.
     const report = {
       chains: {
         '1': {
@@ -74,7 +74,7 @@ describe('reviewPredictedAddresses', () => {
                   predictedAddress:
                     '0x0000000000000000000000000000000000000004',
                   provisional: true,
-                  notes: ['returned by Factory call'],
+                  notes: ['returned by producer call'],
                 },
               },
             },
@@ -89,9 +89,44 @@ describe('reviewPredictedAddresses', () => {
         stepId: 'product-jar',
         address: '0x0000000000000000000000000000000000000004',
         provisional: true,
-        provisionalLabel: 'provisional — returned by Factory call',
+        provisionalLabel: 'provisional — returned by producer call',
       },
     ]);
+  });
+
+  it('collapses a producer signature note and keeps the full text for the tooltip', () => {
+    // The untouched note is wider than the address it annotates, and the chip
+    // carrying it cannot wrap — so it set the review card's width and pushed
+    // the address and the launch button off screen.
+    const signature =
+      'deploy(address revenueToken, address revenueRecipient, uint256 threshold, address owner, address configSetter, bytes32 salt) returns (address jar, address releaser)';
+    const report = {
+      chains: {
+        '1': {
+          create2: {
+            details: {
+              predicted: {
+                'product-jar': {
+                  predictedAddress:
+                    '0x0000000000000000000000000000000000000004',
+                  provisional: true,
+                  notes: [`returned by ${signature}`],
+                },
+              },
+            },
+          },
+        },
+      },
+    } as unknown as ValidationReport;
+
+    expect(reviewPredictedAddresses(report)[0]).toEqual({
+      chainId: '1',
+      stepId: 'product-jar',
+      address: '0x0000000000000000000000000000000000000004',
+      provisional: true,
+      provisionalLabel: 'provisional — returned by deploy(…)',
+      provisionalDetail: `provisional — returned by ${signature}`,
+    });
   });
 
   it('emits a row carrying the reason when a prediction was unavailable', () => {

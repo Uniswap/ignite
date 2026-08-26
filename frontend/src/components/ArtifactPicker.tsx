@@ -103,7 +103,7 @@ export function pinnedVersionSummary(
  * Every repository an artifact can be picked from. The session workspace is
  * a first-class source: in a fresh setup it is often the only repo, and
  * omitting it left this picker rendering "No options found" on exactly the
- * environments the deploy-via-factory flow starts in.
+ * environments the deployment composer starts in.
  */
 export function repoChoicesFor(repositories: RepoList | null): RepoChoice[] {
   const session = repositories?.session;
@@ -164,8 +164,8 @@ export default function ArtifactPicker({
   onSelect: (contract: ContractSource, abi: ArtifactData['abi']) => void;
   // The contract-type section offers artifacts SOURCED from contract-type
   // plugins (standard proxy templates). Callers where that reads as a
-  // classification field — the factory flow's product mapping, whose steps
-  // are plain immutable deployments — hide it rather than confuse the two.
+  // classification field — the composer's product mapping, whose steps are
+  // plain immutable deployments — hide it rather than confuse the two.
   showContractTypes?: boolean;
 }) {
   const dispatch = useAppDispatch();

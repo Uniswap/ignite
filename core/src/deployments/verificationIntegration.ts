@@ -9,6 +9,7 @@ import { VerificationQueue } from '../verifications/VerificationQueue.js';
 import { getLogger } from '../utils/logger.js';
 import { RpcStore } from '../chains/RpcStore.js';
 import { decomposeCreationCalldata } from './create2.js';
+import { encodeDeclaredProductArgs, isProducedStrategy } from './produced.js';
 import { linkBytecode } from './linking.js';
 import { resolveStepValues } from './resolver.js';
 
@@ -32,6 +33,35 @@ export function wireVerificationReconciliation(queue: VerificationQueue): void {
             const planStep = run.plan.steps.find((item) => item.id === step.stepId);
             const attempt = step.attempts.findLast((item) => item.txHash);
             const input = planStep?.kind === 'deploy' ? run.inputs[planStep.contractId] : undefined;
+            // Produced products must divert BEFORE the generic decompose path:
+            // they can satisfy its guards while their producer's calldata is a
+            // call, not creation calldata.
+            if (planStep?.kind === 'deploy' && isProducedStrategy(planStep.strategy) && input && step.address) {
+              // Produced products confirm with no creation calldata of their
+              // own (they carry no transaction at all), so reconciliation
+              // mirrors the engine: encode the DECLARED constructor args
+              // against the frozen ABI and attribute the producer call's
+              // transaction hash.
+              const strategy = planStep.strategy;
+              let encoded: Hex | undefined;
+              try {
+                encoded = encodeDeclaredProductArgs(planStep, input, Number(chainKey), (id) => {
+                  const ref = lane.steps.find((entry) => entry.stepId === id);
+                  if (ref?.address) return ref.address;
+                  const standIn = ref?.predictedAddress ?? ref?.expectedAddress;
+                  if (standIn && ref!.status !== 'skipped' && ref!.status !== 'failed') return standIn;
+                  throw new Error(`Pointer ${id} is unresolved`);
+                }, { frozen: run.inputs, contracts: run.plan.contracts });
+              } catch { encoded = undefined; }
+              const creationTxHash = attempt?.txHash
+                ?? lane.steps.find((entry) => entry.stepId === strategy.producedBy.stepId)?.attempts.findLast((item) => item.txHash)?.txHash;
+              if (encoded === undefined || !creationTxHash) {
+                getLogger().warn(`verification reconciliation skipped produced product ${step.stepId}: ${encoded === undefined ? 'constructor arguments are not declared' : 'the producer call has no transaction hash'}`);
+                continue;
+              }
+              await queue.enqueueForConfirmedStep(profileId, run, Number(chainKey), step.stepId, planStep.contractId, step.address, creationTxHash, encoded);
+              continue;
+            }
             if (!planStep || planStep.kind !== 'deploy' || !attempt?.txHash || !attempt.expected || !input || !step.address) continue;
             const rpc = run.rpcSelection[chainKey];
             if (!rpc) continue;

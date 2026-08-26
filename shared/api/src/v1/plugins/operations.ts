@@ -62,6 +62,9 @@ export const RESERVED_OPERATIONS: readonly string[] = [
   // Contract-type artifact serving must flow through ContractTypeService's
   // grant gate, never generic dispatch.
   'describeContractType', 'getContractArtifact',
+  // Composition must flow through DeploymentTypeService's strict parsing and
+  // artifact resolution, never generic dispatch.
+  'composeDeployment',
 ];
 
 export const pluginOperationRoutes = {

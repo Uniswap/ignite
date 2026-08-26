@@ -213,6 +213,13 @@ export function createDeploymentHandlers(
             'stepId must name a deploy step',
             'POINTER_NOT_CONCRETE'
           );
+        // A produced product has no salt or initcode to prepare — its address
+        // comes from the producer call's pre-broadcast simulation.
+        if (candidate.strategy?.kind === 'plugin' && candidate.strategy.producedBy)
+          throw new IgniteError(
+            'Only create2 and plugin steps can be prepared',
+            'POINTER_NOT_CONCRETE'
+          );
         const step = candidate;
         const plan = {
           schemaVersion: 1 as const,

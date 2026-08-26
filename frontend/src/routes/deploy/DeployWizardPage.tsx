@@ -8,19 +8,22 @@ import {
   clearDraft,
   removeContract,
   hydrateWorkflowDraft,
-  startFactoryDraft,
-  applyFactorySetup,
+  startComposition,
+  applyComposition,
+  compositionInProgress,
+  compositionMaterializationProblem,
 } from '../../store/features/deployments/deployDraftSlice';
-import type {
-  DeployDraftState,
-  DraftCallStep,
-} from '../../store/features/deployments/types';
+import type { DeployDraftState } from '../../store/features/deployments/types';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import WizardStepper from './components/WizardStepper';
 import ContractsStep from './steps/ContractsStep';
-import FactorySetupStep, {
-  factorySetupBlocker,
-} from './steps/FactorySetupStep';
+import ComposerStep from './steps/ComposerStep';
+import {
+  composerRequiredBlocker,
+  useDeploymentComposer,
+} from './useDeploymentComposer';
+import { apiClient } from '../../store/api/client';
+import { sanitizeDisplayText, type DeploymentTypeInfo } from '@ignite/api';
 import ChainsStep from './steps/ChainsStep';
 import ExplorersStep from './steps/ExplorersStep';
 import SignersStep from './steps/SignersStep';
@@ -50,27 +53,44 @@ const STEPS = [
   { id: 'review', label: 'Review' },
 ];
 
-// The factory flow swaps only the first station: products become contracts on
-// Continue, so the rest of the wizard runs unchanged.
-const FACTORY_STEPS = [{ id: 'factory', label: 'Factory' }, ...STEPS.slice(1)];
-
-/** What entering /deploy should do about the factory flow, if anything. */
-export function factoryEntryAction(
-  flow: string | null,
-  draft: Pick<DeployDraftState, 'contracts' | 'factorySetup' | 'workflowRef'>
-): 'start' | 'clear' | 'none' {
-  if (
-    flow === 'factory' &&
-    !draft.factorySetup &&
-    draft.contracts.length === 0 &&
-    !draft.workflowRef
-  )
-    return 'start';
-  // Backing out of the flow before materialization must not leave "New
-  // deployment" opening onto the factory step.
-  if (flow !== 'factory' && draft.factorySetup && draft.contracts.length === 0)
-    return 'clear';
+/**
+ * What entering /deploy should do about the composer, if anything. The URL's
+ * deployment type and the draft composition's plugin must never disagree: the
+ * wizard renders whatever `draft.composition.pluginId` says, so a leftover
+ * shell for one plugin answering another plugin's entry point materializes a
+ * deployment of the wrong deployment type. Meaningful work is the pivot — an
+ * empty shell (minted the moment the composer opens) is replaceable, a
+ * composition holding selections or materialized steps is never discarded
+ * behind the user's back.
+ */
+export function composerEntryAction(
+  deploymentType: string | null,
+  draft: Pick<DeployDraftState, 'contracts' | 'composition' | 'workflowRef'>
+): 'start' | 'clear' | 'conflict' | 'none' {
+  const composition = draft.composition;
+  const meaningful =
+    Boolean(composition) &&
+    (compositionInProgress(composition) || draft.contracts.length > 0);
+  if (deploymentType) {
+    // The requested type is already the one being composed: resume it.
+    if (composition?.pluginId === deploymentType) return 'none';
+    if (meaningful) return 'conflict';
+    return draft.contracts.length === 0 && !draft.workflowRef ? 'start' : 'none';
+  }
+  // Backing out of the composer before materialization must not leave "New
+  // deployment" opening onto the composer station.
+  if (composition && !meaningful) return 'clear';
   return 'none';
+}
+
+/**
+ * What Back means at a given station. The first station has no previous one, so
+ * Back leaves the wizard instead of sitting disabled: with no `:disabled` rule
+ * in the stylesheet a disabled Back was indistinguishable from a live one, so
+ * it read as a button that simply did nothing.
+ */
+export function wizardBackAction(step: number): 'leave' | 'previous' {
+  return step === 0 ? 'leave' : 'previous';
 }
 
 export function explorerBlocker(
@@ -113,24 +133,21 @@ export function needsWorkflowDraftHydration(
 }
 
 function WizardNav({
-  step,
   blocker,
   onBack,
   onContinue,
 }: {
-  step: number;
   blocker?: string;
   onBack: () => void;
   onContinue: () => void;
 }) {
   return (
     <div className="flex items-center justify-between gap-3">
-      <button
-        type="button"
-        className="btn btn-secondary"
-        disabled={step === 0}
-        onClick={onBack}
-      >
+      {/* Never disabled: on the first station Back leaves the wizard, which is
+          the only thing "back" can mean there. It used to be disabled instead,
+          and with no :disabled styling in the sheet it read as a live button
+          that swallowed every click. */}
+      <button type="button" className="btn btn-secondary" onClick={onBack}>
         <ArrowLeft size={15} /> Back
       </button>
       <div className="flex items-center gap-3 min-w-0">
@@ -167,15 +184,22 @@ export default function DeployWizardPage() {
       ? selectWorkflowDocument(state, workflowRepo, workflowName)
       : undefined
   );
-  const factoryMode = Boolean(draft.factorySetup);
-  const wizardSteps = factoryMode ? FACTORY_STEPS : STEPS;
-  const factoryCall = draft.steps.find(
-    (candidate): candidate is DraftCallStep =>
-      candidate.id === draft.factorySetup?.callStepId &&
-      candidate.kind === 'call'
-  );
-  const flow = searchParams.get('flow');
-  const draftActive = draft.contracts.length > 0 || factoryMode;
+  const composerMode = Boolean(draft.composition);
+  const composerPluginId = draft.composition?.pluginId;
+  const [descriptor, setDescriptor] = useState<DeploymentTypeInfo>();
+  // The composer swaps only the first station: products become contracts on
+  // Continue, so the rest of the wizard runs unchanged. Its label comes from
+  // the deployment-type descriptor.
+  const wizardSteps = composerMode
+    ? [{ id: 'composer', label: descriptor?.label ?? 'Compose' }, ...STEPS.slice(1)]
+    : STEPS;
+  const composer = useDeploymentComposer(draft.composition);
+  const deploymentType = searchParams.get('deploymentType');
+  const draftActive = draft.contracts.length > 0 || composerMode;
+  // Shared by the header arrow and by Back on the first station, so the two
+  // cannot drift on where leaving the wizard lands.
+  const leaveWizard = () =>
+    navigate(draft.workflowRef ? '/workflows' : '/deployments');
   const {
     entries: artifactEntries,
     artifacts,
@@ -205,10 +229,47 @@ export default function DeployWizardPage() {
     dispatch(markDraftSeen());
   }, [dispatch]);
   useEffect(() => {
-    const action = factoryEntryAction(flow, draft);
-    if (action === 'start') dispatch(startFactoryDraft());
+    const action = composerEntryAction(deploymentType, draft);
+    if (action === 'start') dispatch(startComposition(deploymentType!));
     else if (action === 'clear') dispatch(clearDraft());
-  }, [dispatch, draft, flow]);
+    else if (action === 'conflict') {
+      // Real work for another deployment type is in progress. It is not
+      // discarded, so the honest move is to drop the requested type from the
+      // URL — leaving it there would show one plugin's composer under
+      // another's link — and say why the link did not do what it promised.
+      navigate('/deploy', { replace: true });
+      dispatch(
+        triggerToast({
+          title: 'Another deployment is in progress',
+          // The requested type is a URL parameter: it is echoed sanitized,
+          // like every other id the wizard puts on screen.
+          description: `Finish or discard the ${sanitizeDisplayText(draft.composition!.pluginId, 64)} deployment before starting a ${sanitizeDisplayText(deploymentType!, 64)} one.`,
+          variant: 'warning',
+          duration: 8000,
+        })
+      );
+    }
+  }, [dispatch, draft, deploymentType, navigate]);
+  useEffect(() => {
+    if (!composerPluginId) return;
+    let cancelled = false;
+    void apiClient
+      .request('listDeploymentTypes', {})
+      .then((response) => {
+        if ('data' in response && !cancelled)
+          setDescriptor(
+            response.data.deploymentTypes.find(
+              (item) => item.pluginId === composerPluginId
+            )
+          );
+      })
+      .catch(() => {
+        // The label is cosmetic; composition itself reports real failures.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [composerPluginId]);
   useEnsureChainMetadata(draft.chains);
   useEffect(() => {
     if (workflowRepo && workflowName)
@@ -286,15 +347,48 @@ export default function DeployWizardPage() {
     chains.find((chain) => chain.chainId === chainId)?.name ??
     `Chain ${chainId}`;
 
+  // The composer station's blocker: transport errors, then the server's own
+  // blocker, then what is locally knowable without a round trip, then a
+  // recomposition conflict, then artifact readiness after materialization.
+  const composerBlocker = !composerMode
+    ? undefined
+    : (composer.error ??
+      composer.blocker ??
+      (composer.hasResponse
+        ? composerRequiredBlocker(
+            composer.fields,
+            draft.composition!.values,
+            draft.composition!.artifacts
+          )
+        : 'Loading composer…') ??
+      (composer.composition
+        ? compositionMaterializationProblem(draft, composer.composition)
+        : undefined) ??
+      (draft.contracts.length > 0 && !contractsValid
+        ? 'Product artifacts are not ready yet'
+        : undefined));
+  // Continuing out of the composer always re-composes with the values on
+  // screen — a stale earlier response must never be what turns into steps —
+  // and only a response carrying a complete composition materializes.
+  const continueComposer = async () => {
+    const response = await composer.compose();
+    if (!response?.composition) return;
+    if (compositionMaterializationProblem(draft, response.composition)) return;
+    dispatch(
+      applyComposition({
+        binding: response.binding,
+        composition: response.composition,
+      })
+    );
+    setStep(1);
+  };
+
   // The first reason the current step cannot continue — surfaced next to the
   // disabled button. A silently disabled Continue with the offending chain
   // scrolled off-screen reads as a dead end.
   const blockers: Array<string | undefined> = [
-    factoryMode
-      ? (factorySetupBlocker(draft.factorySetup, factoryCall) ??
-        (draft.contracts.length > 0 && !contractsValid
-          ? 'Product artifacts are not ready yet'
-          : undefined))
+    composerMode
+      ? composerBlocker
       : contractsValid
         ? undefined
         : 'Select at least one deployable contract',
@@ -341,17 +435,24 @@ export default function DeployWizardPage() {
 
   const nav = step < wizardSteps.length - 1 && (
     <WizardNav
-      step={step}
       blocker={
         blockers[step]
           ? replaceIdsForDisplay(blockers[step], stepLabels)
           : undefined
       }
-      onBack={() => setStep((value) => value - 1)}
+      onBack={() =>
+        wizardBackAction(step) === 'leave'
+          ? leaveWizard()
+          : setStep((value) => value - 1)
+      }
       onContinue={() => {
-        // Continuing out of the factory step is what turns the setup into
-        // the call step, product deploy steps and their contracts.
-        if (factoryMode && step === 0) dispatch(applyFactorySetup());
+        // Continuing out of the composer is what turns the composition into
+        // the producer call, product deploy steps and their contracts. It
+        // advances only after a fresh compose materializes successfully.
+        if (composerMode && step === 0) {
+          void continueComposer();
+          return;
+        }
         setStep((value) => value + 1);
       }}
     />
@@ -364,7 +465,7 @@ export default function DeployWizardPage() {
           type="button"
           className="btn btn-secondary btn-icon"
           aria-label="Back"
-          onClick={() => navigate(draft.workflowRef ? '/workflows' : '/deployments')}
+          onClick={leaveWizard}
         >
           <ArrowLeft size={18} />
         </button>
@@ -425,11 +526,14 @@ export default function DeployWizardPage() {
       {nav && <div className="mb-4">{nav}</div>}
       <div className="card-milky p-5">
         {step === 0 &&
-          (draft.factorySetup ? (
-            <FactorySetupStep
-              setup={draft.factorySetup}
-              artifactEntries={artifactEntries}
-              onRetry={retryArtifact}
+          (draft.composition ? (
+            <ComposerStep
+              composition={draft.composition}
+              fields={composer.fields}
+              loading={composer.loading}
+              error={composer.error}
+              label={descriptor?.label}
+              description={descriptor?.description}
             />
           ) : (
             <ContractsStep

@@ -73,6 +73,14 @@ export function effectiveValue(step: ValueStep, chainId: number): bigint {
   return BigInt(step.valuePerChain?.[String(chainId)] ?? step.value ?? '0');
 }
 
+// Checked structurally rather than through produced.js: that module imports
+// this one for the arg pipeline, and the classifier is one field.
+function producedByOf(step: Step) {
+  return step.kind === 'deploy' && step.strategy?.kind === 'plugin'
+    ? step.strategy.producedBy
+    : undefined;
+}
+
 export function collectRefs(
   step: Step,
   chainId: number
@@ -90,33 +98,20 @@ export function collectRefs(
         walk(item, path ? `${path}.${key}` : key)
       );
   };
-  walk(mergeArgs(step as DeployStep, chainId), 'args');
+  // A produced product's declared constructor args are verification-only
+  // declarations — the producer encodes the real values onchain — so they
+  // deliberately contribute no execution edges. The producedBy edge alone
+  // orders the product after its call; declarations resolve for verification
+  // from persisted product addresses, so products of one producer may refer
+  // to one another without forming a deployment cycle.
+  const producedBy = producedByOf(step);
+  if (!producedBy) walk(mergeArgs(step as DeployStep, chainId), 'args');
   if (step.kind === 'call') {
     const target = step.targetPerChain?.[String(chainId)] ?? step.target;
     if (target.kind === 'step')
       refs.push({ path: 'target', stepId: target.stepId });
-  } else if (step.strategy?.kind === 'factory') {
-    // A factory deployment's inputs live on the strategy, not on step.args:
-    // the factory it calls, the call's arguments, and any pointer inside the
-    // predict helper's arguments all have to participate in ordering.
-    const strategy = step.strategy;
-    const target =
-      strategy.targetPerChain?.[String(chainId)] ?? strategy.target;
-    if (target?.kind === 'step')
-      refs.push({ path: 'factory', stepId: target.stepId });
-    // A product deployed by another step's call depends on that step.
-    if (strategy.fulfilledBy)
-      refs.push({ path: 'fulfilledBy', stepId: strategy.fulfilledBy });
-    walk(
-      {
-        ...(strategy.args ?? {}),
-        ...(strategy.argsPerChain?.[String(chainId)] ?? {}),
-      },
-      'args'
-    );
-    for (const [key, binding] of Object.entries(mergeLibraries(step, chainId)))
-      if (binding.kind === 'step')
-        refs.push({ path: `libraries.${key}`, stepId: binding.stepId });
+  } else if (producedBy) {
+    refs.push({ path: 'producedBy', stepId: producedBy.stepId });
   } else {
     for (const [key, binding] of Object.entries(mergeLibraries(step, chainId)))
       if (binding.kind === 'step')
@@ -368,6 +363,10 @@ export function callTargetAbi(
   chainId: number,
   frozen: FrozenInputs
 ): unknown {
+  // An explicit ABI source outranks target derivation: it stays authoritative
+  // for names, outputs, and payability even when the target is a literal
+  // address or is later overridden (call-products producers rely on this).
+  if (step.abiContractId) return frozen[step.abiContractId]?.abi;
   const target = mergeCallTarget(step, chainId);
   if (target.kind !== 'step') return undefined;
   const targetStep = plan.steps.find(
@@ -396,7 +395,7 @@ export function callAbiItem(
   if (!step.signature) return undefined;
   let item: AbiFunction | undefined;
   const target = mergeCallTarget(step, chainId);
-  if (target.kind === 'step') {
+  if (step.abiContractId !== undefined || target.kind === 'step') {
     item = Array.isArray(frozenAbi)
       ? frozenAbi.find((entry): entry is AbiFunction => {
           if (
@@ -439,6 +438,15 @@ export function validateDependencies(plan: DeploymentPlan): void {
   const byId = new Map(
     plan.steps.map((step, index) => [step.id, { step, index }])
   );
+  // "later dynamic step X" gives an operator nothing to act on when X is a
+  // produced product: what has to move is the reference relative to the
+  // PRODUCER call, so name it.
+  const laterRef = (stepId: string): string => {
+    const producedBy = producedByOf(byId.get(stepId)!.step);
+    return producedBy
+      ? `${stepId}, which is produced later by ${producedBy.stepId}`
+      : `later dynamic step ${stepId}`;
+  };
   // Per-chain: per-chain overrides can introduce refs/targets that the first
   // chain's merge never sees, and libraries may differ per chain.
   for (const chainId of plan.chains.length ? plan.chains : [1]) {
@@ -480,7 +488,7 @@ export function validateDependencies(plan: DeploymentPlan): void {
             );
           if (dynamic.has(ref.stepId) && refTarget.index >= current.index)
             throw new IgniteError(
-              `Call argument ${ref.path} references later dynamic step ${ref.stepId}`,
+              `Call argument ${ref.path} references ${laterRef(ref.stepId)}`,
               'POINTER_FORWARD_CREATE',
               { stepId: ref.stepId, path: ref.path }
             );
@@ -488,28 +496,28 @@ export function validateDependencies(plan: DeploymentPlan): void {
         continue;
       }
       const strategy = current.step.strategy ?? { kind: 'create' as const };
-      // `fulfilledBy` names the step whose call deploys this product. It is
-      // ordinarily a CALL step, so the deploy-step rule below does not apply;
-      // what matters is that the call happens first.
+      // `producedBy` names the CALL step whose transaction deploys this
+      // product, so the deploy-step rule below does not apply; what matters
+      // is that the call happens first.
       for (const ref of collectRefs(current.step, chainId).filter(
-        (entry) => entry.path === 'fulfilledBy'
+        (entry) => entry.path === 'producedBy'
       )) {
-        const fulfiller = byId.get(ref.stepId);
-        if (!fulfiller)
+        const producer = byId.get(ref.stepId);
+        if (!producer || producer.step.kind !== 'call')
           throw new IgniteError(
-            `Fulfilling step ${ref.stepId} is not in this plan`,
+            `Producer step ${ref.stepId} is not a call step in this plan`,
             'POINTER_TARGET_NOT_DEPLOY',
             { stepId: ref.stepId }
           );
-        if (fulfiller.index >= current.index)
+        if (producer.index >= current.index)
           throw new IgniteError(
-            `Factory product ${id} is fulfilled by a later step ${ref.stepId}`,
+            `Produced product ${id} is produced by a later step ${ref.stepId}`,
             'POINTER_FORWARD_CREATE',
             { stepId: ref.stepId, path: ref.path }
           );
       }
       const refs = collectRefs(current.step, chainId).filter(
-        (ref) => ref.path !== 'target' && ref.path !== 'fulfilledBy'
+        (ref) => ref.path !== 'target' && ref.path !== 'producedBy'
       );
       for (const ref of refs) {
         const target = byId.get(ref.stepId);
@@ -528,7 +536,7 @@ export function validateDependencies(plan: DeploymentPlan): void {
           target.index >= current.index
         )
           throw new IgniteError(
-            `Create step references later dynamic step ${ref.stepId}`,
+            `Create step references ${laterRef(ref.stepId)}`,
             'POINTER_FORWARD_CREATE',
             { stepId: ref.stepId, path: ref.path }
           );
@@ -560,7 +568,7 @@ export function validateDependencies(plan: DeploymentPlan): void {
           target.index >= current.index
         )
           throw new IgniteError(
-            `Create2 input ${ref.path} references later dynamic step ${ref.stepId}`,
+            `Create2 input ${ref.path} references ${laterRef(ref.stepId)}`,
             'CREATE2_POINTER_NOT_CONCRETE',
             { stepId: ref.stepId, path: ref.path }
           );
@@ -611,6 +619,14 @@ export function dynamicDeterministicStepIds(
       step.strategy.kind === 'create'
     )
       return false;
+    // A produced product's address exists ONLY at runtime: the producer call's
+    // pre-broadcast simulation commits it and static prediction is deliberately
+    // impossible. So it is runtime-dynamic itself, and through the recursion
+    // below everything pointing at it is dynamic too.
+    if (producedByOf(step)) {
+      memo.set(id, true);
+      return true;
+    }
     // A deterministic-only cycle remains the existing prediction-cycle error;
     // it is not evidence that either input is runtime-dynamic.
     if (visiting.has(id)) return false;

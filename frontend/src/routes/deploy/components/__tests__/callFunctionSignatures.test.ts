@@ -63,6 +63,35 @@ describe('callFunctionOptions', () => {
     ).toEqual([{ type: 'address' }]);
   });
 
+  it('keeps named inputs from the frozen abiContractId ABI on literal and overridden targets', () => {
+    // A composer-created call's target may be a literal address (or later
+    // overridden); the frozen source's ABI is what keeps the parameter names.
+    const frozen = [
+      {
+        type: 'function',
+        name: 'deploy',
+        stateMutability: 'nonpayable',
+        inputs: [
+          { name: 'owner', type: 'address' },
+          { name: 'salt', type: 'bytes32' },
+        ],
+      },
+    ];
+    expect(
+      callArgumentInputs('address', 'deploy(address,bytes32)', undefined, frozen)
+    ).toEqual([
+      { name: 'owner', type: 'address' },
+      { name: 'salt', type: 'bytes32' },
+    ]);
+    // The frozen ABI wins over a step target's ABI too.
+    expect(
+      callArgumentInputs('step', 'deploy(address,bytes32)', [], frozen)
+    ).toEqual([
+      { name: 'owner', type: 'address' },
+      { name: 'salt', type: 'bytes32' },
+    ]);
+  });
+
   it('migrates saved positional values to resolved ABI names', () => {
     expect(
       normalizeCallArgumentKeys(

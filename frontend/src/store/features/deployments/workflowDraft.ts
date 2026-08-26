@@ -30,9 +30,12 @@ export function workflowDocumentFromDraft(
           : {}),
       };
     } else if (extras?.strategy.kind === 'plugin') {
+      // The clone carries producedBy through save-as-workflow. Produced mode
+      // never folds prepared/acknowledged in: the shared schema forbids both
+      // alongside producedBy, and stale extras must not corrupt the document.
       strategy = {
         ...cloneJson(extras.strategy),
-        ...(extras.prepared
+        ...(extras.prepared && !extras.strategy.producedBy
           ? {
               prepared: Object.fromEntries(
                 Object.entries(extras.prepared).map(([chainId, prepared]) => [
@@ -45,7 +48,7 @@ export function workflowDocumentFromDraft(
               ),
             }
           : {}),
-        ...(extras.acknowledged
+        ...(extras.acknowledged && !extras.strategy.producedBy
           ? { acknowledgeDeployed: cloneJson(extras.acknowledged) }
           : {}),
       };

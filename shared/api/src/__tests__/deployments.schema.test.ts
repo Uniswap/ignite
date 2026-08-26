@@ -4,6 +4,7 @@ import {
   DeploymentPlanSchema,
   RunRecordSchema,
 } from "../v1/deployments.js";
+import { ComposeDeploymentRequestSchema } from "../v1/deploymentTypes.js";
 
 const signer = {
   pluginId: "private-key",
@@ -92,6 +93,62 @@ describe("deployment schemas", () => {
         rawTx: "0x02abcd",
       }),
     ).toMatchObject({ rawTx: "0x02abcd" });
+  });
+});
+
+describe("compose deployment request schema", () => {
+  const request = (values: Record<string, unknown>) => ({
+    pluginId: "factory",
+    compositionId: "comp-1",
+    revision: 0,
+    values,
+    artifacts: {},
+  });
+
+  it("bounds each value on its own, not just the whole record", () => {
+    // A plugin echoing a value into its 1..500-char blocker or a 1..280-char
+    // label must not be able to overflow those caps with what the host handed
+    // it, so the per-value cap belongs at the wire boundary.
+    expect(
+      ComposeDeploymentRequestSchema.safeParse(
+        request({ fn: "x".repeat(513) }),
+      ).success,
+    ).toBe(false);
+    expect(
+      ComposeDeploymentRequestSchema.safeParse(request({ fn: "x".repeat(512) }))
+        .success,
+    ).toBe(true);
+    // Non-string values are bounded by their serialized length.
+    expect(
+      ComposeDeploymentRequestSchema.safeParse(
+        request({ fn: Array.from({ length: 200 }, (_, i) => i) }),
+      ).success,
+    ).toBe(false);
+  });
+
+  it("still accepts many legal values and still rejects the aggregate overflow", () => {
+    const many = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [
+        `field${index}`,
+        "x".repeat(512),
+      ]),
+    );
+    expect(ComposeDeploymentRequestSchema.safeParse(request(many)).success).toBe(
+      true,
+    );
+    const overflowing = Object.fromEntries(
+      Array.from({ length: 200 }, (_, index) => [
+        `field${index}`,
+        "x".repeat(512),
+      ]),
+    );
+    expect(
+      ComposeDeploymentRequestSchema.safeParse(request(overflowing)).success,
+    ).toBe(false);
+    // The reserved plugin-invocation key stays rejected.
+    expect(
+      ComposeDeploymentRequestSchema.safeParse(request({ config: "x" })).success,
+    ).toBe(false);
   });
 });
 

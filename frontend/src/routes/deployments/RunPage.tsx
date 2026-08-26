@@ -273,6 +273,31 @@ export default function RunPage() {
       });
       return;
     }
+    if (action === 'record-deployed-address') {
+      // An operator attestation, not a measurement: Ignite verifies code
+      // exists at the supplied address but cannot prove this call created it.
+      const address = window.prompt(
+        'Record the address this product actually deployed to. Ignite will verify code exists there, but cannot prove this call created it — this is recorded as an operator attestation.\n\nDeployed address (0x…):'
+      );
+      if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+        setError('Enter a 20-byte 0x address.');
+        return;
+      }
+      const note = window.prompt(
+        'Optional note for the audit record (up to 500 characters — leave empty for none):'
+      );
+      if (note && note.length > 500) {
+        setError('The note must be at most 500 characters.');
+        return;
+      }
+      void sendResolution(chainId, {
+        ...base,
+        action,
+        address: address as `0x${string}`,
+        ...(note ? { note } : {}),
+      });
+      return;
+    }
     if (action === 'replace') {
       const maxFeePerGas = window.prompt('Replacement max fee per gas (wei)');
       const maxPriorityFeePerGas = window.prompt(

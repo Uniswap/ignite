@@ -296,6 +296,123 @@ dispatch, `operationPermissions` hints unioned with host minimums, and the
   (constructors reading mutated state are an accepted residual of the
   labeled fallback tier).
 
+## Factory deployment follow-ups (field diagnosis 2026-08-11)
+
+Found while deploying a TJAR jar+releaser pair on Robinhood Chain (4663) through the
+factory flow. The factory call confirmed; every downstream step was unreachable. The
+run pauses were all downstream of one lost prediction, and none of the offered
+resolutions could repair it — the lane had to be abandoned for `cast`.
+
+- **[FIXED 2026-08-11: factory product addresses are now derived at execution time.]**
+  Root cause was NOT the named-output lookup (decodeFactoryProducts/productAddress are
+  sound): both factory execution paths hard-required `lane.steps[i].predictedAddress`
+  (fulfilledBy ~L1096, self-fulfilled ~L1124) while lane seeding deliberately excludes
+  factory predictions — validateCreate2 returns them only as review display data
+  ("provisional addresses ... must never become execution commitments",
+  validation.ts ~L1143), and returns no top-level `predicted` map at all when the plan
+  has no create2/plugin steps. Two contradictory contracts; the feature could never
+  complete a run. Fix keeps the review principle: the fulfilling step now simulates its
+  own transaction (same to/data/from/value, `deps.call` grew from/value) immediately
+  before broadcasting, persists the decoded product addresses onto the product lane
+  steps durably pre-broadcast, and the existing code-exists guards confirm them.
+  Simulation failure pauses the caller BEFORE broadcast with reason `estimation`
+  (retry/edit/skip all available — deliberately not `needs-review`, which does not
+  offer retry), so a confirmed factory call with unrecoverable products can no longer
+  exist. Covered by the `factory deployments` describe in deployEngine.test.ts.
+- **`accept-deployed` is unreachable for the pause it exists for.** It requires
+  `predictedAddress` (DeployEngine L383-385) — precisely what is missing — and then a
+  salt, which factory strategies do not carry (L418). Should accept an operator-supplied
+  address, or recover it from the confirmed factory call's receipt (`JarDeployed`).
+  (Post-fix this pause should no longer occur for factory products; the affordance gap
+  stands for legacy stuck runs.)
+- **`skip` on a factory product strands every downstream pointer.** skip advances
+  without setting `address` (L614-629), while `resolveRef` returns `ref.address` before
+  it checks skipped status (L1068-1074) — that one field is the whole difference between
+  a usable skip and a dead lane. Set the address on skip when code exists at the product
+  address, or add an explicit "record deployed address" resolution.
+- **[FIXED 2026-08-13: artifact schema did not know the factory kind.]** Found on the
+  first post-fix factory run (OP, chain 10): the artifact builder faithfully writes
+  `strategy.kind: 'factory'` into lane steps (artifact.ts ~L118) but the
+  DeploymentArtifact schema's strategy enum only allowed create|create2|plugin
+  (shared/api deployments.ts ~L1417), so renderArtifact threw at lane completion.
+  Added 'factory' to the zod enum and the TS union; artifact.test.ts covers the
+  factory-product shape.
+- **[FIXED 2026-08-13: an artifact write failure paused an already-completed lane.]**
+  maybeArtifact ran inside the mutate that persists the terminal transition, so the
+  schema throw above propagated into runLane's catch, was classified 'broadcast', and
+  wrote a pause with stepIndex pointing at the last step while currentStepIndex sat
+  past the end — a state recheck/confirm-hash/resume all crash on ("reading
+  'attempts'" of undefined). maybeArtifact now contains its own failures (log-only;
+  the artifact renders on demand at the GET endpoint and the write re-runs on any
+  later terminal mutate). Engine test: "never pauses a completed lane because the
+  artifact failed to render". Residual (not fixed): a run stuck in that pre-fix state
+  needs a hand edit of the run record — no resolve verb can process it — and pause()
+  itself still has no terminal-lane guard.
+- **[FIXED 2026-08-20: recheck confirmed a timed-out receipt but stranded the lane.]**
+  reconcile→confirmReceipt advanced the record and left lane.status 'running', but the
+  recheck branch — unlike every sibling verb — never restarted the lane driver, and the
+  confirm mutate never cleared the pause aimed at the step it just confirmed: the
+  record read "running" with a stale receipt-timeout pause while nothing executed (hit
+  on the mainnet TJAR run; recovery needed a core restart so recoverOnStartup could
+  re-claim the lane as 'interrupted' + a Resume). confirmReceipt now clears a pause
+  whose stepIndex is the step being confirmed, and recheck startLanes a running lane.
+  Engine test: "recheck of a mined timed-out receipt resumes the lane to completion".
+  Same disease, still open: resume()'s rpc-with-txHash and rawTx-rebroadcast branches
+  call confirmReceipt then `continue` without startLane, leaving a running-driverless
+  lane that resume itself then skips (only a restart re-claims it) — fix needs its own
+  tests around the rebroadcast semantics before touching. Also found while guiding the
+  recovery: (a) every resolve verb dereferences the pause's attempt unguarded
+  (DeployEngine ~L568 `.find(...)!`), so any verb on a claimInterruptedLanes pause
+  (attemptId 'recovery', no attempt exists) 500s — either synthesize an attempt when
+  claiming, or guard the resolve path; (b) the run view's pause dialog offers
+  retry/edit/skip/abort for 'interrupted' but the designed verb, Resume, only renders
+  on the Deployments list row — surface it in the dialog too.
+- **[FIXED 2026-08-13: factory products auto-verify from declared constructor args.]**
+  Was: enqueueConfirmedVerification is receipt-driven (locates the confirmed step by
+  the attempt's txHash, decomposes creation calldata), and products confirm with no
+  transaction and no initcode-bearing calldata — both TJAR runs needed manual
+  verification. Fix took the "simplest" shape: the product step's own `args` are now
+  its DECLARED constructor args (the wizard's product card shows the editor collapsed,
+  optional, never auto-seeded; the factory still supplies the real values onchain).
+  On product confirmation — fulfilledBy confirm, self-fulfilled settle, and startup
+  reconciliation — core resolves the declaration through the ordinary arg pipeline
+  (pointers, per-chain), encodes it against the frozen ctor ABI via
+  encodeDeclaredProductArgs, and enqueues with the fulfilling call's txHash.
+  Parameterless ctors (the jar) auto-verify with no declaration; a missing/partial
+  declaration only skips auto-verification (warn log), never touches lane state.
+  validateEdits rejects an argsByStep edit that leaves a product declaration
+  unencodable, but only when the edit touches that step — legacy stray args on
+  untouched products stay tolerated. Covered in deployEngine.test.ts (factory
+  describe), verificationReconciliation.test.ts and DeployStepCard.test.ts.
+- **[PARTLY FIXED 2026-08-11] The edit dialog cannot express the only available
+  workaround.** `validateEdits` now skips the initcode dry-build for factory products
+  (they have none; stray wizard args no longer reject edits) and tolerates unresolved
+  pointers at not-yet-executed factory products (their addresses are runtime-derived),
+  so ordinary edits (gas, RPC endpoint) during a factory pause are accepted. Still
+  open: the dialog exposes a single Call target, so multi-step `targetByStep` edits
+  still cannot be entered from the UI.
+- **Overriding a call target to a literal address silently drops parameter names — treat
+  as a correctness bug, not cosmetics.** `callTargetAbi` returns undefined for non-step
+  targets (resolver L372), so `callAbiItem` falls back to parsing the signature; an
+  unnamed signature (`setConfig(address,address,uint256,uint256)`) then keys arguments
+  `arg0..argN` (resolver L164 and L662) while the stored args are ABI-named. Best case
+  it throws `arg0 is required`. Worst case an operator hand-writes positional args and
+  transposes two same-typed parameters — for TJAR, swapping `threshold` and
+  `maxReleaseLength` passes every on-chain check and leaves the jar drainable for dust,
+  permanently once ownership is burned. Keep the frozen ABI keyed off the plan contract
+  even when the target is overridden, or refuse argument edits for unnamed signatures.
+- **Wizard leaves a stray `args: {"_resource": ""}` on a factory-product deploy step.**
+  Harmless (factory products read inputs from `strategy`, not `step.args`) but it is
+  noise in both the persisted draft and the plan. Update 2026-08-13: product step args
+  are now the declared-for-verification constructor args, so a legacy stray key matters
+  only if it happens to complete a declaration — worst case a visibly failed
+  verification task, never a lane effect. Current wizard code seeds no such strays
+  (the declaration editor never auto-defaults); the observed `_resource` came from an
+  earlier build.
+- Worth keeping: two designed safeguards did hold. Argument lookup by ABI name made a
+  positional transposition impossible on the happy path, and every failure paused the
+  lane (L1678) instead of cascading into the irreversible ownership burns.
+
 ## Workflow follow-ups (D6, 2026-07-14)
 
 - **Workflows are chain-agnostic** — decided 2026-07-16 during D6 review:

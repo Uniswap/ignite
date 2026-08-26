@@ -212,3 +212,83 @@ describe('eligiblePointerSteps', () => {
     });
   });
 });
+
+// A produced product's address exists only once its producer call has run, so
+// this mirror must classify it dynamic exactly as core does — otherwise the
+// picker offers references the run can never resolve.
+describe('produced products in the pointer picker', () => {
+  // [call-factory, deploy-A (product of it), deploy-B (create2), deploy-C]
+  const producedDraft = (): DeployDraftState => {
+    const state = draft();
+    state.chains = [1];
+    state.steps = [
+      { id: 'call-factory', kind: 'call', target: null, signature: 'deploy(address)' },
+      ...state.steps,
+    ];
+    state.deployExtras['deploy-A'] = {
+      strategy: {
+        kind: 'plugin',
+        pluginId: 'factory',
+        producedBy: { stepId: 'call-factory', outputIndex: 0 },
+      },
+    };
+    state.deployExtras['deploy-B'] = { strategy: { kind: 'create2' } };
+    return state;
+  };
+
+  it('offers a product to a later create2 step and marks that step dynamic', () => {
+    const state = producedDraft();
+    expect(
+      eligiblePointerSteps(state, 'deploy-B').find((option) => option.stepId === 'deploy-A')
+    ).toEqual({ stepId: 'deploy-A', label: 'A' });
+    state.steps[2].args = { jar: { $ref: { kind: 'step', stepId: 'deploy-A' } } };
+    // Nothing is mined ahead of the run for this step on this chain.
+    expect(partitionDeterministicChains(state, 'deploy-B')).toEqual({
+      staticChains: [],
+      dynamicChains: [1],
+    });
+  });
+
+  it('disables a product that a step would reference before the producer runs', () => {
+    const state = producedDraft();
+    // Move the create2 consumer ahead of the product it points at.
+    state.steps = [state.steps[0], state.steps[2], state.steps[1], state.steps[3]];
+    expect(
+      eligiblePointerSteps(state, 'deploy-B').find((option) => option.stepId === 'deploy-A')
+    ).toEqual({
+      stepId: 'deploy-A',
+      label: 'A',
+      disabledReason: 'Later dynamic deterministic step — lands after this deployment',
+    });
+  });
+
+  it('disables a product for a call argument that is encoded before the producer', () => {
+    const state = producedDraft();
+    state.steps = [
+      { id: 'register', kind: 'call', target: null, signature: 'register(address)' },
+      ...state.steps,
+    ];
+    expect(
+      callArgumentPointerSteps(state, 'register').find((option) => option.stepId === 'deploy-A')
+    ).toMatchObject({
+      disabledReason: 'Later dynamic deterministic step — lands after this call',
+    });
+    expect(
+      callTargetPointerSteps(state, 'register').find((option) => option.stepId === 'deploy-A')
+    ).toMatchObject({
+      disabledReason: 'Later dynamic deterministic step — lands after this call',
+    });
+  });
+
+  // A product's args are verification declarations the producer supplies
+  // onchain, so — as in core's collectRefs — they are no prediction edge and
+  // this pair is not a cycle.
+  it('does not read a product\'s declared args as a prediction cycle', () => {
+    const state = producedDraft();
+    state.steps[1].args = { peer: { $ref: { kind: 'step', stepId: 'deploy-B' } } };
+    state.steps[2].args = { jar: { $ref: { kind: 'step', stepId: 'deploy-A' } } };
+    expect(
+      eligiblePointerSteps(state, 'deploy-B').find((option) => option.stepId === 'deploy-A')
+    ).toEqual({ stepId: 'deploy-A', label: 'A' });
+  });
+});
