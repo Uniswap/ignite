@@ -205,9 +205,8 @@ blocking current functionality.
   generic error for a URL that answers with the wrong chainId; distinguish
   "reachable but wrong chain" from "unreachable".
 - **Ecosystem plugin spin-out** — DONE for repos (2026-07-08): chainz moved to
-  ../ignite-chainz-plugin (initial commit, unpushed); Infura/Alchemy became
-  builtins. Remaining D7 work: publish the chainz repo + install-from-URL
-  hardening.
+  ../ignite-chainz-plugin, published public 2026-07-11; Infura/Alchemy became
+  builtins. Remaining D7 work: install-from-URL hardening.
 - **Sanitize parsePluginOutput error quoting globally** — parse errors embed the full
   framed payload / stdout tail in error messages; any log sink that prints plugin
   error messages verbatim can leak config secrets (D1b-wide concern; RpcProviderService

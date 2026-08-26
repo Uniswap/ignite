@@ -1,5 +1,6 @@
 import type { ArgValues } from '@ignite/api';
 import AbiArgField, { type AbiInput } from '../routes/deploy/components/AbiArgField';
+import type { ExplorerLookupOption } from './ExplorerLookup';
 
 export interface ConstructorAbiEntry {
   type?: string;
@@ -13,10 +14,12 @@ export function constructorInputs(abi: ConstructorAbiEntry[] | undefined) {
 export default function ConstructorArgsForm({
   abi,
   value,
+  explorerOptions,
   onChange,
 }: {
   abi: ConstructorAbiEntry[] | undefined;
   value: ArgValues;
+  explorerOptions?: ExplorerLookupOption[];
   onChange: (value: ArgValues) => void;
 }) {
   return (
@@ -30,6 +33,7 @@ export default function ConstructorArgsForm({
             fieldKey={key}
             value={value[key]}
             autoDefault
+            explorerOptions={explorerOptions}
             onChange={(next) => onChange({ ...value, [key]: next })}
           />
         );

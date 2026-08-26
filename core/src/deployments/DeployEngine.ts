@@ -66,6 +66,13 @@ type Receipt = Omit<ExecuteResult, 'txHash'>;
 type WrapperCapture = { captured: Record<string, Hex>; note?: string };
 const RECEIPT_RECHECK_ATTEMPTS = 60;
 const RECEIPT_RECHECK_INTERVAL_MS = 500;
+// A receipt does not prove the executing node can see the resulting state:
+// load-balanced endpoints answer consecutive calls from providers at
+// different heads, and some chains serve receipts from preconfirmations
+// before the block seals. Deterministic deploys probe for the created code
+// over this budget before concluding the deployment produced none.
+const CREATED_CODE_PROBE_ATTEMPTS = 20;
+const CREATED_CODE_PROBE_INTERVAL_MS = 500;
 
 export interface DeployEngineDeps {
   runStore: Pick<
@@ -118,6 +125,7 @@ export interface DeployEngineDeps {
   deploymentHooks: Pick<DeploymentHookService, 'dispatch' | 'reconcileStartup'>;
   deploymentTypes: Pick<DeploymentTypeService, 'prepare' | 'validate' | 'list' | 'launchBinding'>;
   now: () => number;
+  createdCodeProbe: { attempts: number; intervalMs: number };
 }
 
 interface ActiveLane {
@@ -209,6 +217,10 @@ export class DeployEngine {
       deploymentHooks: deps?.deploymentHooks ?? DeploymentHookService.getInstance(),
       deploymentTypes: deps?.deploymentTypes ?? DeploymentTypeService.getInstance(),
       now: deps?.now ?? Date.now,
+      createdCodeProbe: deps?.createdCodeProbe ?? {
+        attempts: CREATED_CODE_PROBE_ATTEMPTS,
+        intervalMs: CREATED_CODE_PROBE_INTERVAL_MS,
+      },
     };
   }
 
@@ -1073,7 +1085,8 @@ export class DeployEngine {
           chainId,
           txHash,
           receipt,
-          attemptId
+          attemptId,
+          signal
         );
         return true;
       }
@@ -1090,6 +1103,27 @@ export class DeployEngine {
         new Error('Transaction receipt is still pending'),
         attemptId
       );
+    }
+    return false;
+  }
+
+  // One eth_getCode taken right after a receipt proves nothing: the read can
+  // land on a provider behind the one that served the receipt, and preconf
+  // chains hand out receipts before the containing block seals. Poll for the
+  // code before letting the caller conclude created-code-missing. Callers
+  // without a signal (resume/reconcile commands) accept the full budget.
+  private async waitForDeterministicCode(
+    url: string,
+    address: Hex,
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    const { attempts, intervalMs } = this.deps.createdCodeProbe;
+    const delaySignal = signal ?? new AbortController().signal;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (signal?.aborted) return false;
+      const code = await this.deps.getCode(url, address);
+      if (code && code !== '0x') return true;
+      await abortableDelay(intervalMs, delaySignal);
     }
     return false;
   }
@@ -1535,7 +1569,8 @@ export class DeployEngine {
       chainId,
       result.txHash,
       result,
-      attemptId
+      attemptId,
+      signal
     );
   }
 
@@ -1545,21 +1580,25 @@ export class DeployEngine {
     chainId: number,
     hash: Hex,
     receipt: Receipt,
-    attemptId?: string
+    attemptId?: string,
+    signal?: AbortSignal
   ): Promise<void> {
     const before = await this.requireRun(profileId, runId);
     const beforeLane = before.lanes[String(chainId)];
     const planStep = before.plan.steps[beforeLane.currentStepIndex];
     const laneStep = beforeLane.steps[beforeLane.currentStepIndex];
-    // The CREATE2 proxy does not put the created address in the receipt.
-    // Confirm the predicted runtime code before advancing the lane.
+    // The CREATE2 proxy does not put the created address in the receipt, so
+    // the predicted runtime code is the only confirmation signal. Probe for
+    // it rather than trusting one read (see waitForDeterministicCode).
     const deterministic = planStep?.kind === 'deploy' && planStep.strategy?.kind !== undefined && planStep.strategy.kind !== 'create';
-    const deterministicCode = !deterministic || !laneStep.predictedAddress
-      ? undefined
-      : await this.deps.getCode((await this.rpcFor(before, chainId)).url, laneStep.predictedAddress);
     const deterministicCodePresent = !deterministic || !laneStep.predictedAddress
       ? true
-      : Boolean(deterministicCode && deterministicCode !== '0x');
+      : receipt.status === 'success' &&
+        (await this.waitForDeterministicCode((await this.rpcFor(before, chainId)).url, laneStep.predictedAddress, signal));
+    // A probe cut short by lane teardown answered nothing; a verdict written
+    // now would fabricate created-code-missing. The broadcast phase already
+    // persisted txHash/rawTx, so startup recovery re-derives the receipt.
+    if (signal?.aborted && receipt.status === 'success' && !deterministicCodePresent) return;
     let capture: WrapperCapture | undefined;
     let captureError: unknown;
     const confirmedAddress = deterministic ? laneStep.predictedAddress : receipt.contractAddress ?? undefined;

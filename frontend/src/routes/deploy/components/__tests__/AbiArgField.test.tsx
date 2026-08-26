@@ -14,6 +14,73 @@ const baseSigner = {
   address: '0x123400000000000000000000000000000000abcd',
 };
 
+const ADDRESS = '0x1111111111111111111111111111111111111111';
+const etherscanOption = {
+  chainId: 1,
+  key: '1:https://etherscan.io',
+  label: 'Ethereum - Etherscan',
+  addressUrlBase: 'https://etherscan.io',
+};
+const basescanOption = {
+  chainId: 8453,
+  key: '8453:https://basescan.org',
+  label: 'Base - Basescan',
+  addressUrlBase: 'https://basescan.org',
+};
+
+describe('AbiArgField explorer lookup', () => {
+  it('opens the single available explorer directly', () => {
+    const field = create(
+      <AbiArgField
+        input={{ name: 'owner', type: 'address' }}
+        fieldKey="owner"
+        value={ADDRESS}
+        eligibleSteps={[]}
+        explorerOptions={[etherscanOption]}
+        onChange={() => {}}
+      />
+    );
+    const link = field.root.findByProps({
+      'aria-label': 'Open address in Ethereum - Etherscan',
+    });
+    expect(link.props.href).toBe(`https://etherscan.io/address/${ADDRESS}`);
+    expect(link.props.target).toBe('_blank');
+  });
+
+  it('offers a picker instead of a direct link for several explorers', () => {
+    const field = create(
+      <AbiArgField
+        input={{ name: 'owner', type: 'address' }}
+        fieldKey="owner"
+        value={ADDRESS}
+        eligibleSteps={[]}
+        explorerOptions={[etherscanOption, basescanOption]}
+        onChange={() => {}}
+      />
+    );
+    // Opening the Floating UI menu needs a DOM, which this suite runs
+    // without; the trigger existing (and no direct link) is the contract.
+    field.root.findByProps({
+      'aria-label': 'Open address in a block explorer',
+    });
+    expect(field.root.findAllByType('a')).toHaveLength(0);
+  });
+
+  it('shows no explorer action for an incomplete address', () => {
+    const field = create(
+      <AbiArgField
+        input={{ name: 'owner', type: 'address' }}
+        fieldKey="owner"
+        value="0x1111"
+        eligibleSteps={[]}
+        explorerOptions={[etherscanOption]}
+        onChange={() => {}}
+      />
+    );
+    expect(field.root.findAllByType('a')).toHaveLength(0);
+  });
+});
+
 describe('AbiArgField signer fill', () => {
   it('deduplicates one signer used on several chains', () => {
     expect(

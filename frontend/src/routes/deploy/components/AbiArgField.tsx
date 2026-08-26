@@ -1,5 +1,8 @@
 import { useEffect } from 'react';
 import Switch from '../../../components/Switch';
+import ExplorerLookupSuffix, {
+  type ExplorerLookupOption,
+} from '../../../components/ExplorerLookup';
 import PointerValue, { type PointerOption } from './PointerValue';
 import {
   shortSignerAddress,
@@ -21,6 +24,7 @@ interface AbiArgFieldProps {
   autoDefault?: boolean;
   eligibleSteps?: PointerOption[];
   signerOptions?: SignerAddressOption[];
+  explorerOptions?: ExplorerLookupOption[];
   onChange: (value: unknown) => void;
 }
 
@@ -176,6 +180,7 @@ export default function AbiArgField({
   autoDefault = false,
   eligibleSteps,
   signerOptions = [],
+  explorerOptions = [],
   onChange,
 }: AbiArgFieldProps) {
   const label = input.name || fieldKey;
@@ -211,6 +216,7 @@ export default function AbiArgField({
               autoDefault={autoDefault}
               eligibleSteps={eligibleSteps}
               signerOptions={signerOptions}
+              explorerOptions={explorerOptions}
               onChange={(next) => onChange({ ...tuple, [key]: next })}
             />
           );
@@ -251,13 +257,16 @@ export default function AbiArgField({
           />
         )}
         {!ref && (
-          <input
-            className="input-glass"
-            value={literal}
-            placeholder={inputHint(input.type)}
-            aria-invalid={Boolean(invalid)}
-            onChange={(event) => onChange(event.target.value)}
-          />
+          <div className="relative">
+            <input
+              className="input-glass w-full pr-9"
+              value={literal}
+              placeholder={inputHint(input.type)}
+              aria-invalid={Boolean(invalid)}
+              onChange={(event) => onChange(event.target.value)}
+            />
+            <ExplorerLookupSuffix address={literal} options={explorerOptions} />
+          </div>
         )}
         {invalid && !ref && <span className="text-xs text-err">{invalid}</span>}
       </div>
