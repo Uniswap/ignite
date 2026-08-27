@@ -1637,6 +1637,32 @@ describe('DeployEngine', () => {
       expect(enqueued.find((entry) => entry.stepId === 'jar-product')).toMatchObject({ address: JAR, creationTxHash: TX_HASH });
     });
 
+    it('probes for product code before pausing produced-code-missing', async () => {
+      // A product confirms moments after its producer's receipt — the exact
+      // read-after-write window the created-code probe exists for. Code that
+      // appears on a later probe attempt must confirm, not pause.
+      const executed: Array<{ to?: string | null; data: string }> = [];
+      let jarReads = 0;
+      const harness = makeEngine({
+        validate: async (p) => producedValidation(p),
+        deploymentTypes: producedTypes(),
+        call: async () => PRODUCTS_RESULT as `0x${string}`,
+        getCode: async (_url: string, address: `0x${string}`) => {
+          // Read 1 is the producer's pre-broadcast occupancy check (must be
+          // empty); reads 2..3 are the probe's two attempts — code appears
+          // only on the second, so a single-read confirmation would pause.
+          if (address === JAR) return ((jarReads += 1) >= 3 ? '0x6001' : '0x') as `0x${string}`;
+          return productCode(executed)('', address);
+        },
+        executeTx: recordingExecuteTx(executed) as never,
+      });
+      const run = await launchDefault(harness, producedPlan());
+      await eventually(async () => (await harness.store.get('p1', run.id))?.lanes['1']?.status === 'completed', 'lane completed');
+      const lane = (await harness.store.get('p1', run.id))!.lanes['1'];
+      expect(lane.steps[1]).toMatchObject({ status: 'confirmed', address: JAR, addressProvenance: { kind: 'observed-at-expected', expectedAddress: JAR } });
+      expect(jarReads).toBeGreaterThanOrEqual(3);
+    });
+
     it('confirm-hash on an interrupted producer runs the products its broadcast already committed', async () => {
       // The mainline crash path: core dies while a sign-and-send producer
       // submission is in flight, startup recovery converts the interrupted

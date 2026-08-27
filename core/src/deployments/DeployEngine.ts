@@ -1318,10 +1318,14 @@ export class DeployEngine {
         // The producer commits this before it broadcasts, so absence means
         // the producer call never executed inside this run.
         if (!expected) throw coded('pointer-unresolved', `Produced product ${step.id} has no expected address — its producer call did not execute in this run`);
-        const code = await this.deps.getCode(rpc.url, expected);
+        // A product confirms moments after its producer's receipt — exactly
+        // the visibility window waitForDeterministicCode exists for — so one
+        // read here paused healthy lanes the same way created-code-missing
+        // used to before the probe.
+        const observed = await this.waitForDeterministicCode(rpc.url, expected, signal);
         // Preserves the producer attempt, receipt, and expected address; the
         // operator reconciles with recheck or record-deployed-address.
-        if (!code || code === '0x') throw coded('produced-code-missing', `No contract at expected address ${expected} for produced product ${step.id}`);
+        if (!observed) throw coded('produced-code-missing', `No contract at expected address ${expected} for produced product ${step.id}`);
         const observedAt = iso(this.deps.now());
         const settled = await this.mutate(profileId, runId, (current) => {
           const target = current.lanes[String(chainId)];
@@ -1424,7 +1428,10 @@ export class DeployEngine {
     );
     // Pre-existing code at ANY expected product address pauses the producer
     // before broadcast: the existing contracts are not products of this call,
-    // and persisting their addresses would claim they are.
+    // and persisting their addresses would claim they are. Deliberately a
+    // single read, not waitForDeterministicCode: that probe waits for code to
+    // APPEAR, while this check requires the address to be empty — polling
+    // would only slow every healthy broadcast.
     if (producedExpectations)
       for (const expectation of producedExpectations) {
         const existing = await this.deps.getCode(rpc.url, expectation.expectedAddress);
