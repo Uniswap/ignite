@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DeploymentPlanSchema, FrozenInputSchema, PrepareStepRequestSchema, RunRecordSchema, RunSummarySchema, ValidateDeploymentRequestSchema, allowedActions } from '@ignite/api';
+import { AttemptSchema, DeploymentPlanSchema, FrozenInputSchema, LaneStepSchema, PrepareStepRequestSchema, ResolveLaneRequestSchema, RunRecordSchema, RunSummarySchema, ValidateDeploymentRequestSchema, allowedActions } from '@ignite/api';
 import { renderArtifact } from '../../deployments/artifact.js';
 import fs from 'node:fs';
 
@@ -31,6 +31,22 @@ describe('D5 plan wire schema', () => {
     expect(() => FrozenInputSchema.parse({ ...input, runtimeBytecode: '0x60zz', runtimeBytecodeLinkReferences: { 'src/L.sol': { L: [{ start: 0, length: 20 }] } } })).toThrow();
     expect(() => FrozenInputSchema.parse({ ...input, runtimeBytecode: undefined })).toThrow();
     expect(() => FrozenInputSchema.parse({ ...input, runtimeBytecode: `0x${'00'.repeat(1024 * 1024 + 1)}`, runtimeBytecodeLinkReferences: undefined })).toThrow();
+  });
+  it('requires library step bindings to name deploy steps', () => {
+    // These two checks were briefly dropped while the produced-mode rules were
+    // added: a library bound to a call step (or to nothing) would then have
+    // reached the resolver, which cannot link a non-deploy address.
+    const withLibrary = (libraries: unknown) => ({
+      schemaVersion: 1, contracts: [contract], chains: [1], signers: {},
+      steps: [
+        { id: 'deploy', kind: 'deploy', contractId: 'c', ...(libraries as object) },
+        { id: 'call', kind: 'call', target: { kind: 'step', stepId: 'deploy' }, signature: 'ping()' },
+      ],
+    });
+    expect(() => DeploymentPlanSchema.parse(withLibrary({ libraries: { 'src/L.sol:L': { kind: 'step', stepId: 'call' } } }))).toThrow(/library stepIds must name deploy steps/);
+    expect(() => DeploymentPlanSchema.parse(withLibrary({ libraries: { 'src/L.sol:L': { kind: 'step', stepId: 'nope' } } }))).toThrow(/library stepIds must name deploy steps/);
+    expect(() => DeploymentPlanSchema.parse(withLibrary({ librariesPerChain: { '1': { 'src/L.sol:L': { kind: 'step', stepId: 'call' } } } }))).toThrow(/library stepIds must name deploy steps/);
+    expect(() => DeploymentPlanSchema.parse(withLibrary({ libraries: { 'src/L.sol:L': { kind: 'step', stepId: 'deploy' } } }))).not.toThrow();
   });
   it('exposes collision verbs and suppresses unknown-hash confirmation without intent', () => {
     expect(allowedActions({ reason: 'create2-collision', capability: 'sign-and-send', submitted: false, hasIntent: false })).toEqual(['accept-deployed', 'retry', 'skip', 'abort-lane']);
@@ -189,5 +205,134 @@ describe('D5 record compatibility and D6 workflow widening', () => {
     for (const pointer of ['', '/args', '/target/address', '/libraries', '/libraries/src/Lib.sol:Lib', '/value', '/args/bad~2escape']) {
       expect(() => ValidateDeploymentRequestSchema.parse({ ...base, workflow: { ...workflow, resolutions: [{ stepId: 's1', path: pointer, chainId: 31337, address, source: 'manual' }] } })).toThrow();
     }
+  });
+});
+
+describe('produced deployments in the wire schemas', () => {
+  const producer = { id: 'spawn', kind: 'call', target: { kind: 'address', address }, signature: 'deploy(address)', args: { owner: address }, abiContractId: 'c' };
+  const product = (extra: Record<string, unknown> = {}) => ({ id: 'product', kind: 'deploy', contractId: 'c', strategy: { kind: 'plugin', pluginId: 'factory', producedBy: { stepId: 'spawn', outputIndex: 0 } }, ...extra });
+  const producedPlan = (steps: unknown[]) => ({ schemaVersion: 1, contracts: [contract], steps, chains: [1], signers: {} });
+
+  it('parses the canonical producer + product pair and no longer parses kind factory', () => {
+    expect(() => DeploymentPlanSchema.parse(producedPlan([producer, product()]))).not.toThrow();
+    // The first-class factory strategy is gone from the wire entirely.
+    expect(() => DeploymentPlanSchema.parse(producedPlan([producer, { ...product(), strategy: { kind: 'factory', fulfilledBy: 'spawn', output: 'jar' } }]))).toThrow();
+  });
+
+  it('requires producedBy to name an earlier call step', () => {
+    expect(() => DeploymentPlanSchema.parse(producedPlan([product(), producer]))).toThrow(/earlier call step/);
+    expect(() => DeploymentPlanSchema.parse(producedPlan([{ id: 'spawn', kind: 'deploy', contractId: 'c' }, product()]))).toThrow(/reference a call step/);
+  });
+
+  it('forbids CREATE2 commitments and acknowledgements on a produced strategy', () => {
+    for (const field of [
+      { salt },
+      { saltPerChain: { '1': salt } },
+      { prepared: { '1': { initcodeHash: salt, predictedAddress: address } } },
+      { acknowledgeDeployed: { '1': { predictedAddress: address, initcodeHash: salt } } },
+    ]) {
+      const step = product();
+      Object.assign(step.strategy as object, field);
+      expect(() => DeploymentPlanSchema.parse(producedPlan([producer, step]))).toThrow(/not valid on a produced deployment/);
+    }
+  });
+
+  it('forbids transaction-only fields on a produced product step', () => {
+    // A produced product never submits a transaction; these would silently do
+    // nothing or contradict the producer.
+    for (const field of [
+      { value: '1' },
+      { valuePerChain: { '1': '1' } },
+      { gasOverrides: { gasLimit: '1' } },
+      { gasOverridesPerChain: { '1': { gasLimit: '1' } } },
+      { signerOverride: { global: { pluginId: 'p', accountId: 'a', address } } },
+      { libraries: { 'src/L.sol:L': { kind: 'address', address } } },
+      { librariesPerChain: { '1': { 'src/L.sol:L': { kind: 'address', address } } } },
+    ]) {
+      expect(() => DeploymentPlanSchema.parse(producedPlan([producer, product(field)]))).toThrow(/not valid on a produced deployment step/);
+    }
+  });
+
+  it('requires the producer call to carry a plan-contract abiContractId', () => {
+    expect(() => DeploymentPlanSchema.parse(producedPlan([{ ...producer, abiContractId: undefined }, product()]))).toThrow(/abiContractId/);
+    expect(() => DeploymentPlanSchema.parse(producedPlan([{ ...producer, abiContractId: 'missing' }, product()]))).toThrow(/reference a contract/);
+  });
+
+  it('accepts the record-deployed-address resolve request and bounds its inputs', () => {
+    const base = { attemptId: 'a1', commandId: 'c1', action: 'record-deployed-address', address };
+    expect(() => ResolveLaneRequestSchema.parse(base)).not.toThrow();
+    expect(() => ResolveLaneRequestSchema.parse({ ...base, note: 'n'.repeat(500) })).not.toThrow();
+    expect(() => ResolveLaneRequestSchema.parse({ ...base, note: 'n'.repeat(501) })).toThrow();
+    expect(() => ResolveLaneRequestSchema.parse({ ...base, address: '0x1234' })).toThrow();
+  });
+
+  it('permits attempt resolutionData exactly with a record-deployed-address resolution', () => {
+    const attempt = { id: 'a1', startedAt: '2026-08-13T00:00:00.000Z' };
+    const data = { recordedAddress: address };
+    expect(() => AttemptSchema.parse({ ...attempt, resolution: 'record-deployed-address', resolutionData: data })).not.toThrow();
+    expect(() => AttemptSchema.parse({ ...attempt, resolution: 'record-deployed-address' })).toThrow(/requires resolutionData/);
+    expect(() => AttemptSchema.parse({ ...attempt, resolution: 'retry', resolutionData: data })).toThrow(/only valid with/);
+    expect(() => AttemptSchema.parse({ ...attempt, resolutionData: data })).toThrow(/only valid with/);
+  });
+
+  it('pins produced address provenance to the final address it may accompany', () => {
+    const other = '0x0000000000000000000000000000000000000002';
+    const observed = { kind: 'observed-at-expected', expectedAddress: address, observedAt: 'now' };
+    const recorded = { kind: 'operator-recorded', expectedAddress: address, recordedAddress: other, recordedAt: 'now' };
+    const step = (extra: Record<string, unknown>) => ({ stepId: 's', status: 'confirmed', attempts: [], ...extra });
+    expect(() => LaneStepSchema.parse(step({ address, addressProvenance: observed }))).not.toThrow();
+    expect(() => LaneStepSchema.parse(step({ addressProvenance: observed }))).toThrow(/final address/);
+    // A manual recovery can never be rendered as an observed prediction, and
+    // vice versa: each variant pins the address it may accompany.
+    expect(() => LaneStepSchema.parse(step({ address: other, addressProvenance: observed }))).toThrow(/expectedAddress/);
+    expect(() => LaneStepSchema.parse(step({ address: other, addressProvenance: recorded }))).not.toThrow();
+    expect(() => LaneStepSchema.parse(step({ address, addressProvenance: recorded }))).toThrow(/recordedAddress/);
+  });
+
+  it('scopes expected and predicted addresses to their modes across the run record', () => {
+    const record = () => ({
+      schemaVersion: 1, id: 'run-1', profileId: 'p1', name: 'r', idempotencyKey: 'k',
+      createdAt: '2026-08-13T00:00:00.000Z', updatedAt: '2026-08-13T00:00:00.000Z',
+      plan: producedPlan([producer, product()]),
+      inputs: { c: { abi: [], creationBytecode: '0x6000', compiler: { pluginId: 'f', version: '1', settingsHash: 'a'.repeat(64) }, artifactHash: 'b'.repeat(64), repoDirty: false } },
+      deploymentTypeBindings: { factory: { pluginId: 'factory', pluginVersion: '1.0.0', execution: 'call-products', descriptorHash: 'a'.repeat(64) } },
+      rpcSelection: { '1': { endpointId: 'rpc1', label: 'Anvil', urlFingerprint: 'c'.repeat(64) } },
+      validation: { chains: {} },
+      lanes: { '1': { chainId: 1, status: 'running', currentStepIndex: 1, steps: [
+        { stepId: 'spawn', status: 'confirmed', attempts: [] },
+        { stepId: 'product', status: 'pending', expectedAddress: address, attempts: [] },
+      ] } },
+      status: 'running',
+    });
+    expect(() => RunRecordSchema.parse(record())).not.toThrow();
+    const steps = (candidate: ReturnType<typeof record>) => candidate.lanes['1'].steps as Record<string, unknown>[];
+
+    const predicted = record();
+    steps(predicted)[1].predictedAddress = address;
+    expect(() => RunRecordSchema.parse(predicted)).toThrow(/expectedAddress, not predictedAddress/);
+
+    const unproven = record();
+    steps(unproven)[1].address = address;
+    expect(() => RunRecordSchema.parse(unproven)).toThrow(/requires addressProvenance/);
+
+    const leakedExpected = record();
+    steps(leakedExpected)[0].expectedAddress = address;
+    expect(() => RunRecordSchema.parse(leakedExpected)).toThrow(/only valid on a produced product/);
+
+    const leakedProvenance = record();
+    steps(leakedProvenance)[0].address = address;
+    steps(leakedProvenance)[0].addressProvenance = { kind: 'observed-at-expected', expectedAddress: address, observedAt: 'now' };
+    expect(() => RunRecordSchema.parse(leakedProvenance)).toThrow(/only valid on a produced product/);
+  });
+
+  it('exposes the produced-mode resolve verb tables', () => {
+    const base = { capability: 'sign-and-send', submitted: false, hasIntent: false } as const;
+    expect(allowedActions({ ...base, reason: 'produced-address-occupied' })).toEqual(['retry', 'edit', 'abort-lane']);
+    expect(allowedActions({ ...base, reason: 'produced-code-missing' })).toEqual(['recheck', 'record-deployed-address', 'abort-lane']);
+    // Any other pause on a produced participant loses skip and
+    // accept-deployed: either verb would strand dependents.
+    expect(allowedActions({ ...base, reason: 'estimation', producedRole: 'producer' })).toEqual(['retry', 'edit', 'abort-lane']);
+    expect(allowedActions({ ...base, reason: 'create2-collision', producedRole: 'product' })).toEqual(['retry', 'abort-lane']);
+    expect(allowedActions({ ...base, reason: 'estimation' })).toContain('skip');
   });
 });

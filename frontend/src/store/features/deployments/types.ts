@@ -3,11 +3,13 @@ import type {
   ArgValues,
   CallTarget,
   ContractSource,
+  DeploymentTypeBinding,
   DeployStep,
   GasOverrides,
   Hex,
   Hex32,
   LibraryBinding,
+  ProducedBy,
   RunRecord,
   RunSummary,
   SignerCascade,
@@ -43,6 +45,10 @@ export interface DraftCallStep {
   // A blank target is valid while the wizard is being composed. The API plan
   // assembler omits no such value: Review remains the authoritative guard.
   target: CallTarget | null;
+  // References an ABI-bearing contract source in the draft. Set by the
+  // composer materializer so a literal (or later overridden) target keeps the
+  // authoritative parameter names for editing and encoding.
+  abiContractId?: string;
   targetPerChain?: Record<string, CallTarget>;
   signature?: string;
   payable?: boolean;
@@ -61,7 +67,11 @@ export interface DraftDeployExtras {
   strategy:
     | { kind: 'create' }
     | { kind: 'create2'; salt?: Hex32; saltPerChain?: Record<string, Hex32> }
-    | { kind: 'plugin'; pluginId: string; params?: Record<string, unknown> };
+    // `producedBy` present means this contract is created by the referenced
+    // call step (produced mode): the step submits no transaction of its own
+    // and `params` are opaque composition provenance. Absent means the
+    // ordinary CREATE2-style plugin strategy.
+    | { kind: 'plugin'; pluginId: string; params?: Record<string, unknown>; producedBy?: ProducedBy };
   libraries?: Record<string, LibraryBinding>;
   librariesPerChain?: Record<string, Record<string, LibraryBinding>>;
   prepared?: Record<
@@ -75,6 +85,29 @@ export interface DraftDeployExtras {
   >;
   acknowledged?: AckMap;
   needsPrepare?: boolean;
+}
+
+// The generic deployment composer's draft state: only the composition's
+// identity and the user's selections. Server responses (fields, blockers,
+// the composed call-products template) are transient — they are refetched by
+// re-invoking the compose operation, never persisted, so a restored draft
+// cannot replay a stale plugin answer. The call's arguments never live here
+// at all: they are filled on the generated call step's card in Steps.
+export interface DeploymentCompositionDraft {
+  pluginId: string;
+  // Recorded from the compose response that materialized the draft. Optional
+  // because the composition exists before the first server answer arrives.
+  binding?: DeploymentTypeBinding;
+  // Minted once when the composer opens so re-applying a composition
+  // reconciles the same generated ids instead of accumulating new ones.
+  compositionId: string;
+  // Composer field values keyed by field key (addresses, selects).
+  values: Record<string, unknown>;
+  // Artifact-field selections keyed by field key.
+  artifacts: Record<string, DraftContract>;
+  // Ids this composition generated; recomposition may only replace these.
+  ownedContractIds: string[];
+  ownedStepIds: string[];
 }
 
 export interface DraftRpcSelection {
@@ -113,6 +146,7 @@ export interface DeployDraftState {
   workflowRunHooks?: string[];
   acknowledgeArtifactDrift?: ArtifactDriftAcknowledgements;
   contractTypeSelectionPending?: boolean;
+  composition?: DeploymentCompositionDraft;
 }
 
 export type GasOverrideKey = keyof GasOverrides;

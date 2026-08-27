@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { keccak256, stringToHex } from 'viem';
-import type { DeploymentTypeInfo } from '@ignite/api';
-import { ApiError } from '@ignite/api/client';
+import type { DeploymentTypeInfo, ValidationReport } from '@ignite/api';
 import Select from '../../../components/Select';
 import { apiClient } from '../../../store/api/client';
 import { useAppDispatch, useAppSelector } from '../../../store';
@@ -15,16 +14,14 @@ import {
 import { draftToPlanFragment } from '../planFromDraft';
 import { replaceIdsForDisplay } from '../../../utils/displayText';
 import { partitionDeterministicChains } from '../pointerEligibility';
+import { stepPredictionRows } from '../reviewPredictions';
+import { apiErrorMessage } from '../../../utils/apiError';
 
-export function apiErrorMessage(reason: unknown): string {
-  return reason instanceof ApiError
-    ? (reason.body.message ?? reason.message)
-    : reason instanceof Error
-      ? reason.message
-      : String(reason);
-}
+// It moved to utils so useValidationReport can share it without a hook
+// depending on a leaf component; re-exported here to keep this import path.
+export { apiErrorMessage };
 
-export default function StrategySection({ stepId }: { stepId: string }) {
+export default function StrategySection({ stepId, report }: { stepId: string; report?: ValidationReport | null }) {
   const dispatch = useAppDispatch();
   const draft = useAppSelector((state) => state.deployDraft);
   const chains = useAppSelector((state) => state.chains.chains);
@@ -55,6 +52,9 @@ export default function StrategySection({ stepId }: { stepId: string }) {
   }, []);
   const selected =
     strategy.kind === 'plugin' ? `plugin:${strategy.pluginId}` : strategy.kind;
+  // A produced product's strategy is composition provenance, not an operator
+  // choice: it renders as explanation, never as a selector.
+  const produced = strategy.kind === 'plugin' && strategy.producedBy !== undefined;
   const selectStrategy = (value: string) => {
     if (value === 'create')
       dispatch(setStrategy({ stepId, strategy: { kind: 'create' } }));
@@ -101,24 +101,44 @@ export default function StrategySection({ stepId }: { stepId: string }) {
   const staticPrepared = Object.entries(extras?.prepared ?? {}).filter(
     ([chainId]) => staticChains.includes(Number(chainId))
   );
+  const predictionRows = stepPredictionRows(report, stepId);
   return (
     <section className="grid gap-3">
-      <label className="grid gap-1">
-        <span className="eyebrow">Deployment strategy</span>
-        <Select
-          value={selected}
-          requireSelection
-          options={[
-            { value: 'create', label: 'Create' },
-            { value: 'create2', label: 'Create2' },
-            ...types.map((item) => ({
-              value: `plugin:${item.pluginId}`,
-              label: item.label,
-            })),
-          ]}
-          onValueChange={selectStrategy}
-        />
-      </label>
+      {produced ? (
+        <div className="grid gap-1">
+          <span className="eyebrow">Deployment strategy</span>
+          <p className="text-sm text-muted">
+            Created by this run&apos;s producer call as output{' '}
+            <span className="mono-data">
+              #{strategy.kind === 'plugin' ? strategy.producedBy?.outputIndex : ''}
+            </span>
+            . The call&apos;s address and arguments live on its step; recompose
+            to change the function or product mapping.
+          </p>
+        </div>
+      ) : (
+        <label className="grid gap-1">
+          <span className="eyebrow">Deployment strategy</span>
+          <Select
+            value={selected}
+            requireSelection
+            options={[
+              { value: 'create', label: 'Create' },
+              { value: 'create2', label: 'Create2' },
+              // Call-products plugins never appear here: they compose a call
+              // plus products through the composer entry point, not a
+              // per-step deterministic deployment.
+              ...types
+                .filter((item) => item.execution === 'create2')
+                .map((item) => ({
+                  value: `plugin:${item.pluginId}`,
+                  label: item.label,
+                })),
+            ]}
+            onValueChange={selectStrategy}
+          />
+        </label>
+      )}
       {strategy.kind === 'create2' && (
         <>
           <label className="grid gap-1">
@@ -188,7 +208,7 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           )}
         </>
       )}
-      {plugin?.params.map((field) => {
+      {!produced && plugin?.params.map((field) => {
         const value =
           strategy.kind === 'plugin' ? strategy.params?.[field.key] : undefined;
         const change = (next: unknown) =>
@@ -236,7 +256,10 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           </label>
         );
       })}
-      {strategy.kind !== 'create' && staticChains.length > 0 && (
+      {/* Produced products are predicted by the validation-time eth_call of
+          the producer function; the prepare endpoint has nothing to mine for
+          them. */}
+      {strategy.kind !== 'create' && !produced && staticChains.length > 0 && (
         <div className="flex gap-2 items-center">
           <button
             type="button"
@@ -257,11 +280,11 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           )}
         </div>
       )}
-      {strategy.kind !== 'create' && dynamicChains.length > 0 && (
+      {strategy.kind !== 'create' && !produced && dynamicChains.length > 0 && (
         <p className="text-xs text-muted">
           Salt is mined during the run against live addresses on:{' '}
-          {dynamicChainNames.join(', ')}. Flags and a provisional address appear
-          in validation.
+          {dynamicChainNames.join(', ')}. The predicted address below is
+          provisional until then; validation carries the flags.
         </p>
       )}
       {error && (
@@ -269,11 +292,38 @@ export default function StrategySection({ stepId }: { stepId: string }) {
           {replaceIdsForDisplay(error, stepName ? { [stepId]: stepName } : {})}
         </p>
       )}
-      {staticPrepared.map(([chainId, result]) => (
-          <p key={chainId} className="text-xs mono-data">
-            {chainId}: {result.predictedAddress}
-          </p>
-        ))}
+      {/* Both lists are labelled, because a re-mined step shows the same chain
+          in each: `prepared` is the salt already committed into the strategy,
+          `predictionRows` is what validation recomputes from the current draft.
+          When those disagree the pair is the drift signal, so neither may be
+          filtered out and neither may sit unlabelled. */}
+      {staticPrepared.length > 0 && (
+        <div className="grid gap-1">
+          <span className="eyebrow">Committed address</span>
+          {staticPrepared.map(([chainId, result]) => (
+            <p key={chainId} className="text-xs mono-data">
+              {chainId}: {result.predictedAddress}
+            </p>
+          ))}
+        </div>
+      )}
+      {predictionRows.length > 0 && (
+        <div className="grid gap-1">
+          <span className="eyebrow">Predicted address (from validation)</span>
+          {predictionRows.map((row) => (
+            <div key={`${row.stepId}-${row.chainId}`} className="flex flex-wrap gap-x-2 gap-y-1 items-center text-xs">
+              <span className={row.address ? 'mono-data' : 'text-muted'}>
+                {row.chainId}: {row.address ?? row.unavailableLabel}
+              </span>
+              {row.provisionalLabel && (
+                <span className="chip" title={row.provisionalDetail}>
+                  {row.provisionalLabel}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

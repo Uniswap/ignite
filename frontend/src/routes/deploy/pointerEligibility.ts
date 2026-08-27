@@ -37,7 +37,11 @@ export function predictionDependencies(
   step: DraftStep,
   chainId: number
 ): string[] {
-  if (step.kind !== 'deploy') return [];
+  // A produced product's args are verification-only declarations — the
+  // producer encodes the real constructor values onchain — so, exactly as in
+  // core's collectRefs, they contribute no prediction edges. Its only edge is
+  // the producedBy call, and this graph excludes calls.
+  if (step.kind !== 'deploy' || draftProducedBy(draft, step.id)) return [];
   const extras = draft.deployExtras[step.id];
   const args = {
     ...(step.args ?? {}),
@@ -108,11 +112,24 @@ export function reaches(
   );
 }
 
+// Produced-mode plugin steps deliberately share the 'plugin' kind: like every
+// other non-create strategy they are deterministic (the producer's simulated
+// output), which is what keeps them pointer-eligible below. They are also
+// always runtime-dynamic — see dynamicDeterministicDraftStepIds — so only
+// references made after the producer has run are offered.
 function draftStrategyKind(
   draft: DeployDraftState,
   stepId: string
 ): 'create' | 'create2' | 'plugin' {
   return draft.deployExtras[stepId]?.strategy.kind ?? 'create';
+}
+
+function draftProducedBy(
+  draft: DeployDraftState,
+  stepId: string
+): { stepId: string; outputIndex: number } | undefined {
+  const strategy = draft.deployExtras[stepId]?.strategy;
+  return strategy?.kind === 'plugin' ? strategy.producedBy : undefined;
 }
 
 /** Draft-shaped counterpart to core's dynamicDeterministicStepIds. */
@@ -133,6 +150,14 @@ export function dynamicDeterministicDraftStepIds(
       draftStrategyKind(draft, id) === 'create'
     )
       return false;
+    // A produced product's address exists only at runtime: the producer call's
+    // pre-broadcast simulation commits it, and static prediction is
+    // impossible. Core classifies it dynamic for exactly that reason, so this
+    // mirror must too or the picker offers references that cannot resolve.
+    if (draftProducedBy(draft, id)) {
+      memo.set(id, true);
+      return true;
+    }
     // Deterministic-only cycles remain prediction cycles, rather than making
     // either side dynamic. This matches the resolver's cycle-safe walk.
     if (visiting.has(id)) return false;

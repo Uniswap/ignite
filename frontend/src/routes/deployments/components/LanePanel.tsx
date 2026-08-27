@@ -3,6 +3,7 @@ import type {
   ChainInfo,
   ExplorerTargetSnapshot,
   Lane,
+  LaneStep,
   ResolveAction,
   Step,
   VerificationTask,
@@ -109,6 +110,53 @@ export function splitLaneVerificationTasks(
   return { byStep, orphans };
 }
 
+/**
+ * What a deploy step's address row shows. Three honest states, never
+ * conflated: a prediction (CREATE/CREATE2 simulation), an expected address
+ * (a produced product's pre-broadcast commitment — not proof of deployment),
+ * and a final address whose provenance says HOW it became known. An
+ * operator-recorded address is never rendered as a prediction.
+ */
+export function stepAddressPresentation(
+  step: Pick<
+    LaneStep,
+    'address' | 'predictedAddress' | 'expectedAddress' | 'addressProvenance'
+  >
+): { value: string; chip?: { label: string; ok: boolean; title?: string } } | undefined {
+  const value = step.address ?? step.predictedAddress ?? step.expectedAddress;
+  if (!value) return undefined;
+  if (step.address) {
+    const provenance = step.addressProvenance;
+    if (provenance?.kind === 'operator-recorded')
+      return {
+        value,
+        chip: {
+          label: 'operator-recorded',
+          ok: false,
+          title: provenance.note
+            ? `Operator note: ${provenance.note}`
+            : 'Recorded by an operator. Ignite verified code exists here but cannot prove this call created it.',
+        },
+      };
+    if (provenance?.kind === 'observed-at-expected')
+      return { value, chip: { label: 'expected ✓', ok: true } };
+    if (step.predictedAddress?.toLowerCase() === step.address.toLowerCase())
+      return { value, chip: { label: 'predicted ✓', ok: true } };
+    return { value };
+  }
+  if (step.expectedAddress)
+    return {
+      value,
+      chip: {
+        label: 'expected',
+        ok: false,
+        title:
+          'Committed from the producer’s pre-broadcast simulation; confirmed once code is observed at this address.',
+      },
+    };
+  return { value, chip: { label: 'predicted', ok: false } };
+}
+
 export function simulationTierLabel(
   tier: 'simulateV1' | 'fork' | 'estimate' | undefined
 ) {
@@ -194,12 +242,16 @@ export default function LanePanel({
             target?.kind === 'address'
               ? target.address
               : target?.kind === 'step'
-                ? (lane.steps.find(
-                    (candidate) => candidate.stepId === target.stepId
-                  )?.address ??
-                  lane.steps.find(
-                    (candidate) => candidate.stepId === target.stepId
-                  )?.predictedAddress)
+                ? (() => {
+                    const targetStep = lane.steps.find(
+                      (candidate) => candidate.stepId === target.stepId
+                    );
+                    return (
+                      targetStep?.address ??
+                      targetStep?.predictedAddress ??
+                      targetStep?.expectedAddress
+                    );
+                  })()
                 : undefined;
           const strategy =
             planStep?.kind === 'deploy' ? planStep.strategy : undefined;
@@ -241,23 +293,29 @@ export default function LanePanel({
                   {alreadyDeployed ? 'already deployed — skipped' : step.status}
                   {attempt?.gasUsed && ` · ${gasLabel(attempt.gasUsed)} gas`}
                 </div>
-                {isDeploy && (step.address || step.predictedAddress) && (
-                  <div className="flex flex-wrap items-center gap-2 mt-2 text-xs">
-                    <span className="text-muted w-12">Address</span>
-                    <CopyValue value={step.address ?? step.predictedAddress!} />
-                    <ExplorerLink
-                      href={addressHref}
-                      label="Open address in explorer"
-                    />
-                    {step.address &&
-                    step.predictedAddress?.toLowerCase() ===
-                      step.address.toLowerCase() ? (
-                      <span className="chip chip-ok text-xs">predicted ✓</span>
-                    ) : !step.address ? (
-                      <span className="chip text-muted text-xs">predicted</span>
-                    ) : null}
-                  </div>
-                )}
+                {isDeploy &&
+                  (() => {
+                    const presented = stepAddressPresentation(step);
+                    if (!presented) return null;
+                    return (
+                      <div className="flex flex-wrap items-center gap-2 mt-2 text-xs">
+                        <span className="text-muted w-12">Address</span>
+                        <CopyValue value={presented.value} />
+                        <ExplorerLink
+                          href={addressHref}
+                          label="Open address in explorer"
+                        />
+                        {presented.chip && (
+                          <span
+                            className={`chip ${presented.chip.ok ? 'chip-ok' : 'text-muted'} text-xs`}
+                            title={presented.chip.title}
+                          >
+                            {presented.chip.label}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 {step.captured?.admin && (
                   <div className="flex flex-wrap items-center gap-2 mt-1 text-xs">
                     <span className="text-muted w-12">ProxyAdmin</span>
@@ -337,7 +395,7 @@ export default function LanePanel({
           </Link>
         </p>
       )}
-      <PauseBanner lane={lane} capability={capability} onAction={onAction} />
+      <PauseBanner lane={lane} planSteps={planSteps} capability={capability} onAction={onAction} />
     </section>
   );
 }

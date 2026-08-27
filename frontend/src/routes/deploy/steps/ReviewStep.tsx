@@ -1,14 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
-  DeploymentHookInfo,
   DeploymentPlan,
   ValidationItem,
   ValidationReport,
 } from '@ignite/api';
 import { sanitizeDisplayText } from '@ignite/api';
 import { Loader2, RefreshCw, Rocket } from 'lucide-react';
-import { type NavigateFunction, useNavigate } from 'react-router-dom';
-import { ApiError } from '@ignite/api/client';
+import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../../../store/api/client';
 import { useAppDispatch, useAppSelector } from '../../../store';
 import { verifierPluginLabel } from '../../../store/features/plugins/pluginsSlice';
@@ -25,12 +23,14 @@ import { runSnapshotReceived } from '../../../store/features/deployments/deploym
 import ValidationChecklist from '../components/ValidationChecklist';
 import { explorersApi } from '../../../store/api/explorersApi';
 import { decodeUrlEncodingForDisplay, replaceIdsForDisplay } from '../../../utils/displayText';
-import { workflowRunRequestFromDraft } from '../../../store/features/deployments/workflowDraft';
 import { openPermissionsModal } from '../../../store/features/plugins/pluginsSlice';
 import { reviewPredictedAddresses } from '../reviewPredictions';
-import { triggerToast } from '../../../store/middleware/toastListener';
 import InstallPluginDialog from '../../../components/plugins/InstallPluginDialog';
 import { selectWorkflowDocument } from '../../../store/features/workflows/workflowsSlice';
+import {
+  bounceOutOfSyncWorkflowRun,
+  useValidationReport,
+} from '../useValidationReport';
 
 function validationGreen(report: ValidationReport | null): boolean {
   return Boolean(
@@ -42,31 +42,12 @@ function validationGreen(report: ValidationReport | null): boolean {
   );
 }
 
-export function bounceOutOfSyncWorkflowRun(
-  cause: unknown,
-  dispatch: (action: ReturnType<typeof triggerToast>) => unknown,
-  navigate: NavigateFunction
-): boolean {
-  if (
-    !(cause instanceof ApiError) ||
-    cause.status !== 409 ||
-    cause.body.code !== 'WORKFLOW_OUT_OF_SYNC'
-  )
-    return false;
-  dispatch(
-    triggerToast({
-      title: 'Workflow is out of sync',
-      description: 'Install or update it first.',
-      variant: 'error',
-      duration: 8000,
-    })
-  );
-  navigate('/workflows', { replace: true });
-  return true;
-}
+// Lives with the validation hook now, but callers still import it from here.
+export { bounceOutOfSyncWorkflowRun };
 
 interface ReviewStepProps {
   plan: DeploymentPlan;
+  validation: ReturnType<typeof useValidationReport>;
 }
 
 export function workflowDefaultRunName(
@@ -97,7 +78,7 @@ export function workflowStepLabels(
   );
 }
 
-export default function ReviewStep({ plan }: ReviewStepProps) {
+export default function ReviewStep({ plan, validation }: ReviewStepProps) {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const draft = useAppSelector((state) => state.deployDraft);
@@ -113,14 +94,21 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
         )
       : undefined
   );
-  const [report, setReport] = useState<ValidationReport | null>(null);
-  const [loading, setLoading] = useState(false);
+  // The wizard owns the hook so the steps page and Review read one report;
+  // calling it here too would run a second validate request per edit.
+  const {
+    report,
+    loading,
+    error,
+    setError,
+    deploymentHooks,
+    hooksLoaded,
+    installedHookIds,
+    workflowRequest,
+    rpcSelection,
+    revalidate,
+  } = validation;
   const [launching, setLaunching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [deploymentHooks, setDeploymentHooks] = useState<DeploymentHookInfo[]>(
-    []
-  );
-  const [hooksLoaded, setHooksLoaded] = useState(false);
   const [pluginId, setPluginId] = useState<string | null>(null);
   const defaultName = workflowDefaultRunName(draft.contracts);
   const stepLabels = useMemo(
@@ -131,49 +119,10 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
     () => new Set(draft.steps.filter((step) => step.kind === 'deploy' && step.wraps).map((step) => step.id)),
     [draft.steps]
   );
-  const rpcSelection = useMemo(
-    () =>
-      Object.fromEntries(
-        Object.entries(draft.rpcSelection).map(([chainId, rpc]) => [
-          chainId,
-          rpc.endpointId,
-        ])
-      ),
-    [draft.rpcSelection]
-  );
-
   useEffect(() => {
     if (!draft.idempotencyKey) dispatch(mintIdempotencyKey());
   }, [dispatch, draft.idempotencyKey]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void apiClient
-      .request('listDeploymentHooks', {})
-      .then((response) => {
-        if ('data' in response && !cancelled)
-          setDeploymentHooks(response.data.deploymentHooks);
-      })
-      .catch(() => {
-        // Validation remains authoritative and will surface selected hook
-        // warnings; a transient discovery failure must not strand Review.
-      })
-      .finally(() => {
-        if (!cancelled) setHooksLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const installedHookIds = useMemo(
-    () => deploymentHooks.map((hook) => hook.pluginId),
-    [deploymentHooks]
-  );
-  const workflowRequest = useMemo(
-    () => workflowRunRequestFromDraft(draft, installedHookIds),
-    [draft, installedHookIds]
-  );
   const selectedHooks = workflowRequest?.hooks ?? [];
   const selectedPlugin = draft.workflowRequiredPlugins?.find(
     (plugin) => plugin.id === pluginId
@@ -191,36 +140,6 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
       }
     });
   }, [dispatch, draft.explorerSelection, explorers]);
-
-  const validate = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await apiClient.request('validateDeployment', {
-        body: {
-          plan,
-          rpcSelection,
-          explorerSelection: draft.explorerSelection,
-          ...(workflowRequest ? { workflow: workflowRequest } : {}),
-        },
-      });
-      if (!('data' in response)) throw new Error(response.message);
-      setReport({
-        chains: response.data.chains,
-        ...(response.data.run ? { run: response.data.run } : {}),
-      });
-    } catch (cause) {
-      setReport(null);
-      if (bounceOutOfSyncWorkflowRun(cause, dispatch, navigate)) return;
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
-  }, [dispatch, draft.explorerSelection, navigate, plan, rpcSelection, workflowRequest]);
-
-  useEffect(() => {
-    void validate();
-  }, [validate]);
 
   const launch = async () => {
     if (!draft.idempotencyKey || !validationGreen(report)) return;
@@ -311,7 +230,7 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
           type="button"
           className="btn btn-sm btn-secondary"
           disabled={loading}
-          onClick={() => void validate()}
+          onClick={() => void revalidate()}
         >
           <RefreshCw size={14} /> Re-validate
         </button>
@@ -500,7 +419,14 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
         <section className="card-milky p-4 grid gap-2">
           <h3 className="font-semibold">Predicted addresses</h3>
           {reviewPredictedAddresses(report).map(
-            ({ chainId, stepId, address, provisional, provisionalLabel }) => {
+            ({
+              chainId,
+              stepId,
+              address,
+              provisionalLabel,
+              provisionalDetail,
+              unavailableLabel,
+            }) => {
               const contractId = draft.steps.find(
                 (step) => step.id === stepId && step.kind === 'deploy'
               )?.contractId;
@@ -508,21 +434,29 @@ export default function ReviewStep({ plan }: ReviewStepProps) {
                 draft.contracts.find((contract) => contract.id === contractId)
                   ?.contractName ?? decodeUrlEncodingForDisplay(stepId);
               return (
+                // Wrapping, not one line: a chip naming a producer signature
+                // is wider than the address it annotates, and an unwrapped row
+                // widens the whole page until the launch button leaves the
+                // viewport.
                 <div
                   key={`${stepId}-${chainId}`}
-                  className="list-row flex gap-3"
+                  className="list-row flex flex-wrap items-center gap-x-3 gap-y-1"
                 >
                   <span className="font-medium">{name}{wrapperStepIds.has(stepId) && ' (wrapper)'}</span>
                   <span className="text-muted">
                     {chains.find((chain) => String(chain.chainId) === chainId)
                       ?.name ?? `Chain ${chainId}`}
                   </span>
-                  {provisional && (
-                    <span className="chip">
-                      {provisionalLabel ?? 'provisional'}
+                  {provisionalLabel && (
+                    <span className="chip" title={provisionalDetail}>
+                      {provisionalLabel}
                     </span>
                   )}
-                  <span className="mono-data ml-auto">{address}</span>
+                  <span
+                    className={address ? 'mono-data ml-auto' : 'text-muted ml-auto'}
+                  >
+                    {address ?? unavailableLabel}
+                  </span>
                 </div>
               );
             }

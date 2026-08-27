@@ -1,22 +1,41 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Boxes,
   History,
   Loader2,
   Play,
   Plus,
   Rocket,
 } from 'lucide-react';
-import type { VerificationTask } from '@ignite/api';
+import type { DeploymentTypeInfo, VerificationTask } from '@ignite/api';
 import { Link, useNavigate } from 'react-router-dom';
 import type { RunSummary } from '@ignite/api';
 import { apiClient } from '../../store/api/client';
 import { useAppDispatch, useAppSelector } from '../../store';
+import { compositionInProgress } from '../../store/features/deployments/deployDraftSlice';
 import { runsListReceived } from '../../store/features/deployments/deploymentsSlice';
 import { runSnapshotReceived } from '../../store/features/deployments/deploymentsSlice';
 import { verificationsApi } from '../../store/api/verificationsApi';
 import { useEnsureChainMetadata } from '../../store/features/chains/useEnsureChainMetadata';
 import Tooltip from '../../components/Tooltip';
+
+/**
+ * Composer entry points derived from deployment-type descriptors: one link
+ * per plugin whose host-verified descriptor supports composition. There is
+ * no hardcoded deployment-type identity anywhere in this page.
+ */
+export function composerEntryPoints(
+  types: DeploymentTypeInfo[]
+): Array<{ pluginId: string; label: string; to: string }> {
+  return types
+    .filter((item) => item.composeSupported)
+    .map((item) => ({
+      pluginId: item.pluginId,
+      label: item.label,
+      to: `/deploy?deploymentType=${encodeURIComponent(item.pluginId)}`,
+    }));
+}
 
 function StatusPill({ status }: { status: string }) {
   const cls =
@@ -40,6 +59,15 @@ export default function DeploymentsPage() {
   const navigate = useNavigate();
   const summaries = useAppSelector((state) => state.deployments.summaries);
   const draftActive = useAppSelector((s) => s.deployDraft.contracts.length > 0);
+  // A composition that holds real selections — but has not yet materialized
+  // its products into contracts — is still a session in progress: "Manage
+  // deployment" must resume it (via the deploymentType param — a plain
+  // /deploy entry deliberately clears an un-materialized composition). A
+  // draft holding only its minted ids is not: opening the composer and
+  // backing out must not strand this page on a single composer-only button.
+  const compositionDraft = useAppSelector((s) => s.deployDraft.composition);
+  const compositionActive = compositionInProgress(compositionDraft);
+  const [deploymentTypes, setDeploymentTypes] = useState<DeploymentTypeInfo[]>([]);
   const [unreadable, setUnreadable] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +113,22 @@ export default function DeploymentsPage() {
   useEffect(() => {
     verificationsApi.fetch().forEach((action) => dispatch(action));
   }, [dispatch]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void apiClient
+      .request('listDeploymentTypes', {})
+      .then((response) => {
+        if ('data' in response && !cancelled)
+          setDeploymentTypes(response.data.deploymentTypes);
+      })
+      .catch(() => {
+        // Composer entry points are additive; the page works without them.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -136,17 +180,33 @@ export default function DeploymentsPage() {
             Active runs and durable deployment history.
           </p>
         </div>
-        <Link to="/deploy" className="btn btn-primary">
-          {draftActive ? (
-            <>
-              <Rocket size={16} /> Manage deployment
-            </>
-          ) : (
-            <>
-              <Plus size={16} /> New deployment
-            </>
-          )}
-        </Link>
+        <div className="flex items-center gap-2">
+          {!draftActive &&
+            !compositionActive &&
+            composerEntryPoints(deploymentTypes).map((entry) => (
+              <Link key={entry.pluginId} to={entry.to} className="btn btn-secondary">
+                <Boxes size={16} /> {entry.label}
+              </Link>
+            ))}
+          <Link
+            to={
+              compositionActive && !draftActive
+                ? `/deploy?deploymentType=${encodeURIComponent(compositionDraft!.pluginId)}`
+                : '/deploy'
+            }
+            className="btn btn-primary"
+          >
+            {draftActive || compositionActive ? (
+              <>
+                <Rocket size={16} /> Manage deployment
+              </>
+            ) : (
+              <>
+                <Plus size={16} /> New deployment
+              </>
+            )}
+          </Link>
+        </div>
       </div>
       {loading && (
         <div className="card-milky p-8 flex justify-center gap-2 text-muted">

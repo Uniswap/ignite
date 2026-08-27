@@ -1,12 +1,20 @@
 // @ts-expect-error Vitest is supplied by the repository test command via npx.
 import { describe, expect, it } from 'vitest';
-import type { ContractSource } from '@ignite/api';
+import type { ComposedCallProducts, ContractSource, DeploymentTypeBinding } from '@ignite/api';
 import {
   deployDraftReducer,
+  addCallStep,
   addContracts,
   seedDraft,
   selectContractType,
+  setCallStepField,
+  setLibraries,
+  setStrategy,
   toggleChain,
+  startComposition,
+  setCompositionArtifact,
+  setCompositionValue,
+  applyComposition,
 } from '../deployDraftSlice';
 import {
   DEPLOY_DRAFT_STORAGE_KEY,
@@ -110,10 +118,14 @@ describe('deployDraftPersistence', () => {
     expect(loadDraft(storage)).toBeUndefined();
   });
 
-  it('discards the incompatible v1 session key', () => {
-    const storage = fakeStorage({ 'ignite.deployDraft.v1': JSON.stringify(draftWithContracts()) });
+  it('discards the incompatible v1 and v2 session keys', () => {
+    const storage = fakeStorage({
+      'ignite.deployDraft.v1': JSON.stringify(draftWithContracts()),
+      'ignite.deployDraft.v2': JSON.stringify(draftWithContracts()),
+    });
     expect(loadDraft(storage)).toBeUndefined();
     expect(storage.getItem('ignite.deployDraft.v1')).toBeNull();
+    expect(storage.getItem('ignite.deployDraft.v2')).toBeNull();
   });
 
   it('rejects parseable payloads with orphaned steps', () => {
@@ -178,5 +190,130 @@ describe('deployDraftPersistence', () => {
       },
     };
     expect(() => saveDraft(draftWithContracts(), storage)).not.toThrow();
+  });
+
+  it('round-trips a materialized composition draft', () => {
+    const storage = fakeStorage();
+    let draft = deployDraftReducer(undefined, startComposition('call-products-plugin'));
+    draft = deployDraftReducer(
+      draft,
+      setCompositionArtifact({ key: 'producer', source: contract('producer-art', 'Producer') })
+    );
+    draft = deployDraftReducer(
+      draft,
+      setCompositionValue({ key: 'address', value: `0x${'21'.repeat(20)}` })
+    );
+    draft = deployDraftReducer(
+      draft,
+      setCompositionArtifact({ key: 'product.jar', source: contract('jar-art', 'TokenJar') })
+    );
+    const binding: DeploymentTypeBinding = {
+      pluginId: 'call-products-plugin',
+      pluginVersion: '1.0.0',
+      execution: 'call-products',
+      descriptorHash: 'a'.repeat(64),
+    };
+    const composition: ComposedCallProducts = {
+      producer: {
+        abiArtifactField: 'producer',
+        targetField: 'address',
+        functionField: 'function',
+        signature: 'deploy(bytes32)',
+        payable: false,
+      },
+      products: [{ key: 'jar', artifactField: 'product.jar', outputIndex: 0 }],
+    };
+    draft = deployDraftReducer(draft, applyComposition({ binding, composition }));
+    // One product plus the never-deployed frozen producer ABI source.
+    expect(draft.contracts.length).toBe(2);
+
+    saveDraft(draft, storage);
+
+    expect(loadDraft(storage)).toEqual(draft);
+  });
+
+  it('restores an incomplete composition without contracts', () => {
+    // The zero-contract rule is deliberately relaxed here: an in-progress
+    // composer session must survive a reload, and it cannot leak dormant
+    // configuration because the wizard cannot pass the composer station
+    // without materializing contracts.
+    const storage = fakeStorage();
+    let draft = deployDraftReducer(undefined, startComposition('call-products-plugin'));
+    draft = deployDraftReducer(
+      draft,
+      setCompositionArtifact({ key: 'producer', source: contract('producer-art', 'Producer') })
+    );
+    draft = deployDraftReducer(
+      draft,
+      setCompositionValue({ key: 'address', value: `0x${'21'.repeat(20)}` })
+    );
+    saveDraft(draft, storage);
+    expect(loadDraft(storage)).toEqual(draft);
+  });
+
+  it('still refuses configuration without contracts or a composition', () => {
+    const storage = fakeStorage();
+    const broken = { ...draftWithContracts(), contracts: [], steps: [], deployExtras: {} };
+    saveDraft(broken, storage);
+    expect(loadDraft(storage)).toBeUndefined();
+  });
+
+  // Every keystroke in an address, salt or library field lands in the draft and
+  // is persisted synchronously, so parsing those with the plan's strict schemas
+  // discarded the whole session — composition, contracts, chains, signers and
+  // args — for one half-typed character.
+  it('restores a session whose addresses and salt are still half-typed', () => {
+    const storage = fakeStorage();
+    let draft = deployDraftReducer(undefined, seedDraft([contract('token', 'Token')]));
+    draft = deployDraftReducer(draft, addCallStep(0));
+    const callId = draft.steps[1].id;
+    draft = deployDraftReducer(
+      draft,
+      setCallStepField({
+        id: callId,
+        patch: {
+          target: { kind: 'address', address: '0x2179a6' as `0x${string}` },
+          // The cleared-field sentinel the per-chain input writes is not an
+          // address either.
+          targetPerChain: { '1': { kind: 'address', address: '0x' as `0x${string}` } },
+        },
+      })
+    );
+    draft = deployDraftReducer(
+      draft,
+      setStrategy({
+        stepId: 'deploy-token',
+        strategy: { kind: 'create2', salt: '0x12ab' as `0x${string}` },
+      })
+    );
+    draft = deployDraftReducer(
+      draft,
+      setLibraries({
+        stepId: 'deploy-token',
+        libraries: { Math: { kind: 'address', address: '0xab' as `0x${string}` } },
+      })
+    );
+
+    saveDraft(draft, storage);
+
+    expect(loadDraft(storage)).toEqual(draft);
+  });
+
+  it('keeps server-supplied predictions strict', () => {
+    // Prepared values are never typed: a corrupted one is dropped rather than
+    // restored and shown as a prediction.
+    const draft = draftWithContracts();
+    const storage = fakeStorage({
+      [DEPLOY_DRAFT_STORAGE_KEY]: JSON.stringify({
+        ...draft,
+        deployExtras: {
+          'deploy-token': {
+            strategy: { kind: 'create2' },
+            prepared: { '1': { salt: '0x12', predictedAddress: '0x34', initcodeHash: '0x56', notes: [] } },
+          },
+        },
+      }),
+    });
+    expect(loadDraft(storage)).toBeUndefined();
   });
 });

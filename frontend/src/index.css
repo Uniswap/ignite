@@ -550,6 +550,32 @@
   .btn:active {
     transform: translateY(0.5px);
   }
+  /* Nothing here styled :disabled, so a blocked Continue or an ungreen Launch
+     was pixel-identical to a live button — hover lit up, :active pressed, and
+     the click was silently swallowed. Each variant restores its own resting
+     look on hover: one shared override would repaint a disabled primary in the
+     secondary palette. */
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .btn:disabled:active {
+    transform: none;
+  }
+  .btn-primary:disabled:hover {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.3),
+      0 4px 14px -4px color-mix(in oklch, var(--accent) 55%, transparent);
+  }
+  .btn-secondary:disabled:hover {
+    background: var(--pane-bg);
+  }
+  .btn-secondary-borderless:disabled:hover {
+    background: transparent;
+  }
+  .btn-danger:disabled:hover {
+    background: color-mix(in oklch, var(--err) 14%, transparent);
+  }
 
   /* Primary: glass-lit accent — vertical gradient + specular inner edge */
   .btn-primary {

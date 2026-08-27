@@ -156,6 +156,43 @@ describe('WorkflowPromotionService', () => {
     expect(applied).toMatchObject({ mode: 'apply', warnings: ['The commit for C is not on the remote and teammates cannot install it.'] });
   });
 
+  // Produced mode: the frozen producer ABI is referenced ONLY by the call's
+  // abiContractId, so it is the one contract reference a deploy-step-shaped
+  // remap misses. An unremapped id would dangle against the minted source ids
+  // and the saved workflow could never be projected, validated, or launched.
+  it('remaps a producer call abiContractId onto the minted source id and keeps producedBy intact', async () => {
+    const inspectSource = vi.fn();
+    const source = { repoPathOrUrl: 'https://example.test/repo.git', frameworkId: 'foundry', sourcePath: 'src/Factory.sol', artifactPath: 'out/Factory.json', pin: { url: 'https://example.test/repo.git', commit: SHA, ref: 'v1', refKind: 'tag' as const } };
+    const composed: DeploymentPlan = {
+      schemaVersion: 1,
+      chains: [1],
+      signers: {},
+      contracts: [
+        { id: 'comp-1:abi', ...source, contractName: 'Factory' },
+        { id: 'comp-1:product:jar', ...source, contractName: 'Jar', sourcePath: 'src/Jar.sol', artifactPath: 'out/Jar.json' },
+      ],
+      steps: [
+        { id: 'call-comp-1', kind: 'call', target: { kind: 'address', address: `0x${'44'.repeat(20)}` }, signature: 'deploy(address)', args: { owner: `0x${'55'.repeat(20)}` }, abiContractId: 'comp-1:abi' },
+        { id: 'deploy-comp-1:product:jar', kind: 'deploy', contractId: 'comp-1:product:jar', strategy: { kind: 'plugin', pluginId: 'tjar', producedBy: { stepId: 'call-comp-1', outputIndex: 0 } } },
+      ],
+    };
+    const service = makeService({ inspectSource });
+    const target = { repoPathOrUrl: '/target', name: 'jar' };
+    const preview = await service.promote({ mode: 'preview', target, plan: composed }, 'p1');
+    await service.promote({ mode: 'apply', previewId: preview.previewId, target, plan: composed, hooks: [] }, 'p1');
+    const raw = files.get('ignite/workflows/jar.json')!;
+    const document = JSON.parse(raw) as WorkflowDocument;
+
+    expect(document.sources.map((entry) => entry.id)).toEqual(['factory-1', 'jar-1']);
+    expect(document.steps).toMatchObject([
+      { id: 'call-comp-1', kind: 'call', abiContractId: 'factory-1' },
+      { id: 'deploy-comp-1:product:jar', contractId: 'jar-1', strategy: { pluginId: 'tjar', producedBy: { stepId: 'call-comp-1', outputIndex: 0 } } },
+    ]);
+    // Step ids are not minted, so only the source-id positions may change.
+    expect(raw).not.toContain('"comp-1:abi"');
+    expect(raw).not.toContain('"comp-1:product:jar"');
+  });
+
   function makeService(overrides: Partial<WorkflowPromotionServiceDeps> = {}) {
     return new WorkflowPromotionService({
       inspectSource: async () => ({ origin: 'https://example.test/repo.git', commit: SHA, tags: ['v1.0.0'], branch: 'main', dirty: false }),

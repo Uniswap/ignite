@@ -31,9 +31,15 @@ function matchingFunction(
 export function callArgumentInputs(
   targetKind: 'step' | 'address' | undefined,
   signature: string | undefined,
-  targetAbi: AbiFunctionLike[] | undefined
+  targetAbi: AbiFunctionLike[] | undefined,
+  frozenAbi?: AbiFunctionLike[]
 ): AbiInput[] {
   if (!signature) return [];
+  // A frozen abiContractId source is the authoritative parameter-name
+  // supply: it wins over the target's ABI so a literal or later overridden
+  // producer target keeps named inputs.
+  const frozen = matchingFunction(frozenAbi, signature)?.inputs;
+  if (frozen) return frozen;
   if (targetKind === 'step') {
     return matchingFunction(targetAbi, signature)?.inputs ?? [];
   }

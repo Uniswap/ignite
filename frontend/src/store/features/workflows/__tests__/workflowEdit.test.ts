@@ -95,6 +95,33 @@ describe('workflow edit utilities', () => {
     expect(doc).toEqual(before);
   });
 
+  // A producer call resolves its function against the frozen ABI source it
+  // names, and each product exists only because that call creates it, so both
+  // edges cascade. Leaving either behind would save a document that can no
+  // longer be projected into a valid plan.
+  it('cascades a removed producer ABI source through the producer call to its products', () => {
+    const doc = fixture();
+    doc.sources.push({ id: 'factory', repo: { url: 'https://example.test/factory.git', commit: SHA }, frameworkId: 'compiler-keep', sourcePath: 'src/Factory.sol', contractName: 'Factory', artifactPath: 'Factory.json' });
+    doc.steps.push(
+      { id: 'spawn', kind: 'call', target: { kind: 'address', address }, signature: 'deploy(address)', abiContractId: 'factory' },
+      { id: 'product', kind: 'deploy', contractId: 'my-contract-2', strategy: { kind: 'plugin', pluginId: 'strategy', producedBy: { stepId: 'spawn', outputIndex: 0 } } },
+      { id: 'uses-product', kind: 'call', target: { kind: 'step', stepId: 'product' } }
+    );
+    assertClosed(makeWorkflowDocumentSchema().parse(doc));
+
+    const removed = cascadeRemoveSource(doc, 'factory');
+    expect(removed.removedStepIds).toEqual(expect.arrayContaining(['spawn', 'product', 'uses-product']));
+    expect(removed.doc.steps.map((step) => step.id)).not.toContain('product');
+    assertClosed(removed.doc);
+
+    // Dropping one product's contract leaves the producer call intact: an
+    // abiContractId is still valid on a call that produces nothing.
+    const oneProduct = cascadeRemoveSource(doc, 'my-contract-2');
+    expect(oneProduct.removedStepIds).toEqual(expect.arrayContaining(['product', 'uses-product']));
+    expect(oneProduct.doc.steps.find((step) => step.id === 'spawn')).toMatchObject({ abiContractId: 'factory' });
+    assertClosed(oneProduct.doc);
+  });
+
   it('changes only a repo source pin and drops its artifact hash', () => {
     const doc = fixture();
     const before = globalThis.structuredClone(doc);

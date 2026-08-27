@@ -221,4 +221,51 @@ describe('planFromDraft', () => {
       },
     });
   });
+
+  it('maps produced products and the producer call without transaction fields', () => {
+    // The canonical shape: the transaction is a plain call step carrying the
+    // frozen abiContractId, and every product points at it via producedBy —
+    // no product carries target, signature, salt, or acknowledgements.
+    const draft: DeployDraftState = {
+      contracts: [
+        { id: 'comp-1:abi', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/Producer.json', contractName: 'Producer', sourcePath: 'src/Producer.sol' },
+        { id: 'comp-1:jar', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/TokenJar.json', contractName: 'TokenJar', sourcePath: 'src/TokenJar.sol' },
+        { id: 'comp-1:releaser', repoPathOrUrl: '/repo', frameworkId: 'foundry', artifactPath: 'out/ExchangeReleaser.json', contractName: 'ExchangeReleaser', sourcePath: 'src/ExchangeReleaser.sol' },
+      ],
+      chains: [1], rpcSelection: {}, explorerSelection: {}, signers: {}, unseenIds: [],
+      steps: [
+        {
+          id: 'call-comp-1',
+          kind: 'call',
+          target: { kind: 'address', address: `0x${'21'.repeat(20)}` },
+          signature: 'deploy(address,bytes32)',
+          abiContractId: 'comp-1:abi',
+          args: { owner: `0x${'ab'.repeat(20)}`, salt: `0x${'11'.repeat(32)}` },
+        },
+        { id: 'deploy-comp-1:jar', kind: 'deploy', contractId: 'comp-1:jar' },
+        { id: 'deploy-comp-1:releaser', kind: 'deploy', contractId: 'comp-1:releaser' },
+      ],
+      deployExtras: {
+        'deploy-comp-1:jar': { strategy: { kind: 'plugin', pluginId: 'call-products-plugin', producedBy: { stepId: 'call-comp-1', outputIndex: 0 } } },
+        // Stale prepared/acknowledged extras must never leak onto a produced
+        // strategy: the shared schema rejects them alongside producedBy.
+        'deploy-comp-1:releaser': { strategy: { kind: 'plugin', pluginId: 'call-products-plugin', producedBy: { stepId: 'call-comp-1', outputIndex: 1 } }, prepared: { '1': { salt: `0x${'55'.repeat(32)}`, predictedAddress: `0x${'66'.repeat(20)}`, initcodeHash: `0x${'77'.repeat(32)}`, notes: [] } }, acknowledged: { '1': { predictedAddress: `0x${'66'.repeat(20)}`, initcodeHash: `0x${'77'.repeat(32)}` } } },
+      },
+    };
+
+    const plan = planFromDraft(draft, chains);
+    expect(plan.steps[0]).toMatchObject({ kind: 'call', abiContractId: 'comp-1:abi' });
+    expect(plan.steps[1]).toEqual({
+      id: 'deploy-comp-1:jar',
+      kind: 'deploy',
+      contractId: 'comp-1:jar',
+      strategy: { kind: 'plugin', pluginId: 'call-products-plugin', producedBy: { stepId: 'call-comp-1', outputIndex: 0 } },
+    });
+    expect(plan.steps[2]).toEqual({
+      id: 'deploy-comp-1:releaser',
+      kind: 'deploy',
+      contractId: 'comp-1:releaser',
+      strategy: { kind: 'plugin', pluginId: 'call-products-plugin', producedBy: { stepId: 'call-comp-1', outputIndex: 1 } },
+    });
+  });
 });

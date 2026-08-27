@@ -105,16 +105,56 @@ export interface EncodedCallValue { $encode: { contractId: string; fn: string; a
 export interface WrapsRef { stepId: string; contractTypePluginId: string }
 export type LibraryBinding = { kind: 'address'; address: Hex } | { kind: 'step'; stepId: string };
 export type AckMap = Record<string, { predictedAddress: Hex; initcodeHash: Hex32 }>;
+// How a deployment-type plugin actually deploys. Descriptors that omit the
+// discriminator normalize to 'create2' so already-published plugins stay valid.
+export type DeploymentTypeExecution = 'create2' | 'call-products';
+// The identity of a deployment-type plugin as reviewed at authoring time.
+// `descriptorHash` is the SHA-256 of Ignite's canonical JSON encoding of the
+// normalized describe result plus the effective declared operations.
+export type DeploymentTypeBinding = {
+  pluginId: string;
+  pluginVersion: string;
+  execution: DeploymentTypeExecution;
+  descriptorHash: string;
+};
+// A produced deploy step is created by another step's call: `stepId` names the
+// producer call step and `outputIndex` the address output of its return value.
+export type ProducedBy = { stepId: string; outputIndex: number };
+/**
+ * Produced deployments (call-products plugins) read their product addresses
+ * from the producer call itself: a function returning addresses declares them
+ * in its ABI outputs, and an eth_call of that same call with the same
+ * arguments and sender yields the addresses it would create. That covers
+ * every product of one call at once and needs no predict helper.
+ *
+ * A produced product STEP's own `args`/`argsPerChain` are its DECLARED
+ * constructor arguments: the producer encodes the real values onchain, so
+ * Ignite never builds a transaction from them — a declaration covering every
+ * constructor input is what lets the confirmed product be verified on
+ * explorers automatically. Absent or partial args only skip auto-verification.
+ */
 export type DeployStrategy =
   | { kind: 'create' }
   | { kind: 'create2'; salt: Hex32; saltPerChain?: Record<string, Hex32>; acknowledgeDeployed?: AckMap }
-  | { kind: 'plugin'; pluginId: string; params?: Record<string, unknown>; salt?: Hex32; saltPerChain?: Record<string, Hex32>; prepared?: Record<string, { initcodeHash: Hex32; predictedAddress: Hex }>; acknowledgeDeployed?: AckMap };
+  // Two valid states, enforced by schema refinement:
+  // - CREATE2 mode (`producedBy` absent): the plugin prepares/validates a
+  //   deterministic initcode deployment; salt/prepared/acknowledgeDeployed
+  //   behave as before.
+  // - Produced mode (`producedBy` present): the step's contract is created by
+  //   the referenced call step. No transaction, salt, initcode, or CREATE2
+  //   acknowledgement applies; `params` are opaque composition provenance.
+  | { kind: 'plugin'; pluginId: string; params?: Record<string, unknown>; producedBy?: ProducedBy; salt?: Hex32; saltPerChain?: Record<string, Hex32>; prepared?: Record<string, { initcodeHash: Hex32; predictedAddress: Hex }>; acknowledgeDeployed?: AckMap };
 export type CallTarget = { kind: 'step'; stepId: string } | { kind: 'address'; address: Hex };
 export interface CallStep {
   id: string; kind: 'call'; target: CallTarget; targetPerChain?: Record<string, CallTarget>;
   signature?: string; payable?: boolean; args?: ArgValues; argsPerChain?: Record<string, Partial<ArgValues>>;
   value?: string; valuePerChain?: Record<string, string>; gasOverrides?: GasOverrides;
   gasOverridesPerChain?: Record<string, Partial<GasOverrides>>; signerOverride?: SignerCascade;
+  // References an ABI-bearing ContractSource in the plan. Required for a
+  // call-products producer; independent of the call target so a literal or
+  // later-overridden target keeps the authoritative parameter names and
+  // return types used for editing, encoding, decoding, and review.
+  abiContractId?: string;
 }
 export type Step = DeployStep | CallStep;
 
@@ -214,10 +254,26 @@ export const LibraryBindingSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('step'), stepId: z.string().min(1) }),
 ]) satisfies z.ZodType<LibraryBinding>;
 const AckMapSchema = z.record(ChainIdKeySchema, z.object({ predictedAddress: AddressSchema, initcodeHash: Hex32Schema }));
+export const DeploymentTypeExecutionSchema = z.enum(['create2', 'call-products']) satisfies z.ZodType<DeploymentTypeExecution>;
+export const DeploymentTypeBindingSchema = z.object({
+  pluginId: z.string().min(1),
+  pluginVersion: z.string().min(1),
+  execution: DeploymentTypeExecutionSchema,
+  descriptorHash: z.string().regex(SHA256_HEX),
+}).strict() satisfies z.ZodType<DeploymentTypeBinding>;
+export const ProducedBySchema = z.object({ stepId: z.string().min(1), outputIndex: z.number().int().nonnegative() }).strict() satisfies z.ZodType<ProducedBy>;
+
 export const DeployStrategySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('create') }),
   z.object({ kind: z.literal('create2'), salt: Hex32Schema, saltPerChain: z.record(ChainIdKeySchema, Hex32Schema).optional(), acknowledgeDeployed: AckMapSchema.optional() }),
-  z.object({ kind: z.literal('plugin'), pluginId: z.string().min(1), params: z.record(z.string(), z.unknown()).optional(), salt: Hex32Schema.optional(), saltPerChain: z.record(ChainIdKeySchema, Hex32Schema).optional(), prepared: z.record(ChainIdKeySchema, z.object({ initcodeHash: Hex32Schema, predictedAddress: AddressSchema })).optional(), acknowledgeDeployed: AckMapSchema.optional() }),
+  z.object({ kind: z.literal('plugin'), pluginId: z.string().min(1), params: z.record(z.string(), z.unknown()).optional(), producedBy: ProducedBySchema.optional(), salt: Hex32Schema.optional(), saltPerChain: z.record(ChainIdKeySchema, Hex32Schema).optional(), prepared: z.record(ChainIdKeySchema, z.object({ initcodeHash: Hex32Schema, predictedAddress: AddressSchema })).optional(), acknowledgeDeployed: AckMapSchema.optional() })
+    // A produced product never submits its own deployment transaction, so
+    // CREATE2 commitments and acknowledgements are meaningless on it.
+    .superRefine((strategy, ctx) => {
+      if (!strategy.producedBy) return;
+      for (const field of ['salt', 'saltPerChain', 'prepared', 'acknowledgeDeployed'] as const)
+        if (strategy[field] !== undefined) ctx.addIssue({ code: 'custom', message: `${field} is not valid on a produced deployment`, path: [field] });
+    }),
 ]) satisfies z.ZodType<DeployStrategy>;
 export const CallTargetSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('step'), stepId: z.string().min(1) }),
@@ -252,6 +308,7 @@ export const CallStepSchema = z.object({
   targetPerChain: z.record(ChainIdKeySchema, CallTargetSchema).optional(), signature: z.string().min(1).optional(), payable: z.boolean().optional(),
   args: ArgValuesSchema.optional(), argsPerChain: z.record(ChainIdKeySchema, ArgValuesSchema).optional(), value: DecimalStringSchema.optional(), valuePerChain: z.record(ChainIdKeySchema, DecimalStringSchema).optional(),
   gasOverrides: GasOverridesSchema.optional(), gasOverridesPerChain: z.record(ChainIdKeySchema, GasOverridesSchema.partial()).optional(), signerOverride: SignerCascadeSchema.optional(),
+  abiContractId: z.string().min(1).optional(),
 }).superRefine((step, ctx) => {
   if ((step.value !== undefined || step.valuePerChain !== undefined) && step.signature !== undefined && step.payable !== true)
     ctx.addIssue({ code: 'custom', message: 'call value requires payable: true when signature is present', path: ['payable'] });
@@ -297,6 +354,10 @@ export const DeploymentPlanSchema = createRequestSchema<DeploymentPlan>(
       if (Array.isArray(value)) value.forEach((entry, childIndex) => visitEncodes(entry, [...path, childIndex], allowed));
       else if (value && typeof value === 'object') Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => visitEncodes(entry, [...path, key], allowed));
     };
+    // Producers must precede their products, so a producedBy reference is
+    // resolved against call-step positions rather than the deploy-id set.
+    const callIndexById = new Map(plan.steps.flatMap((step, index) => (step.kind === 'call' ? [[step.id, index] as const] : [])));
+    const producerIds = new Set(plan.steps.flatMap((step) => (step.kind === 'deploy' && step.strategy?.kind === 'plugin' && step.strategy.producedBy ? [step.strategy.producedBy.stepId] : [])));
     plan.steps.forEach((step, index) => {
       if (step.kind === 'deploy') {
         if (!ids.has(step.contractId)) ctx.addIssue({ code: 'custom', message: 'step contractId must reference a contract', path: ['steps', index, 'contractId'] });
@@ -310,6 +371,15 @@ export const DeploymentPlanSchema = createRequestSchema<DeploymentPlan>(
         visitRefs(step.args, ['steps', index, 'args']); visitRefs(step.argsPerChain, ['steps', index, 'argsPerChain']);
         visitEncodes(step.args, ['steps', index, 'args'], true); visitEncodes(step.argsPerChain, ['steps', index, 'argsPerChain'], true);
         if (step.strategy?.kind === 'plugin') visitEncodes(step.strategy.params, ['steps', index, 'strategy', 'params'], false);
+        if (step.strategy?.kind === 'plugin' && step.strategy.producedBy) {
+          const producerIndex = callIndexById.get(step.strategy.producedBy.stepId);
+          if (producerIndex === undefined) ctx.addIssue({ code: 'custom', message: 'producedBy must reference a call step', path: ['steps', index, 'strategy', 'producedBy', 'stepId'] });
+          else if (producerIndex >= index) ctx.addIssue({ code: 'custom', message: 'producedBy must reference an earlier call step', path: ['steps', index, 'strategy', 'producedBy', 'stepId'] });
+          // A produced product never submits a transaction; transaction-only
+          // fields on it would silently do nothing or contradict the producer.
+          for (const field of ['value', 'valuePerChain', 'gasOverrides', 'gasOverridesPerChain', 'signerOverride', 'libraries', 'librariesPerChain'] as const)
+            if (step[field] !== undefined) ctx.addIssue({ code: 'custom', message: `${field} is not valid on a produced deployment step`, path: ['steps', index, field] });
+        }
         Object.entries(step.libraries ?? {}).forEach(([key, binding]) => { if (binding.kind === 'step') checkDeployId(binding.stepId, ['steps', index, 'libraries', key]); });
         Object.entries(step.librariesPerChain ?? {}).forEach(([chainId, bindings]) => Object.entries(bindings).forEach(([key, binding]) => { if (binding.kind === 'step') checkDeployId(binding.stepId, ['steps', index, 'librariesPerChain', chainId, key]); }));
       } else {
@@ -317,6 +387,8 @@ export const DeploymentPlanSchema = createRequestSchema<DeploymentPlan>(
         Object.entries(step.targetPerChain ?? {}).forEach(([chainId, target]) => { if (target.kind === 'step') checkDeployId(target.stepId, ['steps', index, 'targetPerChain', chainId]); });
         visitRefs(step.args, ['steps', index, 'args']); visitRefs(step.argsPerChain, ['steps', index, 'argsPerChain']);
         visitEncodes(step.args, ['steps', index, 'args'], true); visitEncodes(step.argsPerChain, ['steps', index, 'argsPerChain'], true);
+        if (step.abiContractId !== undefined && !ids.has(step.abiContractId)) ctx.addIssue({ code: 'custom', message: 'abiContractId must reference a contract', path: ['steps', index, 'abiContractId'] });
+        if (producerIds.has(step.id) && step.abiContractId === undefined) ctx.addIssue({ code: 'custom', message: 'a producer call requires abiContractId', path: ['steps', index, 'abiContractId'] });
       }
     });
   }),
@@ -353,7 +425,9 @@ export type PauseReason =
   | "rpc-binding-changed"
   | 'pointer-unresolved'
   | 'create2-collision'
-  | 'created-code-missing';
+  | 'created-code-missing'
+  | 'produced-address-occupied'
+  | 'produced-code-missing';
 export type RunStatus =
   | "running"
   | "paused"
@@ -371,7 +445,8 @@ export type ResolveAction =
   | "mark-not-sent"
   | "replace"
   | "keep-waiting"
-  | 'accept-deployed';
+  | 'accept-deployed'
+  | 'record-deployed-address';
 
 export interface FrozenInput {
   abi: unknown;
@@ -514,7 +589,8 @@ export type AttemptResolution =
   | "confirm-hash"
   | "mark-not-sent"
   | "replace"
-  | 'accept-deployed';
+  | 'accept-deployed'
+  | 'record-deployed-address';
 
 export interface Attempt {
   id: string;
@@ -537,7 +613,27 @@ export interface Attempt {
     librariesByStep?: Record<string, Record<string, LibraryBinding>>;
   };
   expected?: { to: Hex | null; value: string; dataHash: Hex32; libraries?: Record<string, Hex>; pointers?: Record<string, Hex> };
+  // Present exactly when resolution is 'record-deployed-address': the
+  // operator-attested address that settled a produced product.
+  resolutionData?: { recordedAddress: Hex; note?: string };
 }
+
+// How a produced product's final address became known. A simulation result is
+// never a deployed fact; these variants keep the two honest states apart so
+// rendering cannot relabel a manual recovery as a prediction.
+export type ProducedAddressProvenance =
+  | {
+      kind: 'observed-at-expected';
+      expectedAddress: Hex;
+      observedAt: string;
+    }
+  | {
+      kind: 'operator-recorded';
+      expectedAddress: Hex;
+      recordedAddress: Hex;
+      recordedAt: string;
+      note?: string;
+    };
 
 export interface LaneStep {
   stepId: string;
@@ -548,6 +644,10 @@ export interface LaneStep {
   notes?: string[];
   captured?: Record<string, Hex>;
   unresolvedTx?: { txHash?: Hex; note?: string };
+  // Produced mode only: the address the producer's pre-broadcast simulation
+  // committed. CREATE/CREATE2 steps continue to use predictedAddress.
+  expectedAddress?: Hex;
+  addressProvenance?: ProducedAddressProvenance;
   attempts: Attempt[];
 }
 
@@ -578,6 +678,9 @@ export interface RunRecord {
   plan: DeploymentPlan;
   inputs: FrozenInputs;
   contractTypes?: Record<string, FrozenContractType>;
+  // Optional only so existing records still parse; set on every newly created
+  // run that uses a deployment-type plugin, keyed by plugin id.
+  deploymentTypeBindings?: Record<string, DeploymentTypeBinding>;
   rpcSelection: Record<string, RpcBinding>;
   explorerTargets?: Record<string, ExplorerTargetSnapshot[]>;
   validation: ValidationReport;
@@ -624,6 +727,8 @@ export const PauseReasonSchema = z.enum([
   'pointer-unresolved',
   'create2-collision',
   'created-code-missing',
+  'produced-address-occupied',
+  'produced-code-missing',
 ]) satisfies z.ZodType<PauseReason>;
 export const RunStatusSchema = z.enum([
   "running",
@@ -784,6 +889,7 @@ export const AttemptSchema = z.object({
       "mark-not-sent",
       "replace",
       'accept-deployed',
+      'record-deployed-address',
     ])
     .optional(),
   edits: z
@@ -796,7 +902,18 @@ export const AttemptSchema = z.object({
     })
     .optional(),
   expected: z.object({ to: z.union([AddressSchema, z.null()]), value: DecimalStringSchema, dataHash: Hex32Schema, libraries: z.record(z.string(), AddressSchema).optional(), pointers: z.record(z.string(), AddressSchema).optional() }).optional(),
+  resolutionData: z.object({ recordedAddress: AddressSchema, note: z.string().max(500).optional() }).strict().optional(),
+}).superRefine((attempt, ctx) => {
+  if (attempt.resolution === 'record-deployed-address' && attempt.resolutionData === undefined)
+    ctx.addIssue({ code: 'custom', message: 'record-deployed-address requires resolutionData', path: ['resolutionData'] });
+  if (attempt.resolution !== 'record-deployed-address' && attempt.resolutionData !== undefined)
+    ctx.addIssue({ code: 'custom', message: 'resolutionData is only valid with a record-deployed-address resolution', path: ['resolutionData'] });
 }) satisfies z.ZodType<Attempt>;
+
+export const ProducedAddressProvenanceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('observed-at-expected'), expectedAddress: AddressSchema, observedAt: z.string() }).strict(),
+  z.object({ kind: z.literal('operator-recorded'), expectedAddress: AddressSchema, recordedAddress: AddressSchema, recordedAt: z.string(), note: z.string().max(500).optional() }).strict(),
+]) satisfies z.ZodType<ProducedAddressProvenance>;
 
 export const LaneStepSchema = z.object({
   stepId: z.string().min(1),
@@ -811,7 +928,20 @@ export const LaneStepSchema = z.object({
   unresolvedTx: z
     .object({ txHash: HexSchema.optional(), note: z.string().optional() })
     .optional(),
+  expectedAddress: z.string().regex(HEX_ADDRESS).optional() as z.ZodType<Hex | undefined>,
+  addressProvenance: ProducedAddressProvenanceSchema.optional(),
   attempts: z.array(AttemptSchema),
+}).superRefine((step, ctx) => {
+  // Provenance describes how a FINAL address became known; each variant pins
+  // the address it may accompany so a manual recovery can never be rendered
+  // as an observed prediction (or vice versa).
+  if (!step.addressProvenance) return;
+  if (step.address === undefined) { ctx.addIssue({ code: 'custom', message: 'addressProvenance requires a final address', path: ['addressProvenance'] }); return; }
+  const provenance = step.addressProvenance;
+  if (provenance.kind === 'observed-at-expected' && step.address !== provenance.expectedAddress)
+    ctx.addIssue({ code: 'custom', message: 'observed provenance requires address === expectedAddress', path: ['addressProvenance'] });
+  if (provenance.kind === 'operator-recorded' && step.address !== provenance.recordedAddress)
+    ctx.addIssue({ code: 'custom', message: 'operator-recorded provenance requires address === recordedAddress', path: ['addressProvenance'] });
 }) satisfies z.ZodType<LaneStep>;
 
 export const LaneSchema = z.object({
@@ -842,6 +972,7 @@ export const RunRecordSchema = z.object({
   plan: DeploymentPlanSchema,
   inputs: z.record(z.string(), FrozenInputSchema),
   contractTypes: z.record(z.string().min(1), FrozenContractTypeSchema).optional(),
+  deploymentTypeBindings: z.record(z.string().min(1), DeploymentTypeBindingSchema).optional(),
   rpcSelection: z.record(ChainIdKeySchema, RpcBindingSchema),
   explorerTargets: z
     .record(ChainIdKeySchema, z.array(ExplorerTargetSnapshotSchema))
@@ -854,6 +985,22 @@ export const RunRecordSchema = z.object({
   workflow: WorkflowRunBindingSchema.optional(),
   hookRuns: z.record(z.string().min(1), HookRunRecordSchema).optional(),
   repoArtifact: RepoArtifactOutcomeSchema.optional(),
+}).superRefine((run, ctx) => {
+  // Produced-vs-CREATE2 address fields are mode-scoped; the mode lives in the
+  // plan, so the cross-check belongs to the run record, not the lane step.
+  const producedIds = new Set(run.plan.steps.flatMap((step) => (step.kind === 'deploy' && step.strategy?.kind === 'plugin' && step.strategy.producedBy ? [step.id] : [])));
+  for (const [chainKey, lane] of Object.entries(run.lanes)) {
+    lane.steps.forEach((step, index) => {
+      const path = ['lanes', chainKey, 'steps', index];
+      if (producedIds.has(step.stepId)) {
+        if (step.predictedAddress !== undefined) ctx.addIssue({ code: 'custom', message: 'a produced product carries expectedAddress, not predictedAddress', path: [...path, 'predictedAddress'] });
+        if (step.address !== undefined && step.addressProvenance === undefined) ctx.addIssue({ code: 'custom', message: 'a produced product with a final address requires addressProvenance', path: [...path, 'addressProvenance'] });
+      } else {
+        if (step.expectedAddress !== undefined) ctx.addIssue({ code: 'custom', message: 'expectedAddress is only valid on a produced product', path: [...path, 'expectedAddress'] });
+        if (step.addressProvenance !== undefined) ctx.addIssue({ code: 'custom', message: 'addressProvenance is only valid on a produced product', path: [...path, 'addressProvenance'] });
+      }
+    });
+  }
 }) satisfies z.ZodType<RunRecord>;
 
 export interface RunEvent {
@@ -883,6 +1030,10 @@ export interface PauseContext {
   capability: "sign-only" | "sign-and-send";
   submitted: boolean;
   hasIntent: boolean;
+  // Set by the engine from the frozen plan when the paused step participates
+  // in produced mode: the producer call of at least one product, or an
+  // unresolved produced product. Skipping either would strand dependencies.
+  producedRole?: 'producer' | 'product';
 }
 
 const PRE_SUBMISSION_ACTIONS: ResolveAction[] = [
@@ -925,6 +1076,20 @@ const NEEDS_REVIEW_UNKNOWN_HASH_ACTIONS: ResolveAction[] = [
 ];
 
 export function allowedActions(ctx: PauseContext): ResolveAction[] {
+  // Produced-mode pauses carry their own bounded verb sets: a producer with
+  // occupied product addresses may only be retried, edited, or aborted; a
+  // product missing code after a successful producer receipt may only be
+  // recheck-read, reconciled with an operator-recorded address, or aborted.
+  if (ctx.reason === 'produced-address-occupied') return ['retry', 'edit', 'abort-lane'];
+  if (ctx.reason === 'produced-code-missing') return ['recheck', 'record-deployed-address', 'abort-lane'];
+  const base = baseAllowedActions(ctx);
+  // Skipping a producer strands its products; skipping an unresolved product
+  // strands everything pointing at it. accept-deployed is CREATE2-only.
+  if (ctx.producedRole) return base.filter((action) => action !== 'skip' && action !== 'accept-deployed');
+  return base;
+}
+
+function baseAllowedActions(ctx: PauseContext): ResolveAction[] {
   if (ctx.reason === 'pointer-unresolved') return PRE_SUBMISSION_ACTIONS;
   if (ctx.reason === 'create2-collision') return ['accept-deployed', 'retry', 'skip', 'abort-lane'];
   if (ctx.reason === 'created-code-missing') return ['recheck', 'abort-lane'];
@@ -973,7 +1138,12 @@ export type ResolveLaneRequest =
         gasLimit?: string;
       };
     })
-  | (ResolveLaneRequestBase & { action: "keep-waiting" });
+  | (ResolveLaneRequestBase & { action: "keep-waiting" })
+  | (ResolveLaneRequestBase & {
+      action: 'record-deployed-address';
+      address: Hex;
+      note?: string;
+    });
 
 const ResolveLaneRequestBaseSchema = {
   attemptId: z.string().min(1),
@@ -1028,6 +1198,12 @@ export const ResolveLaneRequestSchema = createRequestSchema<ResolveLaneRequest>(
     z.object({
       ...ResolveLaneRequestBaseSchema,
       action: z.literal("keep-waiting"),
+    }),
+    z.object({
+      ...ResolveLaneRequestBaseSchema,
+      action: z.literal('record-deployed-address'),
+      address: AddressSchema,
+      note: z.string().max(500).optional(),
     }),
   ]),
 );
@@ -1165,6 +1341,7 @@ export interface DeploymentArtifactAttempt {
   resolution?: AttemptResolution;
   edits?: Attempt["edits"];
   expected?: Attempt['expected'];
+  resolutionData?: Attempt['resolutionData'];
 }
 
 export interface DeploymentArtifact {
@@ -1177,6 +1354,9 @@ export interface DeploymentArtifact {
   createdAt: string;
   updatedAt: string;
   workflow?: { name: string; docHash: string };
+  // Optional only when parsing older schema-v2 artifacts; newly emitted
+  // artifacts of runs that use deployment-type plugins always carry it.
+  deploymentTypes?: DeploymentTypeBinding[];
   contracts: Array<{
     id: string;
     repoName: string;
@@ -1206,8 +1386,9 @@ export interface DeploymentArtifact {
         gasOverrides?: GasOverrides;
         signerAddress?: string;
         address?: Hex;
+        addressProvenance?: ProducedAddressProvenance;
         unresolvedTx?: { txHash?: Hex; note?: string };
-        strategy?: { kind: 'create' | 'create2' | 'plugin'; pluginId?: string; salt?: Hex32; predictedAddress?: Hex; notes?: string[] };
+        strategy?: { kind: 'create' | 'create2' | 'plugin'; pluginId?: string; pluginVersion?: string; descriptorHash?: string; salt?: Hex32; predictedAddress?: Hex; expectedAddress?: Hex; producedBy?: ProducedBy; notes?: string[] };
         libraries?: Array<{ key: string; address: Hex; source: 'literal' | { stepId: string } }>;
         call?: { target: Hex; targetSource: 'literal' | { stepId: string }; signature?: string };
         pointers?: Array<{ path: string; stepId: string; address: Hex; source?: 'step' | 'suggestion' | 'manual'; via?: string }>;
@@ -1334,6 +1515,7 @@ export const DeploymentArtifactAttemptSchema = z.object({
   resolution: AttemptSchema.shape.resolution,
   edits: AttemptSchema.shape.edits,
   expected: AttemptSchema.shape.expected,
+  resolutionData: AttemptSchema.shape.resolutionData,
 }) satisfies z.ZodType<DeploymentArtifactAttempt>;
 
 export const DeploymentArtifactSchema = z.object({
@@ -1346,6 +1528,7 @@ export const DeploymentArtifactSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   workflow: z.object({ name: z.string().min(1), docHash: z.string().regex(SHA256_HEX) }).optional(),
+  deploymentTypes: z.array(DeploymentTypeBindingSchema).optional(),
   contracts: z.array(
     z.object({
       id: z.string().min(1),
@@ -1380,10 +1563,11 @@ export const DeploymentArtifactSchema = z.object({
           address: z.string().regex(HEX_ADDRESS).optional() as z.ZodType<
             Hex | undefined
           >,
+          addressProvenance: ProducedAddressProvenanceSchema.optional(),
           unresolvedTx: z
             .object({ txHash: HexSchema.optional(), note: z.string().optional() })
             .optional(),
-          strategy: z.object({ kind: z.enum(['create', 'create2', 'plugin']), pluginId: z.string().min(1).optional(), salt: Hex32Schema.optional(), predictedAddress: AddressSchema.optional(), notes: z.array(z.string().max(256)).max(8).optional() }).optional(),
+          strategy: z.object({ kind: z.enum(['create', 'create2', 'plugin']), pluginId: z.string().min(1).optional(), pluginVersion: z.string().min(1).optional(), descriptorHash: z.string().regex(SHA256_HEX).optional(), salt: Hex32Schema.optional(), predictedAddress: AddressSchema.optional(), expectedAddress: AddressSchema.optional(), producedBy: ProducedBySchema.optional(), notes: z.array(z.string().max(256)).max(8).optional() }).optional(),
           libraries: z.array(z.object({ key: z.string().min(1), address: AddressSchema, source: z.union([z.literal('literal'), z.object({ stepId: z.string().min(1) })]) })).optional(),
           call: z.object({ target: AddressSchema, targetSource: z.union([z.literal('literal'), z.object({ stepId: z.string().min(1) })]), signature: z.string().min(1).optional() }).optional(),
           pointers: z.array(z.object({ path: z.string().min(1), stepId: z.string().min(1), address: AddressSchema, source: z.enum(['step', 'suggestion', 'manual']).optional(), via: z.string().max(256).optional() })).optional(),

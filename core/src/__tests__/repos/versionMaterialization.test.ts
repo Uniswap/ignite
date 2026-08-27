@@ -196,6 +196,25 @@ describe('RepoService version materialization', () => {
     );
   });
 
+  it('rematerialization without ref options keeps the stored tag identity', async () => {
+    const remote = await sourceRepo('ignite-version-ref-keep-');
+    const home = await temp('ignite-version-ref-keep-home-');
+    const { repos, versions } = await approved(home, remote.remote);
+    const { checkout } = await repos.ensureVersion(profileId, remote.remote, remote.first, {
+      refLabel: 'oz-audit-final',
+      refKind: 'tag',
+    });
+    await fs.rm(checkout, { recursive: true, force: true });
+
+    // Artifact-data reads materialize without ref metadata; erasing the
+    // stored label here is what turned the picker's tag row into hash · hash.
+    await repos.ensureVersion(profileId, remote.remote, remote.first);
+
+    expect(await versions.get(remote.remote, remote.first)).toEqual(
+      expect.objectContaining({ refLabel: 'oz-audit-final', refKind: 'tag' })
+    );
+  });
+
   it('invalidates artifacts before rematerialization deletes the checkout', async () => {
     const remote = await sourceRepo('ignite-version-rematerialize-invalidate-');
     const home = await temp('ignite-version-rematerialize-invalidate-home-');

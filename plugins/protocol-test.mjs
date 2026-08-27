@@ -314,5 +314,169 @@ try {
     }
   }
 } finally { mock.child.kill(); }
+
+// --- deployment-type: factory (call-products) ---
+{
+  const entry = path.join(BUILTIN_BUNDLE_DIR, 'deployment-type_factory.js');
+  assert(existsSync(entry), 'Factory: built deployment-type entry exists', entry);
+  if (existsSync(entry)) {
+    console.log(`\n== Factory (${path.relative(path.resolve(__dirname, '..'), entry)}) ==`);
+
+    // --- getInfo shape ---
+    const info = runOp(entry, 'getInfo', {});
+    assert(
+      info.success === true && info.data?.id === 'factory',
+      "Factory: getInfo id === 'factory'",
+      info
+    );
+    assert(
+      info.data?.types?.includes('deployment-type'),
+      "Factory: getInfo types include 'deployment-type'",
+      info
+    );
+    assert(
+      JSON.stringify(info.data?.operations) ===
+        JSON.stringify(['describeDeploymentType', 'composeDeployment']),
+      'Factory: getInfo declares exactly the describe and compose operations',
+      info
+    );
+
+    // --- describeDeploymentType ---
+    const describe = runOp(entry, 'describeDeploymentType', {});
+    assert(
+      describe.success === true && describe.data?.execution === 'call-products',
+      "Factory: describeDeploymentType execution === 'call-products'",
+      describe
+    );
+    assert(
+      Array.isArray(describe.data?.params) && describe.data.params.length === 0,
+      'Factory: describeDeploymentType declares no params',
+      describe
+    );
+
+    // --- composeDeployment round trip ---
+    // Walk a small ABI from an empty composition to a complete one: base
+    // fields, then function discovery, then per-product artifact mapping.
+    const abi = [
+      { type: 'function', name: 'deployPair', stateMutability: 'nonpayable',
+        inputs: [{ name: 'salt', type: 'bytes32' }],
+        outputs: [{ name: 'jar', type: 'address' }, { name: '', type: 'address' }] },
+      { type: 'function', name: 'peek', stateMutability: 'view',
+        inputs: [], outputs: [{ name: '', type: 'address' }] },
+    ];
+    const factoryArtifact = { selectionId: 'sel-1', contractName: 'JarFactory', abi };
+
+    const empty = runOp(entry, 'composeDeployment', { compositionId: 'p1', values: {}, artifacts: {} });
+    assert(
+      empty.success === true &&
+        empty.data?.fields?.some((field) => field.type === 'artifact' && field.key === 'factory') &&
+        empty.data?.fields?.some((field) => field.type === 'address' && field.key === 'address') &&
+        empty.data?.composition === undefined,
+      'Factory: empty compose returns the base fields and no composition',
+      empty
+    );
+
+    const withAbi = runOp(entry, 'composeDeployment', {
+      compositionId: 'p1',
+      values: {},
+      artifacts: { factory: factoryArtifact },
+    });
+    const fnField = withAbi.data?.fields?.find((field) => field.key === 'function');
+    assert(
+      withAbi.success === true &&
+        fnField?.type === 'select' &&
+        fnField.options?.length === 1 &&
+        fnField.options[0].value === 'deployPair(bytes32)',
+      'Factory: compose offers only the state-changing address-returning function',
+      withAbi
+    );
+
+    const complete = runOp(entry, 'composeDeployment', {
+      compositionId: 'p1',
+      values: { address: '0x00000000000000000000000000000000000000aa', function: 'deployPair(bytes32)' },
+      artifacts: {
+        factory: factoryArtifact,
+        'product.jar': { selectionId: 'sel-2', contractName: 'Jar', abi: [] },
+        'product.output1': { selectionId: 'sel-3', contractName: 'Releaser', abi: [] },
+      },
+    });
+    assert(
+      complete.success === true &&
+        JSON.stringify(complete.data?.composition) === JSON.stringify({
+          producer: { abiArtifactField: 'factory', targetField: 'address', functionField: 'function' },
+          products: [
+            { key: 'jar', artifactField: 'product.jar', outputIndex: 0 },
+            { key: 'output1', artifactField: 'product.output1', outputIndex: 1 },
+          ],
+        }),
+      'Factory: complete compose round trip returns the producer/products composition',
+      complete
+    );
+
+    // --- degraded compose stays inside the host's caps ---
+    // The host rejects a compose response that breaks any cap WHOLE, so an ABI
+    // whose function cannot be represented must still leave a usable response:
+    // the offending candidate omitted and named, its siblings still offered.
+    const hostile = [
+      // 40 tuple components push the canonical signature past 280 chars.
+      { type: 'function', name: 'createManagedLiquidityPool', stateMutability: 'nonpayable',
+        inputs: [{ name: 'config', type: 'tuple',
+          components: Array.from({ length: 40 }, (_, index) => ({ name: `poolParameter${index}`, type: 'uint256' })) }],
+        outputs: [{ name: 'pool', type: 'address' }] },
+      // 17 address outputs exceed the 16-product cap.
+      { type: 'function', name: 'deployAll', stateMutability: 'nonpayable', inputs: [],
+        outputs: Array.from({ length: 17 }, (_, index) => ({ name: `child${index}`, type: 'address' })) },
+      // `$` is legal Solidity but not a legal host field key.
+      { type: 'function', name: 'clone', stateMutability: 'nonpayable', inputs: [],
+        outputs: [{ name: '$copy', type: 'address' }] },
+    ];
+    const degraded = runOp(entry, 'composeDeployment', {
+      compositionId: 'p2',
+      values: { address: '0x00000000000000000000000000000000000000aa', function: 'clone()' },
+      artifacts: {
+        factory: { selectionId: 'sel-9', contractName: 'Hostile', abi: hostile },
+        'product.output0': { selectionId: 'sel-10', contractName: 'Copy', abi: [] },
+      },
+    });
+    const degradedSelect = degraded.data?.fields?.find((field) => field.key === 'function');
+    assert(
+      degraded.success === true &&
+        degraded.data.fields.length <= 32 &&
+        degradedSelect?.options?.length === 1 &&
+        degradedSelect.options[0].value === 'clone()' &&
+        degradedSelect.options.every((option) => option.value.length <= 280 && option.label.length <= 280) &&
+        degradedSelect.description.length <= 280 &&
+        degraded.data.fields.every((field) => /^[a-zA-Z][a-zA-Z0-9._-]*$/.test(field.key) && field.key.length <= 64) &&
+        JSON.stringify(degraded.data.composition?.products) ===
+          JSON.stringify([{ key: 'output0', artifactField: 'product.output0', outputIndex: 0 }]),
+      'Factory: an ABI that exceeds the host caps degrades to a bounded, still-composable response',
+      degraded
+    );
+
+    // --- unknown operation ---
+    const unknown = runOp(entry, 'thisOperationDoesNotExist', {});
+    assert(
+      unknown.success === false && typeof unknown.error?.code === 'string',
+      'Factory: unknown operation returns a success:false error envelope',
+      unknown
+    );
+
+    // --- framing ---
+    // The host parses the LAST sentinel frame while this harness reads the
+    // first; the two only agree when a bundle emits exactly one frame.
+    const framed = spawnSync(process.execPath, [entry, 'describeDeploymentType'], {
+      input: '{}',
+      encoding: 'utf8',
+    });
+    assert(
+      framed.status === 0 &&
+        framed.stdout.split(RESULT_BEGIN).length === 2 &&
+        framed.stdout.split(RESULT_END).length === 2,
+      'Factory: emits exactly one sentinel frame on stdout',
+      framed.stdout
+    );
+  }
+}
+
 console.log(`\n${passes} passed, ${failures} failed`);
 if (failures > 0) process.exit(1);

@@ -79,6 +79,31 @@ type MutableCompilerOperationRequest = CompilerOperationRequest & {
   pin?: ContractSourcePin;
 };
 
+// A pinned checkout can be source-only: rematerialization rebuilds it from
+// git, and artifacts exist again only once something compiles it (the
+// lifecycle's compile may never have run, or failed — e.g. while plugin
+// assets were broken). The listing survives such rebuilds via its
+// fingerprint cache, so the picker offers contracts whose data reads would
+// miss. Recover by compiling once in place, then rereading.
+async function executeWithPinnedCompile(
+  executor: CompilerExecutorLike,
+  contract: { frameworkId: string; repoPathOrUrl: string },
+  execute: (workspacePath: string) => ReturnType<CompilerExecutorLike['execute']>,
+  checkout: string
+): Promise<Awaited<ReturnType<CompilerExecutorLike['execute']>>> {
+  const first = await execute(checkout);
+  if (first.success || first.error?.code !== ErrorCodes.ARTIFACT_NOT_FOUND)
+    return first;
+  const compiled = await executor.execute(
+    contract.frameworkId,
+    'compile',
+    { pathOrUrl: contract.repoPathOrUrl },
+    { workspacePath: checkout }
+  );
+  if (!compiled.success) return first;
+  return execute(checkout);
+}
+
 // Shared compiler-artifact operation used by both the HTTP handler and the
 // deployment freeze service. Keeping the plugin invocation here prevents the
 // launch path from subtly diverging from `/artifacts/data`.
@@ -111,7 +136,7 @@ export async function getCompilerArtifactData(
   let result;
   try {
     result = contract.pin
-      ? await deps.repos.withVersionMaterialized(input.profileId, contract.pin.url, contract.pin.commit, { ref: contract.pin.ref }, ({ checkout }) => execute(checkout))
+      ? await deps.repos.withVersionMaterialized(input.profileId, contract.pin.url, contract.pin.commit, { ref: contract.pin.ref, refLabel: contract.pin.ref, refKind: contract.pin.refKind }, ({ checkout }) => executeWithPinnedCompile(deps.executor, contract, execute, checkout))
       : await resolveContractWorkspace(contract, input.profileId, { verifyIntegrity: true }, { repos: deps.repos, versionStore: new VersionStore() }).then(execute);
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error) throw error;
@@ -158,7 +183,7 @@ export async function getCompilerVerificationBundle(
   let result;
   try {
     result = contract.pin
-      ? await deps.repos.withVersionMaterialized(input.profileId, contract.pin.url, contract.pin.commit, { ref: contract.pin.ref }, ({ checkout }) => execute(checkout))
+      ? await deps.repos.withVersionMaterialized(input.profileId, contract.pin.url, contract.pin.commit, { ref: contract.pin.ref, refLabel: contract.pin.ref, refKind: contract.pin.refKind }, ({ checkout }) => executeWithPinnedCompile(deps.executor, contract, execute, checkout))
       : await resolveContractWorkspace(contract, input.profileId, { verifyIntegrity: true }, { repos: deps.repos, versionStore: new VersionStore() }).then(execute);
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error) throw error;

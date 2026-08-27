@@ -129,9 +129,12 @@ describe('DeployConfigPanel helpers', () => {
   it('rejects missing, invalid, and unknown descriptor params', () => {
     const descriptor = {
       pluginId: 'strategy',
+      pluginVersion: '1.0.0',
       label: 'Strategy',
       description: '',
+      execution: 'create2' as const,
       validateSupported: true,
+      composeSupported: false,
       params: [
         {
           key: 'mode',

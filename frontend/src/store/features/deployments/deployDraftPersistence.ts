@@ -1,17 +1,22 @@
 import { z } from 'zod';
 import {
-  CallTargetSchema,
   ContractSourceSchema,
+  DeploymentTypeBindingSchema,
   Hex32Schema,
-  LibraryBindingSchema,
   SignerCascadeSchema,
   ExternalResolutionSchema,
   makeWorkflowDocumentSchema,
 } from '@ignite/api';
 import type { DeployDraftState } from './types';
 
-export const DEPLOY_DRAFT_STORAGE_KEY = 'ignite.deployDraft.v2';
-const LEGACY_DEPLOY_DRAFT_STORAGE_KEY = 'ignite.deployDraft.v1';
+export const DEPLOY_DRAFT_STORAGE_KEY = 'ignite.deployDraft.v3';
+// v1 cannot express calls or strategy state; v2 predates the produced-mode
+// migration and carried since-removed first-class strategy shapes. Both are
+// deliberately stale sessions.
+const LEGACY_DEPLOY_DRAFT_STORAGE_KEYS = [
+  'ignite.deployDraft.v1',
+  'ignite.deployDraft.v2',
+];
 
 // TypeScript types cannot validate parsed JSON: restored drafts are checked
 // against this schema plus the cross-field invariants below, and anything
@@ -22,6 +27,27 @@ const GasOverridesDraftSchema = z.object({
   maxFeePerGas: z.string().optional(),
   maxPriorityFeePerGas: z.string().optional(),
 });
+
+// Every address, salt and amount field in the wizard writes each keystroke
+// straight into the draft, and the store persists synchronously on change, so
+// a draft in storage routinely holds text that is not yet a value — including
+// the '0x' sentinel the target and library inputs write for a cleared field.
+// Parsing those with the plan-level schemas (strict addresses, Hex32) threw on
+// restore, and a throw here discards the WHOLE draft: composition, contracts,
+// chains, signers and args, for one half-typed character. Amounts (`value`,
+// gas overrides) were already tolerated as plain strings for exactly this
+// reason; these fields now follow the same rule. Nothing is loosened for the
+// plan itself — a partial address or salt still fails validation and blocks
+// launch, it just no longer destroys the session on reload.
+const DraftHexTextSchema = z.string();
+const DraftCallTargetSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('step'), stepId: z.string().min(1) }),
+  z.object({ kind: z.literal('address'), address: DraftHexTextSchema }),
+]);
+const DraftLibraryBindingSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('address'), address: DraftHexTextSchema }),
+  z.object({ kind: z.literal('step'), stepId: z.string().min(1) }),
+]);
 
 const DraftDeployStepSchema = z.object({
   id: z.string().min(1),
@@ -49,8 +75,9 @@ const DraftDeployStepSchema = z.object({
 const DraftCallStepSchema = z.object({
   id: z.string().min(1),
   kind: z.literal('call'),
-  target: CallTargetSchema.nullable(),
-  targetPerChain: z.record(z.string(), CallTargetSchema).optional(),
+  target: DraftCallTargetSchema.nullable(),
+  abiContractId: z.string().min(1).optional(),
+  targetPerChain: z.record(z.string(), DraftCallTargetSchema).optional(),
   signature: z.string().optional(),
   payable: z.boolean().optional(),
   args: z.record(z.string(), z.unknown()).optional(),
@@ -71,19 +98,27 @@ const DraftDeployExtrasSchema = z.object({
     z.object({ kind: z.literal('create') }),
     z.object({
       kind: z.literal('create2'),
-      salt: Hex32Schema.optional(),
-      saltPerChain: z.record(z.string(), Hex32Schema).optional(),
+      salt: DraftHexTextSchema.optional(),
+      saltPerChain: z.record(z.string(), DraftHexTextSchema).optional(),
     }),
     z.object({
       kind: z.literal('plugin'),
       pluginId: z.string().min(1),
       params: z.record(z.string(), z.unknown()).optional(),
+      producedBy: z
+        .object({
+          stepId: z.string().min(1),
+          outputIndex: z.number().int().nonnegative(),
+        })
+        .optional(),
     }),
   ]),
-  libraries: z.record(z.string(), LibraryBindingSchema).optional(),
+  libraries: z.record(z.string(), DraftLibraryBindingSchema).optional(),
   librariesPerChain: z
-    .record(z.string(), z.record(z.string(), LibraryBindingSchema))
+    .record(z.string(), z.record(z.string(), DraftLibraryBindingSchema))
     .optional(),
+  // Prepared and acknowledged values are server answers, never typed: they
+  // stay strict so a corrupted prediction is dropped rather than trusted.
   prepared: z
     .record(
       z.string(),
@@ -151,20 +186,49 @@ const PersistedDraftSchema = z.object({
   acknowledgeArtifactDrift: z
     .record(z.string(), z.object({ expected: z.string(), actual: z.string() }))
     .optional(),
+  // Only the composition's identity and selections persist. Server responses
+  // (fields, blockers, composed templates) are refetched on restore, so a
+  // reload can never replay a stale plugin answer.
+  composition: z
+    .object({
+      pluginId: z.string().min(1),
+      binding: DeploymentTypeBindingSchema.optional(),
+      compositionId: z.string().min(1),
+      values: z.record(z.string(), z.unknown()),
+      artifacts: z.record(z.string(), ContractSourceSchema),
+      ownedContractIds: z.array(z.string().min(1)),
+      ownedStepIds: z.array(z.string().min(1)),
+    })
+    .optional(),
 });
 
 function invariantsHold(draft: DeployDraftState): boolean {
   // No contracts means no session: restoring chains/signers/name without
   // contracts would let dormant configuration leak into the next deployment.
-  if (draft.contracts.length === 0) return false;
+  // An in-progress composition is the deliberate exception — the spec
+  // requires restoring an incomplete composer session, and it cannot smuggle
+  // dormant configuration because startComposition resets the draft and the
+  // wizard only reaches the chains/signers stations after materialization
+  // creates contracts.
+  if (draft.contracts.length === 0 && !draft.composition) return false;
   const contractIds = new Set(draft.contracts.map((contract) => contract.id));
   if (contractIds.size !== draft.contracts.length) return false;
   const deploySteps = draft.steps.filter((step) => step.kind === 'deploy');
-  if (!draft.workflowRef && deploySteps.length !== draft.contracts.length)
-    return false;
   const stepContractIds = new Set(deploySteps.map((step) => step.contractId));
   if (!draft.workflowRef && stepContractIds.size !== deploySteps.length)
     return false;
+  // Outside workflow mode every contract pairs 1:1 with a deploy step,
+  // except composition-owned sources: the frozen producer ABI source is a
+  // contract that is deliberately never deployed.
+  if (!draft.workflowRef) {
+    const owned = new Set(draft.composition?.ownedContractIds ?? []);
+    const deployless = draft.contracts.filter(
+      (contract) => !stepContractIds.has(contract.id)
+    );
+    if (deployless.some((contract) => !owned.has(contract.id))) return false;
+    if (deploySteps.length !== draft.contracts.length - deployless.length)
+      return false;
+  }
   const stepIds = new Set(draft.steps.map((step) => step.id));
   if (stepIds.size !== draft.steps.length) return false;
   for (const step of deploySteps)
@@ -196,10 +260,11 @@ export function loadDraft(
   storage: DraftStorage | undefined = defaultStorage()
 ): DeployDraftState | undefined {
   try {
-    // v1 cannot express calls or strategy state. Treat it as a deliberately
-    // stale session, and remove it so a later reload cannot resurrect it.
-    if (storage?.getItem(LEGACY_DEPLOY_DRAFT_STORAGE_KEY))
-      storage.removeItem?.(LEGACY_DEPLOY_DRAFT_STORAGE_KEY);
+    // Older keys are deliberately stale sessions: remove them so a later
+    // reload cannot resurrect one.
+    for (const key of LEGACY_DEPLOY_DRAFT_STORAGE_KEYS) {
+      if (storage?.getItem(key)) storage.removeItem?.(key);
+    }
     const raw = storage?.getItem(DEPLOY_DRAFT_STORAGE_KEY);
     if (!raw) return undefined;
     const value = PersistedDraftSchema.parse(JSON.parse(raw));

@@ -40,6 +40,7 @@ import {
 } from './resolver.js';
 import { ackIsFresh, buildInitcode, buildRuntimeCode, predictPlanAddresses } from './schedule.js';
 import { create2Calldata, effectiveSalt, initcodeHashOf, predictCreate2Address } from './create2.js';
+import { decodeProducedAddresses, encodeDeclaredProductArgs, isInitcodeStrategy, isProducedStrategy, producedRole, productsOfProducer } from './produced.js';
 import { decomposeCreationCalldata } from './create2.js';
 import { linkBytecode } from './linking.js';
 import { RunStore } from './RunStore.js';
@@ -113,13 +114,16 @@ export interface DeployEngineDeps {
   ) => Promise<{ from: Hex; to: Hex | null; input: Hex; value: bigint } | undefined>;
   getCode: (url: string, address: Hex) => Promise<Hex>;
   getStorageAt: (url: string, address: Hex, slot: Hex) => Promise<Hex>;
-  call: (url: string, args: { to: Hex; data: Hex }) => Promise<Hex>;
+  // `from`/`value` matter when the call simulates the very transaction about
+  // to be sent: factories that scope product addresses to msg.sender (salt
+  // schemes) or take payment derive different results for a different sender.
+  call: (url: string, args: { to: Hex; data: Hex; from?: Hex; value?: bigint }) => Promise<Hex>;
   getTransactionData: (url: string, hash: Hex) => Promise<Hex | undefined>;
   verificationQueue: Pick<VerificationQueue, 'enqueueForConfirmedStep' | 'enqueueContractTypeCapture'>;
   rebroadcast: (url: string, raw: Hex) => Promise<Hex>;
   chainMetadata: (chainId: number) => Promise<ChainMetadata>;
   deploymentHooks: Pick<DeploymentHookService, 'dispatch' | 'reconcileStartup'>;
-  deploymentTypes: Pick<DeploymentTypeService, 'prepare' | 'validate' | 'list'>;
+  deploymentTypes: Pick<DeploymentTypeService, 'prepare' | 'validate' | 'list' | 'launchBinding'>;
   now: () => number;
   createdCodeProbe: { attempts: number; intervalMs: number };
 }
@@ -194,7 +198,7 @@ export class DeployEngine {
       }),
       call: deps?.call ?? (async (url, args) => {
         const { createPublicClient, http } = await import('viem');
-        return await createPublicClient({ transport: http(url) }).call(args).then((result) => result.data ?? '0x');
+        return await createPublicClient({ transport: http(url) }).call({ to: args.to, data: args.data, ...(args.from ? { account: args.from } : {}), ...(args.value !== undefined ? { value: args.value } : {}) }).then((result) => result.data ?? '0x');
       }),
       getTransactionData: deps?.getTransactionData ??
         (async (url, hash) => {
@@ -258,6 +262,27 @@ export class DeployEngine {
           ErrorCodes.DEPLOYMENT_VALIDATION_FAILED
         );
       }
+      // Freeze the reviewed identity of every deployment-type plugin the plan
+      // uses. launchBinding re-describes the provider and rejects a descriptor
+      // that changed since authoring; the mode must match the materialized
+      // strategy shape. Once the run exists no plugin code executes in the
+      // transaction lifecycle, so a call-products plugin need not stay
+      // available after this point.
+      const pluginIds = [...new Set(args.plan.steps.flatMap((step) =>
+        step.kind === 'deploy' && step.strategy?.kind === 'plugin' ? [step.strategy.pluginId] : []
+      ))];
+      const deploymentTypeBindings: Record<string, import('@ignite/api').DeploymentTypeBinding> = {};
+      for (const pluginId of pluginIds)
+        deploymentTypeBindings[pluginId] = await this.deps.deploymentTypes.launchBinding(pluginId);
+      for (const step of args.plan.steps) {
+        if (step.kind !== 'deploy' || step.strategy?.kind !== 'plugin') continue;
+        const expected = isProducedStrategy(step.strategy) ? 'call-products' : 'create2';
+        if (deploymentTypeBindings[step.strategy.pluginId]!.execution !== expected)
+          throw new IgniteError(
+            `Deployment type ${step.strategy.pluginId} does not support ${expected} execution`,
+            ErrorCodes.DEPLOYMENT_VALIDATION_FAILED
+          );
+      }
       const now = new Date(this.deps.now()).toISOString();
       const run: RunRecord = {
         schemaVersion: 1,
@@ -270,6 +295,7 @@ export class DeployEngine {
         plan: globalThis.structuredClone(args.plan),
         inputs: validated.frozen,
         ...(Object.keys(validated.contractTypes ?? {}).length ? { contractTypes: globalThis.structuredClone(validated.contractTypes) } : {}),
+        ...(Object.keys(deploymentTypeBindings).length ? { deploymentTypeBindings } : {}),
         rpcSelection: validated.rpcBindings,
         ...(Object.keys(validated.explorerTargets ?? {}).length
           ? { explorerTargets: validated.explorerTargets }
@@ -338,12 +364,16 @@ export class DeployEngine {
         resolved?.account.capability ??
         (attempt?.rawTx ? 'sign-only' : 'sign-and-send');
       const submitted = Boolean(attempt?.txHash || attempt?.rawTx);
+      const pausedRole = run.plan.steps[lane.pause.stepIndex]
+        ? producedRole(run.plan, run.plan.steps[lane.pause.stepIndex]!.id)
+        : undefined;
       if (
         !allowedActions({
           reason: lane.pause.reason,
           capability,
           submitted,
           hasIntent: Boolean(attempt?.expected),
+          ...(pausedRole ? { producedRole: pausedRole } : {}),
         }).includes(cmd.action)
       )
         throw new IgniteError(
@@ -351,7 +381,8 @@ export class DeployEngine {
           ErrorCodes.ILLEGAL_RESOLVE
         );
       if (
-        (cmd.action === 'keep-waiting' || cmd.action === 'recheck') &&
+        (cmd.action === 'keep-waiting' ||
+          (cmd.action === 'recheck' && lane.pause.reason !== 'produced-code-missing')) &&
         !attempt?.txHash
       )
         throw new IgniteError(
@@ -425,7 +456,7 @@ export class DeployEngine {
             const strategy = planStep.strategy;
             if (!strategy || strategy.kind === 'create') throw new IgniteError('Only deterministic deployment can be accepted', ErrorCodes.ILLEGAL_RESOLVE);
             const dynamic = dynamicDeterministicStepIds(current.plan, chainId).has(planStep.id);
-            const salt = dynamic ? targetStep.salt : strategy.saltPerChain?.[String(chainId)] ?? strategy.salt;
+            const salt = dynamic ? targetStep.salt : isInitcodeStrategy(strategy) ? strategy.saltPerChain?.[String(chainId)] ?? strategy.salt : undefined;
             if (!salt) throw new IgniteError('Deterministic deployment has no salt', ErrorCodes.ILLEGAL_RESOLVE);
             const initcodeHash = initcodeHashOf(buildInitcode(planStep, current.inputs[planStep.contractId]!, chainId, (id) => {
               const ref = target.steps.find((item) => item.stepId === id);
@@ -452,7 +483,81 @@ export class DeployEngine {
         this.resolvedCommands.set(replayKey, result);
         return result;
       }
+      if (cmd.action === 'record-deployed-address') {
+        const pausedStep = run.plan.steps[lane.pause.stepIndex];
+        const pausedLaneStep = lane.steps[lane.pause.stepIndex];
+        // Only the matching produced product may be reconciled; the producer's
+        // transaction attempt and receipt are never rewritten.
+        if (pausedStep?.kind !== 'deploy' || !isProducedStrategy(pausedStep.strategy) || !pausedLaneStep?.expectedAddress)
+          throw new IgniteError('Only a produced product with an expected address can record a deployed address', ErrorCodes.ILLEGAL_RESOLVE);
+        const code = await this.deps.getCode((await this.rpcFor(run, chainId)).url, cmd.address);
+        // Fails without mutation: an invalid manual address leaves the lane
+        // paused and every persisted product/transaction fact unchanged.
+        if (!code || code === '0x')
+          throw new IgniteError('No contract code exists at the supplied address', ErrorCodes.ILLEGAL_RESOLVE);
+        const recordedAt = iso(this.deps.now());
+        await this.mutate(profileId, runId, (current) => {
+          const target = current.lanes[String(chainId)];
+          const targetStep = target.steps[target.pause!.stepIndex];
+          const expected = targetStep.expectedAddress;
+          if (!expected) throw new IgniteError('Produced product lost its expected address', ErrorCodes.ILLEGAL_RESOLVE);
+          const currentAttempt = targetStep.attempts.find((entry) => entry.id === cmd.attemptId);
+          if (currentAttempt) {
+            currentAttempt.resolution = 'record-deployed-address';
+            currentAttempt.endedAt = recordedAt;
+            currentAttempt.resolutionData = { recordedAddress: cmd.address, ...(cmd.note ? { note: cmd.note } : {}) };
+          }
+          targetStep.status = 'confirmed';
+          targetStep.address = cmd.address;
+          // Operator attestation, never relabelled as a prediction: mutable
+          // factory state can make the expected address stale, and the chain
+          // cannot prove which call created the code at the recorded one.
+          targetStep.addressProvenance = { kind: 'operator-recorded', expectedAddress: expected, recordedAddress: cmd.address, recordedAt, ...(cmd.note ? { note: cmd.note } : {}) };
+          target.pause = undefined;
+          target.currentStepIndex += 1;
+          target.status = target.currentStepIndex >= target.steps.length ? 'completed' : 'running';
+        }, chainId);
+        const result = await this.requireRun(profileId, runId);
+        // Product verification still attributes the producer's transaction
+        // hash even though the final address was manually reconciled.
+        void this.enqueueProducedProductVerification(result, chainId, pausedStep.id).catch((error) =>
+          getLogger().warn(`verification enqueue skipped for produced product ${pausedStep.id}: ${error instanceof Error ? error.message : String(error)}`)
+        );
+        if (result.lanes[String(chainId)].status === 'running') this.startLane(profileId, runId, chainId);
+        this.resolvedCommands.set(replayKey, result);
+        return result;
+      }
       if (cmd.action === 'recheck') {
+        if (lane.pause.reason === 'produced-code-missing') {
+          // Read-only by contract: recheck after a successful producer receipt
+          // never rebroadcasts the producer transaction.
+          const pausedStep = run.plan.steps[lane.pause.stepIndex];
+          const expected = lane.steps[lane.pause.stepIndex]?.expectedAddress;
+          const code = expected
+            ? await this.deps.getCode((await this.rpcFor(run, chainId)).url, expected)
+            : undefined;
+          if (expected && code && code !== '0x') {
+            const observedAt = iso(this.deps.now());
+            const settled = await this.mutate(profileId, runId, (current) => {
+              const target = current.lanes[String(chainId)];
+              const targetStep = target.steps[target.pause!.stepIndex];
+              targetStep.status = 'confirmed';
+              targetStep.address = expected;
+              targetStep.addressProvenance = { kind: 'observed-at-expected', expectedAddress: expected, observedAt };
+              target.pause = undefined;
+              target.currentStepIndex += 1;
+              target.status = target.currentStepIndex >= target.steps.length ? 'completed' : 'running';
+            }, chainId);
+            if (pausedStep)
+              void this.enqueueProducedProductVerification(settled, chainId, pausedStep.id).catch((error) =>
+                getLogger().warn(`verification enqueue skipped for produced product ${pausedStep.id}: ${error instanceof Error ? error.message : String(error)}`)
+              );
+          }
+          const result = await this.requireRun(profileId, runId);
+          this.resolvedCommands.set(replayKey, result);
+          if (result.lanes[String(chainId)].status === 'running') this.startLane(profileId, runId, chainId);
+          return result;
+        }
         if (lane.pause.reason === 'created-code-missing') {
           const predicted = lane.steps[lane.pause.stepIndex].predictedAddress;
           const code = predicted
@@ -498,6 +603,10 @@ export class DeployEngine {
           await this.reconcile(profileId, runId, chainId, attempt.txHash);
         const result = await this.requireRun(profileId, runId);
         this.resolvedCommands.set(replayKey, result);
+        // A recheck that confirmed the receipt leaves the lane 'running' in
+        // the record; without restarting the driver here (as every sibling
+        // verb does) nothing executes the remaining steps.
+        if (result.lanes[String(chainId)].status === 'running') this.startLane(profileId, runId, chainId);
         return result;
       }
       if (cmd.action === 'confirm-hash') {
@@ -534,6 +643,11 @@ export class DeployEngine {
         await this.reconcile(profileId, runId, chainId, cmd.txHash);
         const result = await this.requireRun(profileId, runId);
         this.resolvedCommands.set(replayKey, result);
+        // Confirming mid-plan leaves the lane 'running' in the record; without
+        // restarting the driver here (as every sibling verb does) nothing
+        // executes the remaining steps — a produced product whose expected
+        // address was already committed would never be reached.
+        if (result.lanes[String(chainId)].status === 'running') this.startLane(profileId, runId, chainId);
         return result;
       }
       let editedRpcBinding:
@@ -676,8 +790,10 @@ export class DeployEngine {
         const attempt = lane.steps[lane.pause!.stepIndex]?.attempts.at(-1);
         if (lane.pause?.reason === 'rpc' && attempt?.txHash && !attempt.rawTx) {
           const receipt = await this.safeReceipt((await this.rpcFor(run, lane.chainId)).url, attempt.txHash);
-          if (receipt)
+          if (receipt) {
             await this.confirmReceipt(profileId, runId, lane.chainId, attempt.txHash, receipt);
+            await this.startLaneIfRunning(profileId, runId, lane.chainId);
+          }
           // A sign-and-send submission is already in-flight. Without raw
           // bytes it cannot be safely rebroadcast, and must never fall
           // through into a fresh deployment attempt.
@@ -726,6 +842,10 @@ export class DeployEngine {
               continue;
             }
           }
+          // Both confirmation paths above advance the lane to 'running' with
+          // no driver attached; restart it exactly as the pause-resolution
+          // verbs do, or the remaining steps never execute.
+          await this.startLaneIfRunning(profileId, runId, lane.chainId);
           continue;
         } else if (attempt?.txHash || lane.pause?.reason === 'needs-review')
           continue;
@@ -874,6 +994,12 @@ export class DeployEngine {
       controller,
       promise,
     });
+  }
+
+  /** Re-reads the record because the caller's snapshot predates the confirmation that may have advanced the lane. */
+  private async startLaneIfRunning(profileId: string, runId: string, chainId: number): Promise<void> {
+    const current = await this.requireRun(profileId, runId);
+    if (current.lanes[String(chainId)]?.status === 'running') this.startLane(profileId, runId, chainId);
   }
 
   private startReceiptWait(
@@ -1069,6 +1195,60 @@ export class DeployEngine {
     }
   }
 
+  /**
+   * Simulates a producer call to learn the addresses its products will get.
+   * Runs immediately before the producer broadcasts, against the same node,
+   * with the transaction's own target, calldata, sender and value — the
+   * narrowest window available for "what will this call create". Review-time
+   * predictions are deliberately never seeded into the lane (they are display
+   * data), so this simulation is the only execution commitment; a failure
+   * pauses the producer BEFORE broadcast, where retry costs nothing and no
+   * producer call can confirm with unrecoverable products. The whole output
+   * set is accepted or rejected together: every linked product must decode to
+   * exactly one nonzero address and no two products may claim the same one.
+   */
+  private async predictProducedProducts(
+    run: RunRecord,
+    step: DeploymentPlan['steps'][number],
+    chainId: number,
+    rpcUrl: string,
+    to: Hex | null,
+    data: Hex,
+    from: Hex,
+    value: bigint,
+    fn: AbiFunction | undefined
+  ): Promise<Array<{ stepId: string; expectedAddress: Hex; note: string }> | undefined> {
+    if (step.kind !== 'call') return undefined;
+    const products = productsOfProducer(run.plan, step.id);
+    if (!products.length) return undefined;
+    if (!fn || !to)
+      throw coded('estimation', `Products of ${step.id} need the producer call's function and target to simulate`);
+    let raw: Hex;
+    try {
+      raw = await this.deps.call(rpcUrl, { to, data, from, ...(value > 0n ? { value } : {}) });
+    } catch (error) {
+      throw coded('estimation', `The producer call simulation failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let decoded: Map<number, Hex>;
+    try {
+      decoded = decodeProducedAddresses(fn, raw);
+    } catch (error) {
+      throw coded('estimation', `The producer call result did not decode: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const claimed = new Map<string, string>();
+    return products.map((product) => {
+      const index = product.strategy.producedBy.outputIndex;
+      const address = decoded.get(index);
+      if (!address || /^0x0{40}$/i.test(address))
+        throw coded('estimation', `The producer call returned no usable address at output ${index} for ${product.id}`);
+      const holder = claimed.get(address.toLowerCase());
+      if (holder)
+        throw coded('estimation', `Products ${holder} and ${product.id} both resolve to ${address}`);
+      claimed.set(address.toLowerCase(), product.id);
+      return { stepId: product.id, expectedAddress: address, note: `address simulated from ${fn.name}() before broadcast` };
+    });
+  }
+
   private async executeStep(
     profileId: string,
     runId: string,
@@ -1102,9 +1282,12 @@ export class DeployEngine {
       // A prediction only stands in for a step that will still execute:
       // failure-skipped steps have no code at the predicted address, so
       // resolving through them would bake a dead address in (review F6).
-      // Accept-deployed skips carry `address` and resolve above.
-      if (ref?.predictedAddress && ref.status !== 'skipped' && ref.status !== 'failed')
-        return ref.predictedAddress;
+      // Accept-deployed skips carry `address` and resolve above. A produced
+      // product's expected address stands in the same way once its producer
+      // has durably committed it.
+      const standIn = ref?.predictedAddress ?? ref?.expectedAddress;
+      if (standIn && ref!.status !== 'skipped' && ref!.status !== 'failed')
+        return standIn;
       throw coded('pointer-unresolved', `Pointer ${id} has no confirmed or predicted address`);
     };
     let to: Hex | null;
@@ -1112,6 +1295,7 @@ export class DeployEngine {
     let libraries: Record<string, Hex> | undefined;
     let pointers: Record<string, Hex> | undefined;
     let deterministicInitcode: Hex | undefined;
+    let callFn: AbiFunction | undefined;
     const attemptId = crypto.randomUUID();
     let jit: { predictedAddress: Hex; salt: Hex; notes: string[] } | undefined;
     if (step.kind === 'call') {
@@ -1119,12 +1303,49 @@ export class DeployEngine {
       const values = resolveStepValues(step, chainId, resolveRef, fn?.inputs ?? [], { frozen: run.inputs, contracts: run.plan.contracts });
       to = values.target!;
       pointers = values.pointers;
+      callFn = fn;
       data = fn
         ? encodeFunctionData({ abi: [fn], functionName: fn.name, args: toConstructorArgs(fn.inputs, values.args, 'call') as never })
         : '0x';
     } else {
       const input = run.inputs[step.contractId];
       if (!input) throw coded('estimation', `Frozen input missing for ${step.contractId}`);
+      if (isProducedStrategy(step.strategy)) {
+        // Another step's producer call already deployed this product: it
+        // submits no transaction and invokes no plugin operation. Record the
+        // observed address and advance.
+        const expected = lane.steps[stepIndex].expectedAddress;
+        // The producer commits this before it broadcasts, so absence means
+        // the producer call never executed inside this run.
+        if (!expected) throw coded('pointer-unresolved', `Produced product ${step.id} has no expected address — its producer call did not execute in this run`);
+        // A product confirms moments after its producer's receipt — exactly
+        // the visibility window waitForDeterministicCode exists for — so one
+        // read here paused healthy lanes the same way created-code-missing
+        // used to before the probe.
+        const observed = await this.waitForDeterministicCode(rpc.url, expected, signal);
+        // Preserves the producer attempt, receipt, and expected address; the
+        // operator reconciles with recheck or record-deployed-address.
+        if (!observed) throw coded('produced-code-missing', `No contract at expected address ${expected} for produced product ${step.id}`);
+        const observedAt = iso(this.deps.now());
+        const settled = await this.mutate(profileId, runId, (current) => {
+          const target = current.lanes[String(chainId)];
+          const targetStep = target.steps[stepIndex];
+          targetStep.status = 'confirmed';
+          targetStep.address = expected;
+          targetStep.addressProvenance = { kind: 'observed-at-expected', expectedAddress: expected, observedAt };
+          target.currentStepIndex += 1;
+          target.status = target.currentStepIndex >= target.steps.length ? 'completed' : 'running';
+        }, chainId);
+        // Runs only after mutate has persisted the confirmed product. Queue
+        // failure never affects lane progress; startup reconciliation heals
+        // this deliberately tolerated crash/failure window (same posture as
+        // the receipt-driven settle path).
+        void this.enqueueProducedProductVerification(settled, chainId, step.id).catch((error) =>
+          getLogger().warn(`verification enqueue skipped for produced product ${step.id}: ${error instanceof Error ? error.message : String(error)}`)
+        );
+        return;
+      }
+      {
       const ctor = (input.abi as Abi).find((entry) => entry.type === 'constructor');
       const values = resolveStepValues(step, chainId, resolveRef, (ctor?.inputs ?? []) as never, { frozen: run.inputs, contracts: run.plan.contracts });
       libraries = values.libraries;
@@ -1153,7 +1374,7 @@ export class DeployEngine {
               }
               predictedAddress = prepared.predictedAddress; salt = prepared.salt; jit = { predictedAddress, salt, notes: prepared.notes };
             } else {
-              salt = effectiveSalt(strategy, chainId);
+              salt = isInitcodeStrategy(strategy) ? effectiveSalt(strategy, chainId) : undefined;
               if (!salt) throw new Error(`Create2 step ${step.id} has no salt`);
               predictedAddress = predictCreate2Address(salt, initcodeHashOf(initcode)); jit = { predictedAddress, salt, notes: [] };
             }
@@ -1196,9 +1417,27 @@ export class DeployEngine {
           }
         }
         to = CREATE2_PROXY_ADDRESS;
-        data = create2Calldata((jit?.salt ?? strategy.saltPerChain?.[String(chainId)] ?? strategy.salt)!, initcode);
+        data = create2Calldata((jit?.salt ?? (isInitcodeStrategy(strategy) ? strategy.saltPerChain?.[String(chainId)] ?? strategy.salt : undefined))!, initcode);
+      }
       }
     }
+    // Produced products commit to their addresses here, seconds before the
+    // producer transaction broadcasts — never from review-time predictions.
+    const producedExpectations = await this.predictProducedProducts(
+      run, step, chainId, rpc.url, to, data, signer.address as Hex, effectiveValue(step, chainId), callFn
+    );
+    // Pre-existing code at ANY expected product address pauses the producer
+    // before broadcast: the existing contracts are not products of this call,
+    // and persisting their addresses would claim they are. Deliberately a
+    // single read, not waitForDeterministicCode: that probe waits for code to
+    // APPEAR, while this check requires the address to be empty — polling
+    // would only slow every healthy broadcast.
+    if (producedExpectations)
+      for (const expectation of producedExpectations) {
+        const existing = await this.deps.getCode(rpc.url, expectation.expectedAddress);
+        if (existing && existing !== '0x')
+          throw coded('produced-address-occupied', `Code already exists at expected product address ${expectation.expectedAddress} for ${expectation.stepId}`);
+      }
     const gas = mergeGas(step, chainId);
     const overrides: TxOverrides = Object.fromEntries(
       Object.entries(gas).map(([key, value]) => [key, BigInt(value)])
@@ -1219,6 +1458,14 @@ export class DeployEngine {
         const targetStep = target.steps[stepIndex];
         targetStep.status = 'awaiting-signature';
         if (jit) { targetStep.predictedAddress = jit.predictedAddress; targetStep.salt = jit.salt as `0x${string}`; targetStep.notes = jit.notes; }
+        // Durable BEFORE broadcast: a crash after the producer call is sent
+        // must never leave its products without their committed addresses.
+        // All expected addresses land in this one mutate — atomically with
+        // the attempt — or not at all.
+        if (producedExpectations) for (const expectation of producedExpectations) {
+          const productStep = target.steps.find((candidate) => candidate.stepId === expectation.stepId);
+          if (productStep && !productStep.address) { productStep.expectedAddress = expectation.expectedAddress; appendLaneStepNote(productStep, expectation.note); }
+        }
         targetStep.attempts.push({
           id: attemptId,
           startedAt: iso(this.deps.now()),
@@ -1447,6 +1694,11 @@ export class DeployEngine {
               : receipt.contractAddress ?? undefined;
           if (capture && Object.keys(capture.captured).length) step.captured = capture.captured;
           if (capture?.note) appendLaneStepNote(step, capture.note);
+          // A pause aimed at the step this receipt just confirmed is resolved
+          // by that confirmation (recheck/resume after a receipt-timeout);
+          // leaving it stale marks a progressing lane as stuck.
+          if (lane.pause?.stepIndex === lane.currentStepIndex)
+            lane.pause = undefined;
           lane.currentStepIndex += 1;
           lane.status =
             lane.currentStepIndex >= lane.steps.length
@@ -1474,6 +1726,12 @@ export class DeployEngine {
     const attempt = step.attempts.find((candidate) => candidate.txHash === hash);
     const planStep = run.plan.steps.find((candidate) => candidate.id === step.stepId);
     if (!attempt || !planStep || planStep.kind !== 'deploy') return;
+    // Produced products confirm without a transaction of their own and are
+    // enqueued from their confirmation paths; a receipt can never belong to
+    // one, but the guard keeps a malformed record from decomposing the
+    // producer's calldata as if it were creation calldata.
+    if (isProducedStrategy(planStep.strategy))
+      return this.enqueueProducedProductVerification(run, chainId, planStep.id);
     const input = run.inputs[planStep.contractId];
     if (!input || !attempt.expected) return;
     let data: Hex | undefined;
@@ -1496,6 +1754,55 @@ export class DeployEngine {
       step.address, hash, decomposition.constructorData, attempt.expected.libraries
     );
     await this.enqueueCapturedContractTypeVerifications(run, chainId, planStep, step);
+  }
+
+  /**
+   * Produced products confirm with no creation calldata of their own — the
+   * producer encodes their constructor arguments onchain — so verification
+   * cannot decompose a transaction. It instead encodes the product's
+   * DECLARED constructor args (step args, the composer's mapping) against
+   * the frozen constructor ABI. An incomplete declaration only skips
+   * auto-verification; it never touches lane state.
+   */
+  private async enqueueProducedProductVerification(run: RunRecord, chainId: number, stepId: string): Promise<void> {
+    if (!run.explorerTargets?.[String(chainId)]?.length) return;
+    const lane = run.lanes[String(chainId)];
+    const laneStep = lane?.steps.find((candidate) => candidate.stepId === stepId);
+    const planStep = run.plan.steps.find((candidate) => candidate.id === stepId);
+    if (!laneStep?.address || laneStep.status !== 'confirmed') return;
+    if (!planStep || planStep.kind !== 'deploy') return;
+    const strategy = planStep.strategy;
+    if (!isProducedStrategy(strategy)) return;
+    const input = run.inputs[planStep.contractId];
+    if (!input) return;
+    // Same stand-in rule as execution: an expected address resolves only for
+    // steps that will still execute (failure-skipped products have no code
+    // there). Declarations referencing sibling products of the same producer
+    // resolve from these persisted addresses.
+    const resolveRef = (id: string): Hex => {
+      const ref = lane.steps.find((candidate) => candidate.stepId === id);
+      if (ref?.address) return ref.address;
+      const standIn = ref?.predictedAddress ?? ref?.expectedAddress;
+      if (standIn && ref!.status !== 'skipped' && ref!.status !== 'failed') return standIn;
+      throw coded('pointer-unresolved', `Pointer ${id} has no confirmed or predicted address`);
+    };
+    const encoded = encodeDeclaredProductArgs(planStep, input, chainId, resolveRef, { frozen: run.inputs, contracts: run.plan.contracts });
+    if (encoded === undefined) {
+      getLogger().warn(`verification enqueue skipped for produced product ${stepId}: constructor arguments are not declared`);
+      return;
+    }
+    // A product's creation transaction is its producer call's — even when the
+    // final address was manually reconciled.
+    const creationTxHash = laneStep.attempts.findLast((attempt) => attempt.txHash)?.txHash
+      ?? lane.steps.find((candidate) => candidate.stepId === strategy.producedBy.stepId)?.attempts.findLast((attempt) => attempt.txHash)?.txHash;
+    if (!creationTxHash) {
+      getLogger().warn(`verification enqueue skipped for produced product ${stepId}: the producer call has no transaction hash`);
+      return;
+    }
+    await this.deps.verificationQueue.enqueueForConfirmedStep(
+      run.profileId, run, chainId, stepId, planStep.contractId,
+      laneStep.address, creationTxHash, encoded
+    );
   }
 
   private async enqueueCapturedContractTypeVerifications(
@@ -1773,21 +2080,59 @@ export class DeployEngine {
       const dynamic = dynamicDeterministicStepIds(draft.plan, lane.chainId);
       const addresses = (id: string): Hex => {
         const item = draftLane.steps.find((candidate) => candidate.stepId === id);
-        if (!item?.address && !item?.predictedAddress) throw coded('pointer-unresolved', `Pointer ${id} is unresolved after edit`);
-        return (item.address ?? item.predictedAddress)!;
+        const known = item?.address ?? item?.predictedAddress ?? item?.expectedAddress;
+        if (!known) throw coded('pointer-unresolved', `Pointer ${id} is unresolved after edit`);
+        return known;
+      };
+      // A pointer at a produced product that has not run yet is not an edit
+      // error: its address is derived by the producer call's pre-broadcast
+      // simulation, so it is unresolved before the edit and after it alike.
+      const pendingProducedProduct = (id: string | undefined): boolean => {
+        if (!id) return false;
+        const target = draft.plan.steps.find((candidate) => candidate.id === id);
+        if (!target || target.kind !== 'deploy' || !isProducedStrategy(target.strategy)) return false;
+        const item = draftLane.steps.find((candidate) => candidate.stepId === id);
+        return !item?.address && !item?.predictedAddress && !item?.expectedAddress;
       };
       for (let index = draftLane.currentStepIndex; index < draft.plan.steps.length; index += 1) {
         const step = draft.plan.steps[index];
         if (step.kind === 'call') {
-          const fn = callAbiItem(step, lane.chainId, callTargetAbi(draft.plan, step, lane.chainId, draft.inputs));
-          resolveStepValues(step, lane.chainId, addresses, fn?.inputs ?? [], { frozen: draft.inputs, contracts: draft.plan.contracts });
+          try {
+            const fn = callAbiItem(step, lane.chainId, callTargetAbi(draft.plan, step, lane.chainId, draft.inputs));
+            resolveStepValues(step, lane.chainId, addresses, fn?.inputs ?? [], { frozen: draft.inputs, contracts: draft.plan.contracts });
+          } catch (error) {
+            if ((error as { code?: string }).code === 'POINTER_UNRESOLVED' && pendingProducedProduct((error as { details?: { stepId?: string } }).details?.stepId)) continue;
+            throw error;
+          }
+        } else if (isProducedStrategy(step.strategy)) {
+          // A produced product has no initcode of its own — the producer call
+          // supplies the constructor arguments — so there is nothing to
+          // dry-build, and stray legacy args on an UNTOUCHED product must
+          // not fail an unrelated edit. But an edit that touches the
+          // product's declared args (its verification mapping) must leave a
+          // declaration that still encodes against the frozen ABI.
+          if (!(step.id in (cmd.edits.argsByStep ?? {}))) continue;
+          const input = draft.inputs[step.contractId];
+          if (!input) throw new Error(`Frozen input missing for ${step.contractId}`);
+          try {
+            encodeDeclaredProductArgs(step, input, lane.chainId, addresses, { frozen: draft.inputs, contracts: draft.plan.contracts });
+          } catch (error) {
+            if ((error as { code?: string }).code === 'POINTER_UNRESOLVED' && pendingProducedProduct((error as { details?: { stepId?: string } }).details?.stepId)) continue;
+            throw error;
+          }
+          continue;
         } else {
           const input = draft.inputs[step.contractId];
           if (!input) throw new Error(`Frozen input missing for ${step.contractId}`);
           try {
             buildInitcode(step, input, lane.chainId, addresses, { frozen: draft.inputs, contracts: draft.plan.contracts });
           } catch (error) {
-            if (dynamic.has(step.id) && ((error as { pauseReason?: string }).pauseReason === 'pointer-unresolved' || (error as { code?: string }).code === 'POINTER_UNRESOLVED')) continue;
+            const unresolved = (error as { pauseReason?: string }).pauseReason === 'pointer-unresolved' || (error as { code?: string }).code === 'POINTER_UNRESOLVED';
+            // A plain-create step is never in `dynamic`, so without the
+            // produced carve-out a downstream create pointing at an unrun
+            // product would reject EVERY edit — including the edit to the
+            // producer's own arguments that the pause is asking for.
+            if (unresolved && (dynamic.has(step.id) || pendingProducedProduct((error as { details?: { stepId?: string } }).details?.stepId))) continue;
             throw error;
           }
         }
@@ -1845,8 +2190,20 @@ export class DeployEngine {
     return next;
   }
   private async maybeArtifact(run: RunRecord): Promise<void> {
-    if (Object.values(run.lanes).some(terminal))
+    if (!Object.values(run.lanes).some(terminal)) return;
+    try {
       await this.deps.writeArtifact(run);
+    } catch (error) {
+      // Record-keeping must never alter lane truth: this runs inside the
+      // mutate that just persisted a terminal transition, so a throw here
+      // used to propagate into the runLane catch and pause an already
+      // completed lane — past its end, where no resolve verb can operate.
+      // The artifact renders on demand at the GET endpoint and this write
+      // re-runs on any later terminal mutate, so a failure only logs.
+      getLogger().warn(
+        `deployment artifact write failed for ${run.id}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
   private async requireRun(
     profileId: string,

@@ -1,6 +1,7 @@
 // @ts-expect-error Vitest is supplied by the repository test command via npx.
 import { describe, expect, it } from 'vitest';
-import type { WorkflowDocument } from '@ignite/api';
+import { DeploymentPlanSchema, type WorkflowDocument } from '@ignite/api';
+import { projectWorkflowPlan } from '../../../../routes/deploy/projection';
 import {
   confirmExternalResolution,
   deployDraftReducer,
@@ -252,6 +253,45 @@ describe('workflow deploy drafts', () => {
     expect(workflowDocumentFromDraft(state).sources[0]).not.toHaveProperty('artifactHash');
     expect(state.workflowDocument?.sources[0]).toEqual(document.sources[0]);
     expect(workflowDraftIsDirty(state)).toBe(true);
+  });
+
+  // The tail of the produced round trip: a composition promoted to a workflow
+  // (source ids minted by WorkflowPromotionService, see its remap test) is
+  // installed, hydrated, and projected. That projected plan is exactly what
+  // validate and launch POST, so it must satisfy the real plan schema — the
+  // producer's frozen ABI source is reachable only through abiContractId.
+  const producedDocument: WorkflowDocument = {
+    schemaVersion: 1,
+    sources: [
+      { id: 'factory-1', repo: { url: 'https://example.com/jar.git', commit: '3'.repeat(40) }, frameworkId: 'foundry', sourcePath: 'src/Factory.sol', contractName: 'Factory', artifactPath: 'out/Factory.sol/Factory.json' },
+      { id: 'jar-1', repo: { url: 'https://example.com/jar.git', commit: '3'.repeat(40) }, frameworkId: 'foundry', sourcePath: 'src/Jar.sol', contractName: 'Jar', artifactPath: 'out/Jar.sol/Jar.json' },
+      { id: 'token-1', repo: { url: 'https://example.com/token.git', commit: '4'.repeat(40) }, frameworkId: 'foundry', sourcePath: 'src/Token.sol', contractName: 'Token', artifactPath: 'out/Token.sol/Token.json' },
+    ],
+    steps: [
+      { id: 'call-comp-1', kind: 'call', target: { kind: 'address', address: '0x6666666666666666666666666666666666666666' }, signature: 'deploy(address)', args: { owner: '0x7777777777777777777777777777777777777777' }, abiContractId: 'factory-1' },
+      { id: 'deploy-comp-1:product:jar', kind: 'deploy', contractId: 'jar-1', strategy: { kind: 'plugin', pluginId: 'tjar', producedBy: { stepId: 'call-comp-1', outputIndex: 0 } } },
+      { id: 'deploy-token', kind: 'deploy', contractId: 'token-1' },
+    ],
+    requiredPlugins: [{ id: 'foundry', version: '1' }, { id: 'tjar', version: '1' }],
+    outputs: { hooks: [] },
+  };
+
+  it('projects a hydrated produced composition into a plan the deployment schema accepts', () => {
+    const state = deployDraftReducer(undefined, hydrateWorkflowDraft({ repoPathOrUrl: '/workspace', name: 'jar', docHash: 'b'.repeat(64), document: producedDocument }));
+    const project = (draft: typeof state) => projectWorkflowPlan({ document: workflowDocumentFromDraft(draft), repoPathOrUrl: '/workspace', chains: [1], includedStepIds: draft.workflowIncludedStepIds ?? {}, resolutions: draft.externalResolutions ?? [] });
+    const plan = project(state);
+    expect(plan.contracts.map((contract) => contract.id)).toEqual(['factory-1', 'jar-1', 'token-1']);
+    expect(plan.steps[0]).toMatchObject({ kind: 'call', abiContractId: 'factory-1' });
+    expect(plan.steps[1]).toMatchObject({ strategy: { producedBy: { stepId: 'call-comp-1', outputIndex: 0 } } });
+    expect(DeploymentPlanSchema.safeParse(plan)).toMatchObject({ success: true });
+
+    // Excluding the producer leaves the product with nothing to create it and
+    // no address a per-chain resolution could supply, so it goes too — and its
+    // frozen ABI source goes with the call that named it.
+    const withoutProducer = project(deployDraftReducer(state, toggleWorkflowStep('call-comp-1')));
+    expect(withoutProducer.steps.map((step) => step.id)).toEqual(['deploy-token']);
+    expect(withoutProducer.contracts.map((contract) => contract.id)).toEqual(['token-1']);
+    expect(DeploymentPlanSchema.safeParse(withoutProducer)).toMatchObject({ success: true });
   });
 
   it('keeps per-run hook selection and drift acknowledgements out of the saved document', () => {

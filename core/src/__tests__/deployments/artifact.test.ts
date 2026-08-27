@@ -226,6 +226,61 @@ describe('deployment artifact renderer', () => {
     expect(record.repoArtifact).toEqual({ path: 'ignite/deployments/release/run-1.json', status: 'failed', error: 'read only', updatedAt: '2026-07-14T12:00:00.000Z' });
   });
 
+  it('renders produced products with their binding, expectations, and provenance', () => {
+    // The exact shape a produced run persists: a call performs the deploy,
+    // both products confirm without a transaction of their own — one observed
+    // at the committed expected address, one manually reconciled — and the
+    // artifact must keep those truth states apart.
+    const JAR = '0x0000000000000000000000000000000000000010' as const;
+    const EXPECTED = '0x0000000000000000000000000000000000000020' as const;
+    const RECORDED = '0x0000000000000000000000000000000000000030' as const;
+    const record = run();
+    record.deploymentTypeBindings = {
+      factory: { pluginId: 'factory', pluginVersion: '1.0.0', execution: 'call-products', descriptorHash: 'a'.repeat(64) },
+    };
+    record.plan.steps = [
+      { id: 'factory-call', kind: 'call', target: { kind: 'address', address: '0x0000000000000000000000000000000000000301' }, signature: 'deploy(address)', args: { owner: '0x0000000000000000000000000000000000000001' }, abiContractId: 'token' },
+      { id: 'jar', kind: 'deploy', contractId: 'token', strategy: { kind: 'plugin', pluginId: 'factory', producedBy: { stepId: 'factory-call', outputIndex: 0 } } },
+      { id: 'releaser', kind: 'deploy', contractId: 'token', strategy: { kind: 'plugin', pluginId: 'factory', producedBy: { stepId: 'factory-call', outputIndex: 1 } } },
+    ];
+    record.lanes['1'].currentStepIndex = 3;
+    record.lanes['1'].steps = [
+      { stepId: 'factory-call', status: 'confirmed', attempts: [{ id: 'a1', startedAt: record.createdAt, txHash: '0x1234' }] },
+      {
+        stepId: 'jar', status: 'confirmed', address: JAR, expectedAddress: JAR,
+        addressProvenance: { kind: 'observed-at-expected', expectedAddress: JAR, observedAt: record.updatedAt },
+        notes: ['address simulated from deploy() before broadcast'], attempts: [],
+      },
+      {
+        stepId: 'releaser', status: 'confirmed', address: RECORDED, expectedAddress: EXPECTED,
+        addressProvenance: { kind: 'operator-recorded', expectedAddress: EXPECTED, recordedAddress: RECORDED, recordedAt: record.updatedAt, note: 'moved by factory state' },
+        attempts: [{ id: 'a2', startedAt: record.createdAt, endedAt: record.updatedAt, resolution: 'record-deployed-address', resolutionData: { recordedAddress: RECORDED, note: 'moved by factory state' } }],
+      },
+    ];
+    const artifact = renderArtifact(record);
+    // The reviewed plugin identity travels with the artifact.
+    expect(artifact.deploymentTypes).toEqual([
+      { pluginId: 'factory', pluginVersion: '1.0.0', execution: 'call-products', descriptorHash: 'a'.repeat(64) },
+    ]);
+    const lane = artifact.lanes['1'];
+    // A product's address is runtime-dynamic — the producer's pre-broadcast
+    // simulation committed it — so the note recording that provenance travels
+    // with the strategy exactly as it does for a mined dynamic deployment.
+    expect(lane.steps[1].strategy).toEqual({
+      kind: 'plugin', pluginId: 'factory', pluginVersion: '1.0.0', descriptorHash: 'a'.repeat(64),
+      expectedAddress: JAR, producedBy: { stepId: 'factory-call', outputIndex: 0 },
+      notes: ['address simulated from deploy() before broadcast'],
+    });
+    expect(lane.steps[1].address).toBe(JAR);
+    expect(lane.steps[1].addressProvenance).toEqual({ kind: 'observed-at-expected', expectedAddress: JAR, observedAt: record.updatedAt });
+    // A manual recovery is never relabelled as a prediction: the recorded
+    // address, its provenance, and the settling resolution all project.
+    expect(lane.steps[2].strategy).toMatchObject({ expectedAddress: EXPECTED, producedBy: { stepId: 'factory-call', outputIndex: 1 } });
+    expect(lane.steps[2].address).toBe(RECORDED);
+    expect(lane.steps[2].addressProvenance).toMatchObject({ kind: 'operator-recorded', recordedAddress: RECORDED });
+    expect(lane.steps[2].attempts[0]).toMatchObject({ resolution: 'record-deployed-address', resolutionData: { recordedAddress: RECORDED, note: 'moved by factory state' } });
+  });
+
   it.each(['confirmed', 'skipped'] as const)('renders lane JIT provenance for a %s dynamic deployment', (status) => {
     const record = run(); const salt = `0x${'77'.repeat(32)}` as const;
     record.plan.steps = [

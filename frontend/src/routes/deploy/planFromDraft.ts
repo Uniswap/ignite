@@ -171,6 +171,7 @@ function stepFromDraft(
         : {}),
       ...(step.signature ? { signature: step.signature } : {}),
       ...(step.payable ? { payable: true } : {}),
+      ...(step.abiContractId ? { abiContractId: step.abiContractId } : {}),
       ...common,
     };
   }
@@ -193,6 +194,18 @@ function deployStepFromDraft(
         salt: strategy.salt,
         ...(strategy.saltPerChain ? { saltPerChain: { ...strategy.saltPerChain } } : {}),
         ...(extras.acknowledged ? { acknowledgeDeployed: { ...extras.acknowledged } } : {}),
+      },
+    };
+  } else if (strategy?.kind === 'plugin' && strategy.producedBy) {
+    // A produced product submits no transaction: the shared schema rejects
+    // salt/prepared/acknowledgeDeployed alongside producedBy, so nothing from
+    // extras may leak into this strategy.
+    strategyField = {
+      strategy: {
+        kind: 'plugin',
+        pluginId: strategy.pluginId,
+        ...(strategy.params ? { params: { ...strategy.params } } : {}),
+        producedBy: { ...strategy.producedBy },
       },
     };
   } else if (strategy?.kind === 'plugin') {

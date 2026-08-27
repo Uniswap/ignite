@@ -219,3 +219,66 @@ describe('call-arg and per-chain dependency validation', () => {
     ] })).toThrowError(/Call argument args.owner references later dynamic step/);
   });
 });
+
+describe('produced products in ordering and dynamic classification', () => {
+  const contract = { id: 'c', repoPathOrUrl: '/r', frameworkId: 'f', artifactPath: 'a', contractName: 'C', sourcePath: 'C.sol' };
+  const base = { schemaVersion: 1 as const, contracts: [contract], chains: [1], signers: {} };
+  const salt = `0x${'44'.repeat(32)}` as const;
+  const producer = { id: 'call-factory', kind: 'call' as const, target: { kind: 'address' as const, address }, signature: 'deploy(address)', payable: false, args: { owner: address }, abiContractId: 'c' };
+  const product = { id: 'product', kind: 'deploy' as const, contractId: 'c', strategy: { kind: 'plugin' as const, pluginId: 'factory', producedBy: { stepId: 'call-factory', outputIndex: 0 } } };
+  const pointer = (stepId: string) => ({ jar: { $ref: { kind: 'step' as const, stepId } } });
+
+  // Only the producer call's pre-broadcast simulation yields a product's
+  // address, so the product is dynamic and so is everything downstream of it.
+  it('classifies a product, and every step pointing at one, as runtime-dynamic', () => {
+    const plan: DeploymentPlan = { ...base, steps: [
+      producer, product,
+      { id: 'consumer', kind: 'deploy', contractId: 'c', strategy: { kind: 'create2', salt }, args: pointer('product') },
+      { id: 'downstream', kind: 'deploy', contractId: 'c', strategy: { kind: 'create2', salt }, args: pointer('consumer') },
+    ] };
+    expect(dynamicDeterministicStepIds(plan, 1)).toEqual(new Set(['product', 'consumer', 'downstream']));
+    // The jar-then-releaser shape: ordered after the producer, it validates.
+    expect(() => validateDependencies(plan)).not.toThrow();
+  });
+
+  it('lets a later call argument reference a product its producer already deployed', () => {
+    expect(() => validateDependencies({ ...base, steps: [
+      producer, product,
+      { id: 'register', kind: 'call' as const, target: { kind: 'address' as const, address }, signature: 'register(address)', payable: false, args: pointer('product') },
+    ] })).not.toThrow();
+  });
+
+  // Before the classification fix these two validated cleanly and then wedged
+  // the lane forever: nothing seeds a product's address until its producer
+  // broadcasts, so the reference can never resolve.
+  it('rejects a call argument that references a product produced later, naming the producer', () => {
+    expect(() => validateDependencies({ ...base, steps: [
+      { id: 'register', kind: 'call' as const, target: { kind: 'address' as const, address }, signature: 'register(address)', payable: false, args: pointer('product') },
+      producer, product,
+    ] })).toThrowError(expect.objectContaining({
+      code: 'POINTER_FORWARD_CREATE',
+      message: 'Call argument args.jar references product, which is produced later by call-factory',
+    }));
+  });
+
+  it('rejects a create2 input that references a product produced later', () => {
+    expect(() => validateDependencies({ ...base, steps: [
+      { id: 'consumer', kind: 'deploy' as const, contractId: 'c', strategy: { kind: 'create2' as const, salt }, args: pointer('product') },
+      producer, product,
+    ] })).toThrowError(expect.objectContaining({
+      code: 'CREATE2_POINTER_NOT_CONCRETE',
+      message: 'Create2 input args.jar references product, which is produced later by call-factory',
+    }));
+  });
+
+  // A product's args are verification declarations the producer supplies
+  // onchain, so they form no prediction edge in either direction — otherwise
+  // this pair would read as a forward reference and a cycle.
+  it('keeps a product\'s declared args out of the prediction graph', () => {
+    expect(() => validateDependencies({ ...base, steps: [
+      producer,
+      { ...product, args: pointer('consumer') },
+      { id: 'consumer', kind: 'deploy' as const, contractId: 'c', strategy: { kind: 'create2' as const, salt }, args: pointer('product') },
+    ] })).not.toThrow();
+  });
+});

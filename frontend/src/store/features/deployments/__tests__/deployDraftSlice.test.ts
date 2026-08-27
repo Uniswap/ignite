@@ -1,8 +1,19 @@
 // @ts-expect-error Vitest is supplied by the repository test command via npx.
 import { describe, expect, it } from 'vitest';
-import type { ContractSource } from '@ignite/api';
+import type {
+  ComposedCallProducts,
+  ContractSource,
+  DeploymentTypeBinding,
+  WorkflowDocument,
+} from '@ignite/api';
 import {
   deployDraftReducer,
+  hydrateWorkflowDraft,
+  producedStepIdsFor,
+  setValue,
+  setValuePerChain,
+  toggleWorkflowStep,
+  workflowDependentsForExclusion,
   seedDraft,
   setChainArgOverride,
   moveStep,
@@ -24,6 +35,12 @@ import {
   setStrategy,
   setStepSigner,
   storePrepared,
+  startComposition,
+  compositionInProgress,
+  compositionMaterializationProblem,
+  setCompositionArtifact,
+  setCompositionValue,
+  applyComposition,
 } from '../deployDraftSlice';
 import { contractSourceId } from '../../../../utils/contractSourceId';
 
@@ -472,5 +489,536 @@ describe('deployDraftSlice', () => {
 
     const cleared = deployDraftReducer(state, draftLaunched(launchedKey));
     expect(cleared).toEqual(deployDraftInitialState);
+  });
+});
+
+describe('deployment composer flow', () => {
+  const PRODUCER_ADDRESS = '0x2179a60856E37dfeAacA0ab043B931fE224b27B6';
+  // Canonical input-only form — exactly what ordinary call steps store.
+  const SIGNATURE = 'deploy(address,bytes32)';
+  const PLUGIN_ID = 'call-products-plugin';
+  const jarArtifact = contract('jar-art', 'TokenJar');
+  const releaserArtifact = contract('rel-art', 'ExchangeReleaser');
+  const binding: DeploymentTypeBinding = {
+    pluginId: PLUGIN_ID,
+    pluginVersion: '1.0.0',
+    execution: 'call-products',
+    descriptorHash: 'a'.repeat(64),
+  };
+
+  function composed(
+    products: ComposedCallProducts['products']
+  ): ComposedCallProducts {
+    return {
+      producer: {
+        abiArtifactField: 'producer',
+        targetField: 'address',
+        functionField: 'function',
+        signature: SIGNATURE,
+        payable: false,
+      },
+      products,
+    };
+  }
+  const TWO_PRODUCTS = composed([
+    { key: 'jar', artifactField: 'product.jar', outputIndex: 0 },
+    { key: 'releaser', artifactField: 'product.releaser', outputIndex: 1 },
+  ]);
+
+  function setupState() {
+    let state = deployDraftReducer(undefined, startComposition(PLUGIN_ID));
+    state = deployDraftReducer(
+      state,
+      setCompositionArtifact({ key: 'producer', source: contract('producer-art', 'Producer') })
+    );
+    state = deployDraftReducer(
+      state,
+      setCompositionValue({ key: 'address', value: PRODUCER_ADDRESS })
+    );
+    state = deployDraftReducer(
+      state,
+      setCompositionValue({ key: 'function', value: SIGNATURE })
+    );
+    state = deployDraftReducer(
+      state,
+      setCompositionArtifact({ key: 'product.jar', source: jarArtifact })
+    );
+    state = deployDraftReducer(
+      state,
+      setCompositionArtifact({ key: 'product.releaser', source: releaserArtifact })
+    );
+    return state;
+  }
+
+  it('startComposition seeds an empty draft with a minted composition id', () => {
+    const state = deployDraftReducer(undefined, startComposition(PLUGIN_ID));
+    expect(state.contracts).toEqual([]);
+    expect(state.steps).toEqual([]);
+    expect(state.composition).toMatchObject({
+      pluginId: PLUGIN_ID,
+      values: {},
+      artifacts: {},
+      ownedContractIds: [],
+      ownedStepIds: [],
+    });
+    expect(state.composition?.compositionId).toBeTruthy();
+  });
+
+  it('startComposition never clobbers an active draft', () => {
+    const active = deployDraftReducer(
+      undefined,
+      seedDraft([contract('token', 'Token')])
+    );
+    expect(deployDraftReducer(active, startComposition(PLUGIN_ID))).toEqual(active);
+  });
+
+  it('applyComposition materializes the canonical call-plus-products shape', () => {
+    const state = deployDraftReducer(
+      setupState(),
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const compositionId = state.composition!.compositionId;
+    const callId = `call-${compositionId}`;
+    const abiContractId = `${compositionId}:abi`;
+
+    expect(state.steps.map((step) => step.kind)).toEqual(['call', 'deploy', 'deploy']);
+    expect(state.steps[0]).toMatchObject({
+      id: callId,
+      kind: 'call',
+      target: { kind: 'address', address: PRODUCER_ADDRESS },
+      signature: SIGNATURE,
+      abiContractId,
+    });
+    // Arguments are the call step's business: they are filled on its card in
+    // Steps, where the full editor (pointers, signer fill, per-chain) lives.
+    expect(state.steps[0].args).toBeUndefined();
+    // The frozen producer ABI source is a contract without a deploy step;
+    // products are clones under composition-owned ids.
+    expect(state.contracts.map((entry) => entry.id)).toEqual([
+      abiContractId,
+      `${compositionId}:product:jar`,
+      `${compositionId}:product:releaser`,
+    ]);
+    expect(state.steps[1]).toMatchObject({
+      kind: 'deploy',
+      contractId: `${compositionId}:product:jar`,
+    });
+    expect(state.deployExtras[state.steps[1].id].strategy).toEqual({
+      kind: 'plugin',
+      pluginId: PLUGIN_ID,
+      producedBy: { stepId: callId, outputIndex: 0 },
+    });
+    expect(state.deployExtras[state.steps[2].id].strategy).toEqual({
+      kind: 'plugin',
+      pluginId: PLUGIN_ID,
+      producedBy: { stepId: callId, outputIndex: 1 },
+    });
+    expect(state.composition).toMatchObject({
+      binding,
+      ownedContractIds: [abiContractId, `${compositionId}:product:jar`, `${compositionId}:product:releaser`],
+      ownedStepIds: [callId, `deploy-${compositionId}:product:jar`, `deploy-${compositionId}:product:releaser`],
+    });
+  });
+
+  it('two products may share one artifact without colliding', () => {
+    let state = setupState();
+    state = deployDraftReducer(
+      state,
+      setCompositionArtifact({ key: 'product.releaser', source: jarArtifact })
+    );
+    state = deployDraftReducer(
+      state,
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const compositionId = state.composition!.compositionId;
+    expect(state.contracts.map((entry) => entry.id)).toEqual([
+      `${compositionId}:abi`,
+      `${compositionId}:product:jar`,
+      `${compositionId}:product:releaser`,
+    ]);
+  });
+
+  it('applyComposition fails closed while a product is unmapped', () => {
+    let state = deployDraftReducer(undefined, startComposition(PLUGIN_ID));
+    state = deployDraftReducer(
+      state,
+      setCompositionArtifact({ key: 'producer', source: contract('producer-art', 'Producer') })
+    );
+    state = deployDraftReducer(
+      state,
+      setCompositionValue({ key: 'address', value: PRODUCER_ADDRESS })
+    );
+    state = deployDraftReducer(
+      state,
+      setCompositionArtifact({ key: 'product.jar', source: jarArtifact })
+    );
+    const applied = deployDraftReducer(
+      state,
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    expect(applied.steps).toEqual([]);
+    expect(applied.contracts).toEqual([]);
+  });
+
+  it('recomposition replaces only owned ids', () => {
+    let state = deployDraftReducer(
+      setupState(),
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const compositionId = state.composition!.compositionId;
+    const releaserStepId = `deploy-${compositionId}:product:releaser`;
+    // A declaration on the kept product must survive; the remapped product
+    // is a different contract and starts over.
+    state = deployDraftReducer(
+      state,
+      setArg({ stepId: releaserStepId, key: 'owner', value: PRODUCER_ADDRESS })
+    );
+    state = deployDraftReducer(
+      state,
+      setArg({ stepId: `deploy-${compositionId}:product:jar`, key: 'owner', value: PRODUCER_ADDRESS })
+    );
+    state = deployDraftReducer(
+      state,
+      setCompositionArtifact({ key: 'product.jar', source: contract('jar2-art', 'Jar2') })
+    );
+    state = deployDraftReducer(
+      state,
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+
+    expect(state.steps).toHaveLength(3);
+    expect(
+      state.contracts.find((entry) => entry.id === `${compositionId}:product:jar`)
+    ).toMatchObject({ contractName: 'Jar2' });
+    expect(
+      state.steps.find((step) => step.id === releaserStepId)?.args
+    ).toMatchObject({ owner: PRODUCER_ADDRESS });
+    expect(
+      state.steps.find((step) => step.id === `deploy-${compositionId}:product:jar`)?.args
+    ).toBeUndefined();
+  });
+
+  it('recomposition refuses to drop a product a later step references', () => {
+    let state = deployDraftReducer(
+      setupState(),
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const compositionId = state.composition!.compositionId;
+    state = deployDraftReducer(state, addCallStep(2));
+    const laterCall = state.steps[3];
+    state = deployDraftReducer(
+      state,
+      setArg({
+        stepId: laterCall.id,
+        key: 'jar',
+        value: { $ref: { kind: 'step', stepId: `deploy-${compositionId}:product:jar` } },
+      })
+    );
+    const narrowed = composed([
+      { key: 'releaser', artifactField: 'product.releaser', outputIndex: 0 },
+    ]);
+    expect(compositionMaterializationProblem(state, narrowed)).toContain(
+      `deploy-${compositionId}:product:jar`
+    );
+    // Fail closed: the reducer mutates nothing rather than clearing the
+    // user's dependency.
+    const refused = deployDraftReducer(
+      state,
+      applyComposition({ binding, composition: narrowed })
+    );
+    expect(refused).toEqual(state);
+  });
+
+  it('re-apply preserves operator edits to the generated call step', () => {
+    let state = deployDraftReducer(
+      setupState(),
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const callId = `call-${state.composition!.compositionId}`;
+    state = deployDraftReducer(
+      state,
+      setArg({ stepId: callId, key: 'salt', value: `0x${'22'.repeat(32)}` })
+    );
+    state = deployDraftReducer(
+      state,
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const call = state.steps[0];
+    expect(call.kind).toBe('call');
+    expect(call.args?.salt).toBe(`0x${'22'.repeat(32)}`);
+  });
+
+  it('a recomposed function rewrites the call and drops stale args', () => {
+    let state = deployDraftReducer(
+      setupState(),
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const compositionId = state.composition!.compositionId;
+    const callId = `call-${compositionId}`;
+    state = deployDraftReducer(
+      state,
+      setArg({ stepId: callId, key: 'owner', value: PRODUCER_ADDRESS })
+    );
+    const changed: ComposedCallProducts = {
+      producer: { ...TWO_PRODUCTS.producer, signature: 'deployOne(bytes32)' },
+      products: [{ key: 'jar', artifactField: 'product.jar', outputIndex: 0 }],
+    };
+    state = deployDraftReducer(
+      state,
+      applyComposition({ binding, composition: changed })
+    );
+    const call = state.steps.find((step) => step.id === callId);
+    expect(call?.kind === 'call' && call.signature).toBe('deployOne(bytes32)');
+    expect(call?.args).toBeUndefined();
+    expect(state.contracts.map((entry) => entry.id)).toEqual([
+      `${compositionId}:abi`,
+      `${compositionId}:product:jar`,
+    ]);
+    expect(state.steps).toHaveLength(2);
+  });
+
+  it('adding plain contracts to an empty draft abandons the composition', () => {
+    let state = deployDraftReducer(undefined, startComposition(PLUGIN_ID));
+    state = deployDraftReducer(state, addContracts([contract('token', 'Token')]));
+    expect(state.composition).toBeUndefined();
+    expect(state.contracts).toHaveLength(1);
+  });
+
+  // The Deployments header gates its entry points on this. Counting the shell
+  // that startComposition mints as a session collapsed the composer entry /
+  // "New deployment" pair into a single composer-only button as soon as the
+  // user opened the composer and navigated away.
+  describe('compositionInProgress', () => {
+    it('is false with no composition at all', () => {
+      expect(compositionInProgress(undefined)).toBe(false);
+    });
+
+    it('is false for the empty shell startComposition mints', () => {
+      const state = deployDraftReducer(undefined, startComposition(PLUGIN_ID));
+      expect(state.composition).toBeDefined();
+      expect(compositionInProgress(state.composition)).toBe(false);
+    });
+
+    it('is false for a half-typed-then-cleared value', () => {
+      let state = deployDraftReducer(undefined, startComposition(PLUGIN_ID));
+      state = deployDraftReducer(
+        state,
+        setCompositionValue({ key: 'address', value: '' })
+      );
+      expect(compositionInProgress(state.composition)).toBe(false);
+    });
+
+    it('is true once an artifact has been picked', () => {
+      let state = deployDraftReducer(undefined, startComposition(PLUGIN_ID));
+      state = deployDraftReducer(
+        state,
+        setCompositionArtifact({ key: 'producer', source: contract('producer-art', 'Producer') })
+      );
+      expect(compositionInProgress(state.composition)).toBe(true);
+    });
+
+    it('is true for a fully configured composition', () => {
+      expect(compositionInProgress(setupState().composition)).toBe(true);
+    });
+  });
+
+  it('a product cannot move above the call that creates it', () => {
+    const state = deployDraftReducer(
+      setupState(),
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const moved = deployDraftReducer(
+      state,
+      moveStep({ fromIndex: 1, toIndex: 0 })
+    );
+    expect(moved.steps.map((step) => step.id)).toEqual(
+      state.steps.map((step) => step.id)
+    );
+  });
+
+  it('the producer call cannot be removed while products depend on it', () => {
+    const state = deployDraftReducer(
+      setupState(),
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const callId = `call-${state.composition!.compositionId}`;
+    const kept = deployDraftReducer(state, removeCallStep(callId));
+    expect(kept.steps.map((step) => step.id)).toEqual(
+      state.steps.map((step) => step.id)
+    );
+  });
+
+  it('a product depends on the call that produces it', () => {
+    const state = deployDraftReducer(
+      setupState(),
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    const compositionId = state.composition!.compositionId;
+    const callId = `call-${compositionId}`;
+    const products = [
+      `deploy-${compositionId}:product:jar`,
+      `deploy-${compositionId}:product:releaser`,
+    ];
+    expect(producedStepIdsFor(state, callId)).toEqual(products);
+    // The dependency closure is what warns before an exclusion and what
+    // invalidates predictions: producedBy must appear in it even though the
+    // product references the call through neither args nor a target.
+    expect(workflowDependentsForExclusion(state, callId)).toEqual(products);
+    expect(producedStepIdsFor(state, products[0])).toEqual([]);
+  });
+
+  it('recomposing to a non-payable producer clears the value it can no longer show', () => {
+    const payable: ComposedCallProducts = {
+      producer: { ...TWO_PRODUCTS.producer, payable: true },
+      products: TWO_PRODUCTS.products,
+    };
+    let state = deployDraftReducer(
+      setupState(),
+      applyComposition({ binding, composition: payable })
+    );
+    const callId = `call-${state.composition!.compositionId}`;
+    state = deployDraftReducer(state, setValue({ stepId: callId, value: '1' }));
+    state = deployDraftReducer(
+      state,
+      setValuePerChain({ stepId: callId, chainId: 1, value: '2' })
+    );
+    expect(state.steps[0]).toMatchObject({ payable: true, value: '1' });
+
+    state = deployDraftReducer(
+      state,
+      applyComposition({ binding, composition: TWO_PRODUCTS })
+    );
+    // Both inputs render behind `payable`, and a producer's payable flag is
+    // the composer's: a retained value would be invisible, uneditable, and
+    // rejected by the plan schema.
+    const call = state.steps[0];
+    expect(call.kind === 'call' && call.payable).toBeUndefined();
+    expect(call.value).toBeUndefined();
+    expect(call.valuePerChain).toBeUndefined();
+  });
+
+  it("a product keyed 'abi' cannot take over the frozen producer ABI id", () => {
+    let state = deployDraftReducer(undefined, startComposition(PLUGIN_ID));
+    state = deployDraftReducer(
+      state,
+      setCompositionArtifact({ key: 'producer', source: contract('producer-art', 'Producer') })
+    );
+    state = deployDraftReducer(
+      state,
+      setCompositionValue({ key: 'address', value: PRODUCER_ADDRESS })
+    );
+    state = deployDraftReducer(
+      state,
+      setCompositionArtifact({ key: 'product.abi', source: jarArtifact })
+    );
+    // 'abi' passes the server's product-key charset check, so the host must
+    // not mint its own ids in a namespace a key can reach.
+    const collides = composed([
+      { key: 'abi', artifactField: 'product.abi', outputIndex: 0 },
+    ]);
+    state = deployDraftReducer(
+      state,
+      applyComposition({ binding, composition: collides })
+    );
+    const compositionId = state.composition!.compositionId;
+    expect(state.contracts.map((entry) => [entry.id, entry.contractName])).toEqual([
+      [`${compositionId}:abi`, 'Producer'],
+      [`${compositionId}:product:abi`, 'TokenJar'],
+    ]);
+    expect(state.steps[0]).toMatchObject({
+      kind: 'call',
+      abiContractId: `${compositionId}:abi`,
+    });
+    expect(state.steps[1]).toMatchObject({
+      kind: 'deploy',
+      contractId: `${compositionId}:product:abi`,
+    });
+
+    // Re-apply must reconcile the same ids: the collision used to make the
+    // keep-check miss, delete the shared id and re-add it as the product.
+    const again = deployDraftReducer(
+      state,
+      applyComposition({ binding, composition: collides })
+    );
+    expect(again.contracts.map((entry) => [entry.id, entry.contractName])).toEqual(
+      state.contracts.map((entry) => [entry.id, entry.contractName])
+    );
+    expect(again.steps.map((step) => step.id)).toEqual(
+      state.steps.map((step) => step.id)
+    );
+    expect(again.composition!.ownedContractIds).toEqual([
+      `${compositionId}:abi`,
+      `${compositionId}:product:abi`,
+    ]);
+  });
+
+  it('startComposition replaces an abandoned shell but never a composition holding work', () => {
+    const shell = deployDraftReducer(undefined, startComposition(PLUGIN_ID));
+    // A shell left behind by opening the composer and backing out must not
+    // answer another plugin's entry point with this plugin's composer.
+    const restarted = deployDraftReducer(shell, startComposition('other-plugin'));
+    expect(restarted.composition?.pluginId).toBe('other-plugin');
+    expect(restarted.composition?.compositionId).not.toBe(
+      shell.composition!.compositionId
+    );
+    const working = deployDraftReducer(
+      shell,
+      setCompositionValue({ key: 'address', value: PRODUCER_ADDRESS })
+    );
+    expect(deployDraftReducer(working, startComposition('other-plugin'))).toEqual(
+      working
+    );
+  });
+
+  describe('workflow mode', () => {
+    const source = {
+      id: 'jar',
+      repo: { url: 'https://example.com/jar.git', commit: '1'.repeat(40) },
+      frameworkId: 'foundry',
+      sourcePath: 'src/TokenJar.sol',
+      contractName: 'TokenJar',
+      artifactPath: 'out/TokenJar.sol/TokenJar.json',
+    };
+    const document: WorkflowDocument = {
+      schemaVersion: 1,
+      sources: [source, { ...source, id: 'factory-abi', contractName: 'Producer', sourcePath: 'src/Producer.sol', artifactPath: 'out/Producer.sol/Producer.json' }],
+      steps: [
+        { id: 'spawn', kind: 'call', target: { kind: 'address', address: PRODUCER_ADDRESS }, signature: SIGNATURE, abiContractId: 'factory-abi' },
+        { id: 'deploy-jar', kind: 'deploy', contractId: 'jar', strategy: { kind: 'plugin', pluginId: PLUGIN_ID, producedBy: { stepId: 'spawn', outputIndex: 0 } } },
+        { id: 'configure', kind: 'call', target: { kind: 'step', stepId: 'deploy-jar' } },
+      ],
+      defaultChains: [1],
+      requiredPlugins: [{ id: 'foundry', version: '1' }],
+      outputs: { hooks: [] },
+    };
+    const hydrated = () =>
+      deployDraftReducer(
+        undefined,
+        hydrateWorkflowDraft({ repoPathOrUrl: '/repo', name: 'release', docHash: 'h', document })
+      );
+
+    it('warns that a producer call has dependents before it is excluded', () => {
+      const state = hydrated();
+      // Excluding a producer cascades to the products it declares, so the
+      // exclusion warning — the only thing that says so — must list them.
+      // The `configure` call depends on the product transitively.
+      expect(workflowDependentsForExclusion(state, 'spawn')).toEqual([
+        'deploy-jar',
+        'configure',
+      ]);
+      expect(
+        deployDraftReducer(state, toggleWorkflowStep('spawn'))
+          .workflowIncludedStepIds?.spawn
+      ).toBe(false);
+    });
+
+    it('still excludes an ordinary call step', () => {
+      const state = deployDraftReducer(hydrated(), toggleWorkflowStep('configure'));
+      expect(state.workflowIncludedStepIds?.configure).toBe(false);
+      expect(
+        deployDraftReducer(state, toggleWorkflowStep('configure'))
+          .workflowIncludedStepIds?.configure
+      ).toBe(true);
+    });
   });
 });
