@@ -2,9 +2,8 @@ import type { ReactNode } from 'react';
 import { useAppSelector } from '../../../store';
 
 // Argument overrides render one field per selected chain, and the field itself
-// only carries the argument name. The chain heading is what tells the user
-// which deployment target a given override applies to, matching the cards the
-// target, salt, library and transaction overrides already use.
+// only carries the argument name, so the chain heading is what tells the user
+// which deployment target a given override applies to.
 export default function ChainOverrideCard({
   chainId,
   children,
