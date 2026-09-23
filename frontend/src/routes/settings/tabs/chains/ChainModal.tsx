@@ -1,6 +1,7 @@
 // frontend/src/routes/settings/tabs/chains/ChainModal.tsx
-// Create/edit dialog for user-defined (custom) chains. Custom chains shadow
-// chainlist entries with the same chainId and are stored per-user only.
+// Create/edit dialog for user-defined (custom) chains, also used to
+// override a chainlist entry: the saved record is merged over the entry
+// with the same chainId (the user's values win) and is stored per-user only.
 import { useEffect, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import type { ChainInfo } from '@ignite/api';
@@ -75,7 +76,11 @@ export default function ChainModal({
           style={{ maxWidth: 480, width: '90vw', padding: 16 }}
         >
           <Dialog.Title className="text-base font-semibold mb-2">
-            {chain ? 'Edit custom chain' : 'Add custom chain'}
+            {!chain
+              ? 'Add custom chain'
+              : chain.source === 'custom'
+                ? 'Edit custom chain'
+                : 'Override chain'}
           </Dialog.Title>
           <div className="grid gap-3">
             <label className="grid gap-1">

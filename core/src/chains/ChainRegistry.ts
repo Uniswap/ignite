@@ -1,9 +1,9 @@
-// Per-user chain registry: cached chainid.network dataset + user-defined
-// chains. A custom entry sharing a chainlist chainId is MERGED with that
-// entry — chainlist data wins, the custom record contributes RPC overrides
-// (see mergeCustomChain); deleting the custom entry reveals the pure
-// chainlist entry again. Chain data is per-user only and never leaves
-// ~/.ignite (SPEC §6.3).
+// Per-user chain registry, layered bottom-up: the cached chainid.network
+// dataset, then the corrections Ignite ships (see chainOverrides), then the
+// user's own chains. A custom entry sharing a registry chainId is merged
+// with that entry and the user's record wins (see mergeCustomChain);
+// deleting the custom entry reveals the registry entry again. Chain data is
+// per-user only and never leaves ~/.ignite (SPEC §6.3).
 import type {
   ChainInfo,
   ListChainsData,
@@ -11,6 +11,11 @@ import type {
   UpsertChainRequest,
 } from '@ignite/api';
 import { FileSystem } from '../filesystem/FileSystem.js';
+import {
+  applyBuiltinOverrides,
+  BUILTIN_CHAIN_OVERRIDES,
+  type ChainOverride,
+} from './chainOverrides.js';
 
 export interface ChainRegistryDeps {
   fileSystem: Pick<
@@ -23,6 +28,8 @@ export interface ChainRegistryDeps {
   >;
   fetchImpl: typeof fetch;
   now: () => number;
+  // Corrections applied over the fetched dataset (see chainOverrides).
+  overrides: Readonly<Record<number, ChainOverride>>;
 }
 
 // chainId → DefiLlama TVL (USD) and chain name, kept beside (never on) the
@@ -60,6 +67,7 @@ export class ChainRegistry {
       fileSystem: deps?.fileSystem ?? FileSystem.getInstance(),
       fetchImpl: deps?.fetchImpl ?? fetch,
       now: deps?.now ?? Date.now,
+      overrides: deps?.overrides ?? BUILTIN_CHAIN_OVERRIDES,
     };
   }
 
@@ -69,7 +77,7 @@ export class ChainRegistry {
   }): Promise<ListChainsData> {
     const cache = await this.ensureFresh();
     const custom = await this.readCustomChains();
-    const chainlist = cache?.chains ?? [];
+    const chainlist = this.registryEntries(cache);
     const overlaid = new Set(custom.map((c) => c.chainId));
     const chainlistById = new Map(chainlist.map((c) => [c.chainId, c]));
     // chainlist.org order: TVL descending (missing → 0), name ascending as
@@ -109,7 +117,9 @@ export class ChainRegistry {
     // ensureFresh never throws (offline reads null), so a custom chain still
     // resolves — as-is — when the chainlist has never been fetched.
     const cache = await this.ensureFresh();
-    const listed = cache?.chains.find((c) => c.chainId === chainId);
+    const listed = this.registryEntries(cache).find(
+      (c) => c.chainId === chainId
+    );
     if (own) return mergeCustomChain(own, listed);
     return listed;
   }
@@ -140,7 +150,9 @@ export class ChainRegistry {
     const existing = await this.readCustomChains();
     if (!existing.some((c) => c.chainId === chainId)) {
       const cache = await this.ensureFresh();
-      const onChainlist = cache?.chains.some((c) => c.chainId === chainId);
+      const onChainlist = this.registryEntries(cache).some(
+        (c) => c.chainId === chainId
+      );
       throw Object.assign(
         new Error(
           onChainlist
@@ -282,6 +294,13 @@ export class ChainRegistry {
     return null;
   }
 
+  // The dataset as Ignite presents it: the cached chainlist with the shipped
+  // corrections applied at read time, so a code update takes effect without
+  // waiting for the cache TTL or bumping the cache schema.
+  private registryEntries(cache: ChainlistCacheFile | null): ChainInfo[] {
+    return applyBuiltinOverrides(cache?.chains ?? [], this.deps.overrides);
+  }
+
   private async readCustomChains(): Promise<ChainInfo[]> {
     const p = this.deps.fileSystem.getUserChainsPath();
     try {
@@ -295,23 +314,29 @@ export class ChainRegistry {
   }
 }
 
-// Merge a custom chain with the chainlist entry sharing its chainId (no
-// counterpart → the custom entry as-is). Once a chain appears on the
-// chainlist, the chainlist entry is the source of truth for everything —
-// name, nativeCurrency, explorers, iconUrl, shortName, infoURL — and the
-// user's record degrades to RPC overrides: `rpc` is the union, chainlist
-// suggestions first, then the custom extras, deduped by exact string.
-// `source` stays 'custom' purely as a management marker (custom-first
-// grouping, custom pill, deletable — deleting the user record reveals the
-// pure chainlist entry).
+// Merge a custom chain with the registry entry sharing its chainId (no
+// counterpart → the custom entry as-is). The custom record is the user's
+// explicit correction, so it wins. A record that keeps the entry's name is
+// augmenting that chain: its currency and explorers apply, `rpc` is the
+// union with the user's URLs first, and the icon plus any field the record
+// leaves unset carry over from the entry. A record that renames it is
+// describing a different network, so nothing from the entry survives — its
+// RPCs, explorers and icon would all point at the wrong chain. `source`
+// stays 'custom' purely as a management marker (custom-first grouping,
+// custom pill, deletable — deleting the user record reveals the registry
+// entry again).
 export function mergeCustomChain(
   custom: ChainInfo,
-  chainlistEntry: ChainInfo | undefined
+  entry: ChainInfo | undefined
 ): ChainInfo {
-  if (!chainlistEntry) return custom;
+  if (!entry || custom.name !== entry.name) return custom;
   return {
-    ...chainlistEntry,
-    rpc: [...new Set([...chainlistEntry.rpc, ...custom.rpc])],
+    ...entry,
+    shortName: custom.shortName ?? entry.shortName,
+    nativeCurrency: custom.nativeCurrency,
+    rpc: [...new Set([...custom.rpc, ...entry.rpc])],
+    explorers: custom.explorers ?? entry.explorers,
+    infoURL: custom.infoURL ?? entry.infoURL,
     source: 'custom',
   };
 }
