@@ -181,8 +181,9 @@ export default function ChainsTab() {
           <div className="card-milky p-4 text-muted">Loading chains…</div>
         ) : known.length === 0 ? (
           <div className="card-milky p-4 text-muted">
-            No chains match “{query}”. Add it as a custom chain if it isn’t on
-            chainlist yet.
+            {custom.length > 0
+              ? `Every chain matching “${query}” is listed above: a custom record replaces the chainlist entry with the same id.`
+              : `No chains match “${query}”. Add it as a custom chain if it isn’t on chainlist yet.`}
           </div>
         ) : (
           known.map(row)
