@@ -46,12 +46,9 @@ export default function ChainsTab() {
   );
 
   const row = (chain: ChainInfo) => {
-    // Single-action click rule: known chains expose only the RPC button, so
-    // clicking anywhere on the row opens the RPC modal. Custom chains have
-    // three buttons (RPC / edit / delete), so the row body stays inert and
-    // only the buttons act.
-    const rowAction =
-      chain.source === 'custom' ? undefined : () => setRpcChain(chain);
+    // Every row exposes at least two buttons (RPC / override or edit), so
+    // the row body stays inert and only the buttons act; a row-wide click
+    // would have to pick one of them.
     const rowClass = 'glass-surface nav-item flex items-center justify-between';
     // .nav-item has no padding outside the sidebar; match the ProfilesTab
     // row convention so the tile sits inside the card with breathing room.
@@ -88,61 +85,37 @@ export default function ChainsTab() {
               <PlugZap size={16} />
             </button>
           </Tooltip>
+          <Tooltip
+            label={chain.source === 'custom' ? 'Edit chain' : 'Override chain'}
+          >
+            <button
+              className="btn btn-sm btn-secondary-borderless"
+              onClick={(e) => {
+                e.stopPropagation();
+                setChainModal({ open: true, chain });
+              }}
+              aria-label={`${chain.source === 'custom' ? 'Edit' : 'Override'} ${chain.name}`}
+            >
+              <Pencil size={16} />
+            </button>
+          </Tooltip>
           {chain.source === 'custom' && (
-            <>
-              <Tooltip label="Edit chain">
-                <button
-                  className="btn btn-sm btn-secondary-borderless"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setChainModal({ open: true, chain });
-                  }}
-                  aria-label={`Edit ${chain.name}`}
-                >
-                  <Pencil size={16} />
-                </button>
-              </Tooltip>
-              <Tooltip label="Delete chain">
-                <button
-                  className="btn btn-sm btn-secondary-borderless"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDeleteTarget(chain);
-                  }}
-                  aria-label={`Delete ${chain.name}`}
-                >
-                  <Trash2 size={16} />
-                </button>
-              </Tooltip>
-            </>
+            <Tooltip label="Delete chain">
+              <button
+                className="btn btn-sm btn-secondary-borderless"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDeleteTarget(chain);
+                }}
+                aria-label={`Delete ${chain.name}`}
+              >
+                <Trash2 size={16} />
+              </button>
+            </Tooltip>
           )}
         </div>
       </>
     );
-    if (rowAction) {
-      return (
-        <div
-          key={chain.chainId}
-          className={`${rowClass} cursor-pointer`}
-          style={rowStyle}
-          role="button"
-          tabIndex={0}
-          aria-label={`RPC endpoints for ${chain.name}`}
-          onClick={rowAction}
-          onKeyDown={(e) => {
-            if (
-              (e.key === 'Enter' || e.key === ' ') &&
-              e.target === e.currentTarget
-            ) {
-              e.preventDefault();
-              rowAction();
-            }
-          }}
-        >
-          {body}
-        </div>
-      );
-    }
     return (
       <div key={chain.chainId} className={rowClass} style={rowStyle}>
         {body}
@@ -208,8 +181,9 @@ export default function ChainsTab() {
           <div className="card-milky p-4 text-muted">Loading chains…</div>
         ) : known.length === 0 ? (
           <div className="card-milky p-4 text-muted">
-            No chains match “{query}”. Add it as a custom chain if it isn’t on
-            chainlist yet.
+            {custom.length > 0
+              ? `Every chain matching “${query}” is listed under Custom chains above.`
+              : `No chains match “${query}”. Add it as a custom chain if it isn’t on chainlist yet.`}
           </div>
         ) : (
           known.map(row)
