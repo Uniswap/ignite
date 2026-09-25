@@ -206,8 +206,8 @@ describe('ChainRegistry', () => {
   });
 
   // A custom record is the user's correction and wins over the registry
-  // entry sharing its chainId: same name → it augments that chain, different
-  // name → it describes another network and shadows the entry entirely.
+  // entry sharing its chainId: by default it augments that chain; saved with
+  // `replaces` it describes another network and shadows the entry entirely.
   it('a same-named custom record augments the chainlist entry', async () => {
     const { deps } = makeDeps();
     const registry = new ChainRegistry(deps);
@@ -246,7 +246,28 @@ describe('ChainRegistry', () => {
     expect(list.chains[0]).toEqual(chain);
   });
 
-  it('a renamed custom record shadows the chainlist entry entirely', async () => {
+  it('a renamed custom record without the flag still augments the entry', async () => {
+    const { deps } = makeDeps();
+    const registry = new ChainRegistry(deps);
+    await registry.upsertCustomChain({
+      chainId: 1,
+      name: 'Ethereum mainnet',
+      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    });
+    // The name applies but the entry's explorers, RPCs and icon carry over:
+    // a chainlist rename must not turn a correction into a shadowing record.
+    const chain = await registry.getChain(1);
+    expect(chain?.name).toBe('Ethereum mainnet');
+    expect(chain?.explorers).toEqual([
+      { name: 'etherscan', url: 'https://etherscan.io', standard: 'EIP3091' },
+    ]);
+    expect(chain?.rpc).toEqual(['https://eth.llamarpc.com']);
+    expect(chain?.iconUrl).toBe(
+      'https://icons.llamao.fi/icons/chains/rsz_ethereum.jpg'
+    );
+  });
+
+  it('a custom record saved with replaces shadows the chainlist entry entirely', async () => {
     const { deps } = makeDeps();
     const registry = new ChainRegistry(deps);
     await registry.upsertCustomChain({
@@ -254,6 +275,7 @@ describe('ChainRegistry', () => {
       name: 'My Fork',
       nativeCurrency: { name: 'Fork Ether', symbol: 'fETH', decimals: 18 },
       rpc: ['https://rpc.myfork.local'],
+      replaces: true,
     });
     // Nothing from the entry survives: its RPCs, explorers and icon would
     // all point at the wrong network.
@@ -266,6 +288,7 @@ describe('ChainRegistry', () => {
       explorers: undefined,
       infoURL: undefined,
       source: 'custom',
+      replaces: true,
     });
     const list = await registry.listChains();
     expect(list.chains.filter((c) => c.chainId === 1)).toHaveLength(1);
@@ -327,9 +350,18 @@ describe('ChainRegistry', () => {
       });
     });
 
-    it('returns the custom chain untouched when it renames the entry', () => {
+    it('applies a new name but keeps augmenting without the replaces flag', () => {
       const renamed = { ...custom, name: 'My Fork' };
-      expect(mergeCustomChain(renamed, entry)).toBe(renamed);
+      expect(mergeCustomChain(renamed, entry)).toMatchObject({
+        name: 'My Fork',
+        explorers: entry.explorers,
+        iconUrl: entry.iconUrl,
+      });
+    });
+
+    it('returns the custom chain untouched when it replaces the entry', () => {
+      const replacing = { ...custom, name: 'My Fork', replaces: true };
+      expect(mergeCustomChain(replacing, entry)).toBe(replacing);
     });
   });
 

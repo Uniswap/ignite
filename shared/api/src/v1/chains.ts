@@ -31,6 +31,10 @@ export interface ChainInfo {
   infoURL?: string;
   iconUrl?: string; // derived from the chainlist icon slug; custom chains have none
   source: "chainlist" | "custom";
+  // Custom records only: true means the record describes a different network
+  // than the chainlist entry sharing its chainId and shadows it entirely;
+  // unset means it augments that entry.
+  replaces?: boolean;
 }
 
 export interface ListChainsData {
@@ -51,6 +55,7 @@ export interface UpsertChainRequest {
   rpc?: string[];
   explorers?: ChainExplorer[];
   infoURL?: string;
+  replaces?: boolean;
 }
 
 export interface RefreshChainsData {
@@ -181,6 +186,7 @@ export const ChainInfoSchema = z.object({
   infoURL: z.string().optional(),
   iconUrl: z.string().optional(),
   source: z.enum(["chainlist", "custom"]),
+  replaces: z.boolean().optional(),
 });
 
 export const RpcVerificationResultSchema = z.object({
@@ -243,6 +249,7 @@ export const UpsertChainRequestSchema =
       rpc: z.array(z.string()).optional(),
       explorers: z.array(ChainExplorerSchema).optional(),
       infoURL: z.string().optional(),
+      replaces: z.boolean().optional(),
     }),
   );
 

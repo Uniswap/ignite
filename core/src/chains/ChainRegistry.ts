@@ -134,6 +134,7 @@ export class ChainRegistry {
       explorers: input.explorers,
       infoURL: input.infoURL,
       source: 'custom',
+      replaces: input.replaces,
     };
     const existing = await this.readCustomChains();
     const next = existing.filter((c) => c.chainId !== chain.chainId);
@@ -316,22 +317,25 @@ export class ChainRegistry {
 
 // Merge a custom chain with the registry entry sharing its chainId (no
 // counterpart → the custom entry as-is). The custom record is the user's
-// explicit correction, so it wins. A record that keeps the entry's name is
-// augmenting that chain: its currency and explorers apply, `rpc` is the
-// union with the user's URLs first, and the icon plus any field the record
-// leaves unset carry over from the entry. A record that renames it is
-// describing a different network, so nothing from the entry survives — its
-// RPCs, explorers and icon would all point at the wrong chain. `source`
-// stays 'custom' purely as a management marker (custom-first grouping,
-// custom pill, deletable — deleting the user record reveals the registry
-// entry again).
+// explicit correction, so it wins. By default a record augments the entry:
+// its name, currency and explorers apply, `rpc` is the union with the user's
+// URLs first, and the icon plus any field the record leaves unset carry over
+// from the entry. A record saved with `replaces` describes a different
+// network, so nothing from the entry survives — its RPCs, explorers and icon
+// would all point at the wrong chain. The flag is explicit rather than
+// inferred from the name so a chainlist rename, or a record saved before the
+// flag existed, cannot silently drop the entry's explorers, which
+// verification relies on. `source` stays 'custom' purely as a management
+// marker (custom-first grouping, custom pill, deletable — deleting the user
+// record reveals the registry entry again).
 export function mergeCustomChain(
   custom: ChainInfo,
   entry: ChainInfo | undefined
 ): ChainInfo {
-  if (!entry || custom.name !== entry.name) return custom;
+  if (!entry || custom.replaces) return custom;
   return {
     ...entry,
+    name: custom.name,
     shortName: custom.shortName ?? entry.shortName,
     nativeCurrency: custom.nativeCurrency,
     rpc: [...new Set([...custom.rpc, ...entry.rpc])],

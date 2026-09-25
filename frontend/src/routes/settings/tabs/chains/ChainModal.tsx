@@ -49,18 +49,32 @@ export default function ChainModal({
     explorerValid;
 
   const handleSave = () => {
+    const trimmedName = name.trim();
+    const trimmedSymbol = symbol.trim();
     const trimmedExplorer = explorerUrl.trim();
+    // The form shows a subset of the record, so untouched fields go back as
+    // they were: saving without edits must not rewrite the chain.
+    const currencyUnchanged = trimmedSymbol === chain?.nativeCurrency.symbol;
+    const explorersUnchanged =
+      trimmedExplorer === (chain?.explorers?.[0]?.url ?? '');
     dispatch(
       chainsApi.upsertChain({
         chainId: chainIdNum,
-        name: name.trim(),
+        name: trimmedName,
         nativeCurrency: {
-          name: symbol.trim(),
-          symbol: symbol.trim(),
+          name: currencyUnchanged ? chain.nativeCurrency.name : trimmedSymbol,
+          symbol: trimmedSymbol,
           decimals: decimalsNum,
         },
-        explorers: trimmedExplorer
-          ? [{ name: 'explorer', url: trimmedExplorer }]
+        explorers: explorersUnchanged
+          ? chain?.explorers
+          : trimmedExplorer
+            ? [{ name: 'explorer', url: trimmedExplorer }]
+            : undefined,
+        // Renaming a chainlist entry means the record describes a different
+        // network; the registry then shadows the entry instead of augmenting it.
+        replaces: chain
+          ? chain.replaces || trimmedName !== chain.name
           : undefined,
       })
     );
